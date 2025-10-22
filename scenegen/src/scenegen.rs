@@ -1,8 +1,4 @@
-use scenevm::SceneVM;
-
-#[cfg(not(target_arch = "wasm32"))]
-use scenevm::Atom;
-
+use scenevm::{Atom, SceneVM};
 use theframework::prelude::*;
 
 pub struct Circle {
@@ -19,20 +15,40 @@ impl TheTrait for Circle {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    // #[cfg(not(target_arch = "wasm32"))]
     fn init(&mut self, _ctx: &mut TheContext) {
-        if let Some((data, width, height)) = self
-            .vm
-            .load_image_rgba(std::path::Path::new("images/logo.png"))
-        {
-            self.vm.execute(Atom::AddTile {
-                id: Uuid::new_v4(),
-                width: width,
-                height: height,
-                frames: vec![data],
-            });
-            self.vm.execute(Atom::BuildAtlas);
-        }
+        let tile_id = Uuid::new_v4();
+
+        // if let Some((data, width, height)) = self
+        //     .vm
+        //     .load_image_rgba(std::path::Path::new("images/logo.png"))
+        // {
+        //     self.vm.execute(Atom::AddTile {
+        //         id: tile_id,
+        //         width: width,
+        //         height: height,
+        //         frames: vec![data],
+        //     });
+        //     self.vm.execute(Atom::BuildAtlas);
+        // }
+
+        self.vm.execute(Atom::AddSolid {
+            id: tile_id,
+            color: [255, 0, 0, 255],
+        });
+        self.vm.execute(Atom::BuildAtlas);
+        self.vm.execute(Atom::AddPoly {
+            id: Uuid::new_v4(),
+            tile_id: tile_id,
+            vertices: vec![
+                [100.0, 100.0],
+                [300.0, 100.0],
+                [300.0, 300.0],
+                [100.0, 300.0],
+            ],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![(0, 1, 2), (0, 2, 3)],
+        });
     }
 
     /// Draw a circle in the middle of the window

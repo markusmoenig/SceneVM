@@ -3,7 +3,13 @@ use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 use vek::Vec4;
-use vek::{Vec2, Vec3};
+use vek::{Mat3, Vec3};
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Vert2DPod {
+    pub pos: [f32; 2],
+    pub uv: [f32; 2],
+}
 
 /// VM instruction set
 #[derive(Debug)]
@@ -15,6 +21,8 @@ pub enum Atom {
         height: u32,
         frames: Vec<Vec<u8>>, // frames[f][row*width*4 .. (row+1)*width*4]
     },
+    /// Add a solid-color 1x1 tile with `id` and RGBA color.
+    AddSolid { id: Uuid, color: [u8; 4] },
     /// Build the atlas for all frames
     BuildAtlas,
     /// Add a polygon (world coords) that references a tile by UUID into the CURRENT chunk; indices are local to the chunk.
@@ -37,6 +45,8 @@ pub enum Atom {
     SetCompute3DParams(Vec4<f32>),
     /// Switch between 2D and 3D compute drawing
     SetRenderMode(RenderMode),
+    /// Set a 2D transform (Mat3) applied on CPU to polygon vertices before 2D compute draw
+    SetTransform2D(Mat3<f32>),
     /// Provide a custom WGSL body for the 2D compute shader. The VM will prepend a header and compile at runtime.
     SetSource2D(String),
     /// Provide a custom WGSL body for the 3D compute shader. The VM will prepend a header and compile at runtime.
@@ -60,6 +70,7 @@ pub struct Poly2D {
     pub vertices: Vec<[f32; 2]>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<(usize, usize, usize)>, // triangle list, LOCAL to its chunk (Rusterix-compatible)
+    pub transform: Mat3<f32>,                // per-poly local transform
 }
 
 #[derive(Debug, Default, Clone)]
@@ -95,6 +106,8 @@ pub struct VMGpu {
     pub u3d_bgl: Option<wgpu::BindGroupLayout>,
     pub u2d_bg: Option<wgpu::BindGroup>,
     pub u3d_bg: Option<wgpu::BindGroup>,
+    pub v2d_ssbo: Option<wgpu::Buffer>,
+    pub i2d_ssbo: Option<wgpu::Buffer>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -192,6 +205,11 @@ struct U2D { param: vec4<f32>, fb_size: vec2<u32>, _pad: vec2<u32>, };
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(3) var atlas_smp: sampler;
+struct Vert { pos: vec2<f32>, uv: vec2<f32> };
+struct Verts { data: array<Vert> };
+struct Indices { data: array<u32> };
+@group(0) @binding(4) var<storage, read> verts: Verts;
+@group(0) @binding(5) var<storage, read> indices: Indices;
 
 // Helpers
 fn sv_write(px: u32, py: u32, c: vec4<f32>) {
@@ -226,12 +244,59 @@ fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
 pub const DEFAULT_2D_BODY: &str = r#"
 @compute @workgroup_size(8,8,1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  // bounds check
   if (gid.x >= U.fb_size.x || gid.y >= U.fb_size.y) { return; }
-  let uv = vec2<f32>(f32(gid.x)/f32(U.fb_size.x), f32(gid.y)/f32(U.fb_size.y));
-  let base = vec4<f32>(U.param.xyz, 1.0) * vec4<f32>(uv.x, uv.y, 1.0, 1.0);
-  // Sample atlas at uv (for demo); your own body can use proper rect remapping.
-  let tex = sv_sample(uv);
-  sv_write(gid.x, gid.y, mix(base, tex, 0.5));
+
+  // pixel center in screen space
+  let p = vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5);
+
+  let tri_count = arrayLength(&indices.data) / 3u;
+
+  // loop all triangles (MVP)
+  for (var t: u32 = 0u; t < tri_count; t = t + 1u) {
+    let i0 = indices.data[3u*t + 0u];
+    let i1 = indices.data[3u*t + 1u];
+    let i2 = indices.data[3u*t + 2u];
+    let a = verts.data[i0].pos;
+    let b = verts.data[i1].pos;
+    let c = verts.data[i2].pos;
+
+    // quick bbox reject
+    let minx = min(a.x, min(b.x, c.x));
+    let maxx = max(a.x, max(b.x, c.x));
+    let miny = min(a.y, min(b.y, c.y));
+    let maxy = max(a.y, max(b.y, c.y));
+    if (p.x < minx || p.x >= maxx || p.y < miny || p.y >= maxy) { continue; }
+
+    // edge functions
+    let e0 = (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
+    let e1 = (p.x - b.x) * (c.y - b.y) - (p.y - b.y) * (c.x - b.x);
+    let e2 = (p.x - c.x) * (a.y - c.y) - (p.y - c.y) * (a.x - c.x);
+
+    // accept either winding
+    if ((e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)) {
+      // Compute barycentrics using triangle area
+      let area = abs((b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x));
+      if (area > 0.0) { // guard degenerate
+        let w0 = abs((b.x - p.x)*(c.y - p.y) - (b.y - p.y)*(c.x - p.x)) / area;
+        let w1 = abs((c.x - p.x)*(a.y - p.y) - (c.y - p.y)*(a.x - p.x)) / area;
+        let w2 = 1.0 - w0 - w1;
+
+        // Interpolate UVs and sample
+        let uv0 = verts.data[i0].uv;
+        let uv1 = verts.data[i1].uv;
+        let uv2 = verts.data[i2].uv;
+        let uv = uv0 * w0 + uv1 * w1 + uv2 * w2;
+
+        let col = sv_sample(uv);
+        sv_write(gid.x, gid.y, col);
+        return; // early-out once a covering tri is drawn
+      }
+    }
+  }
+
+  // No triangle covered this pixel → leave as-is (or clear below)
+  // sv_write(gid.x, gid.y, vec4<f32>(0.0, 0.0, 0.0, 1.0));
 }
 "#;
 
@@ -274,6 +339,7 @@ pub struct VM {
     // --- Programmable compute shader sources
     pub source2d: String,
     pub source3d: String,
+    pub transform2d: Mat3<f32>,
 }
 
 impl VM {
@@ -293,6 +359,7 @@ impl VM {
             compute3d_params: Vec4::new(1.0, 1.0, 1.0, 1.0),
             source2d: DEFAULT_2D_BODY.to_string(),
             source3d: DEFAULT_3D_BODY.to_string(),
+            transform2d: Mat3::identity(),
         }
     }
 
@@ -326,6 +393,22 @@ impl VM {
                         w: width,
                         h: height,
                         frames,
+                    },
+                );
+                if is_new {
+                    self.tiles_order.push(id);
+                }
+            }
+            Atom::AddSolid { id, color } => {
+                // Create a 1x1 tile with a single frame of the given color
+                let frame = color.to_vec();
+                let is_new = !self.tiles_map.contains_key(&id);
+                self.tiles_map.insert(
+                    id,
+                    Tile {
+                        w: 1,
+                        h: 1,
+                        frames: vec![frame],
                     },
                 );
                 if is_new {
@@ -366,6 +449,7 @@ impl VM {
                     vertices,
                     uvs,
                     indices,
+                    transform: Mat3::identity(),
                 };
                 self.chunks_map
                     .entry(chunk_id)
@@ -396,6 +480,9 @@ impl VM {
                 if let Some(g) = self.gpu.as_mut() {
                     g.compute3d_pipeline = None;
                 }
+            }
+            Atom::SetTransform2D(m) => {
+                self.transform2d = m;
             }
             Atom::ClearAtlas => {
                 self.atlas_map.clear();
@@ -534,6 +621,8 @@ impl VM {
             u3d_bgl: None,
             u2d_bg: None,
             u3d_bg: None,
+            v2d_ssbo: None,
+            i2d_ssbo: None,
         });
     }
 
@@ -741,6 +830,28 @@ impl VM {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    // verts SSBO
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // indices SSBO
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -896,10 +1007,75 @@ impl VM {
         // Ensure atlas is available for sampling on GPU
         self.atlas.ensure_gpu_with(device);
         self.upload_atlas_to_gpu_with(device, queue);
-        // Build bind group with surface view and atlas
+
+        // Build transformed 2D geometry (screen-space) and upload to SSBOs
+        let mut verts_flat: Vec<Vert2DPod> = Vec::new();
+        let mut indices_flat: Vec<u32> = Vec::new();
+        for (poly, rect_opt) in self.polys_2d() {
+            let rect = if let Some(r) = rect_opt { r } else { continue };
+            let base = verts_flat.len() as u32;
+            let atlas_w = self.atlas.width as f32;
+            let atlas_h = self.atlas.height as f32;
+
+            for (i, v) in poly.vertices.iter().enumerate() {
+                // Apply local and global transforms
+                let local_p = poly.transform * Vec3::new(v[0], v[1], 1.0);
+                let world_p = self.transform2d * local_p;
+
+                // Remap UV into atlas space
+                let base_uv = poly.uvs[i];
+                let u = (rect.x as f32 + base_uv[0] * rect.w as f32) / atlas_w;
+                let v = (rect.y as f32 + base_uv[1] * rect.h as f32) / atlas_h;
+
+                verts_flat.push(Vert2DPod {
+                    pos: [world_p.x, world_p.y],
+                    uv: [u, v],
+                });
+            }
+
+            for &(a, b, c) in &poly.indices {
+                indices_flat.extend_from_slice(&[
+                    base + a as u32,
+                    base + b as u32,
+                    base + c as u32,
+                ]);
+            }
+        }
+        use wgpu::util::DeviceExt;
+        // Ensure non-zero-sized buffers for binding validation
+        let vbytes: Vec<u8> = if verts_flat.is_empty() {
+            // one dummy Vert2DPod (pos=0, uv=0) -> 16 bytes
+            bytemuck::bytes_of(&Vert2DPod {
+                pos: [0.0, 0.0],
+                uv: [0.0, 0.0],
+            })
+            .to_vec()
+        } else {
+            bytemuck::cast_slice(&verts_flat).to_vec()
+        };
+        let ibytes: Vec<u8> = if indices_flat.is_empty() {
+            // one dummy index
+            (0u32).to_ne_bytes().to_vec()
+        } else {
+            bytemuck::cast_slice(&indices_flat).to_vec()
+        };
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-2d-verts-ssbo"),
+            contents: &vbytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-2d-indices-ssbo"),
+            contents: &ibytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let g = self.gpu.as_mut().unwrap();
+        g.v2d_ssbo = Some(vbuf);
+        g.i2d_ssbo = Some(ibuf);
+
+        // Build bind group with surface view and atlas, plus 2D geometry SSBOs
         let view = &surface.gpu.as_ref().unwrap().view;
         let atlas_view = &self.atlas.gpu.as_ref().unwrap().view;
-        let g = self.gpu.as_mut().unwrap();
         g.u2d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vm-u2d-bg"),
             layout: g.u2d_bgl.as_ref().unwrap(),
@@ -919,6 +1095,14 @@ impl VM {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&g.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: g.v2d_ssbo.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: g.i2d_ssbo.as_ref().unwrap().as_entire_binding(),
                 },
             ],
         }));
