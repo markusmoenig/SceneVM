@@ -1,0 +1,8 @@
+[package]
+name = "scenegen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scenevm = { path = ".." }
+theframework.workspace = true
