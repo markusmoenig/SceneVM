@@ -4,6 +4,19 @@ use rustc_hash::FxHashMap;
 use uuid::Uuid;
 use vek::Vec4;
 use vek::{Mat3, Vec3};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+
+/// The Geometry Identifier for polygons and triangles.
+pub enum GeoId {
+    Unknown(u32),
+    Vertex(u32),
+    Linedef(u32),
+    Sector(u32),
+    Character(u32),
+    Item(u32),
+    Triangle(u32),
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Vert2DPod {
@@ -22,27 +35,48 @@ pub enum Atom {
         frames: Vec<Vec<u8>>, // frames[f][row*width*4 .. (row+1)*width*4]
     },
     /// Add a solid-color 1x1 tile with `id` and RGBA color.
-    AddSolid { id: Uuid, color: [u8; 4] },
+    AddSolid {
+        id: Uuid,
+        color: [u8; 4],
+    },
     /// Build the atlas for all frames
     BuildAtlas,
     /// Add a polygon (world coords) that references a tile by UUID into the CURRENT chunk; indices are local to the chunk.
     AddPoly {
-        id: Uuid,      // polygon id (stable within the chunk)
+        id: GeoId,     // geometry id (stable within the chunk)
         tile_id: Uuid, // which tile's frames to sample from
         vertices: Vec<[f32; 2]>,
         uvs: Vec<[f32; 2]>,
         indices: Vec<(usize, usize, usize)>,
     },
+    /// Add a simple 2D line strip as thick segments tessellated into quads (no caps/joins)
+    /// Points are in world coordinates; width is in the same units.
+    AddLineStrip2D {
+        id: GeoId,
+        tile_id: Uuid,
+        points: Vec<[f32; 2]>,
+        width: f32,
+    },
     /// Create an empty chunk (no switch)
-    NewChunk { id: Uuid },
+    NewChunk {
+        id: Uuid,
+    },
+    /// Remove an existing chunk; if it is the current chunk, unset it
+    RemoveChunk {
+        id: Uuid,
+    },
     /// Switch the current chunk (created if missing)
-    SetCurrentChunk { id: Uuid },
+    SetCurrentChunk {
+        id: Uuid,
+    },
     /// Set the current animation counter (frame index modulo each tile's frame count)
     SetAnimationCounter(usize),
-    /// Set raw 2D compute params (e.g., color or knobs) for prototyping
-    SetCompute2DParams(Vec4<f32>),
-    /// Set raw 3D compute params (e.g., exposure) for prototyping
-    SetCompute3DParams(Vec4<f32>),
+    /// Set background color/params shared by 2D and 3D
+    SetBackground(Vec4<f32>),
+    /// General-purpose vec4 slots shared by 2D and 3D
+    SetGP0(Vec4<f32>),
+    SetGP1(Vec4<f32>),
+    SetGP2(Vec4<f32>),
     /// Switch between 2D and 3D compute drawing
     SetRenderMode(RenderMode),
     /// Set a 2D transform (Mat3) applied on CPU to polygon vertices before 2D compute draw
@@ -51,8 +85,10 @@ pub enum Atom {
     SetSource2D(String),
     /// Provide a custom WGSL body for the 3D compute shader. The VM will prepend a header and compile at runtime.
     SetSource3D(String),
-    /// Clear the atlas and tiles
-    ClearAtlas,
+    /// Clear EVERYTHING: tiles, atlas, scene (chunks), counters and modes
+    Clear,
+    /// Clear only the tiles and atlas (keep scene/chunks intact)
+    ClearTiles,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +101,7 @@ pub struct AtlasEntry {
 
 #[derive(Debug, Clone)]
 pub struct Poly2D {
-    pub id: Uuid,
+    pub id: GeoId,
     pub tile_id: Uuid,
     pub vertices: Vec<[f32; 2]>,
     pub uvs: Vec<[f32; 2]>,
@@ -75,7 +111,7 @@ pub struct Poly2D {
 
 #[derive(Debug, Default, Clone)]
 pub struct Chunk {
-    pub polys_map: FxHashMap<Uuid, Poly2D>,
+    pub polys_map: FxHashMap<GeoId, Poly2D>,
 }
 
 #[derive(Debug)]
@@ -108,6 +144,10 @@ pub struct VMGpu {
     pub u3d_bg: Option<wgpu::BindGroup>,
     pub v2d_ssbo: Option<wgpu::Buffer>,
     pub i2d_ssbo: Option<wgpu::Buffer>,
+    // --- Tiling
+    pub tile_offsets: Option<wgpu::Buffer>,
+    pub tile_counts: Option<wgpu::Buffer>,
+    pub tile_tris: Option<wgpu::Buffer>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -155,21 +195,36 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Compute2DUniforms {
-    pub param: [f32; 4],
+    pub background: [f32; 4], // was param
     pub fb_size: [u32; 2],
-    _pad: [u32; 2],
+    _pad0: [u32; 2],
+    pub gp0: [f32; 4], // general-purpose vec4s
+    pub gp1: [f32; 4],
+    pub gp2: [f32; 4],
+    // Mat3<f32> as 3 padded vec4 columns (col-major), .w is padding
+    pub mat2d_c0: [f32; 4],
+    pub mat2d_c1: [f32; 4],
+    pub mat2d_c2: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Compute3DUniforms {
-    pub param: [f32; 4],
+    pub background: [f32; 4],
     pub fb_size: [u32; 2],
-    _pad: [u32; 2],
+    _pad0: [u32; 2],
+    pub gp0: [f32; 4],
+    pub gp1: [f32; 4],
+    pub gp2: [f32; 4],
+    // Mat4<f32> as 4 vec4 columns (col-major)
+    pub mat3d_c0: [f32; 4],
+    pub mat3d_c1: [f32; 4],
+    pub mat3d_c2: [f32; 4],
+    pub mat3d_c3: [f32; 4],
 }
 
 pub const SCENEVM_2D_CS_WGSL: &str = r#"
-struct U2D { param: vec4<f32>, fb_size: vec2<u32>, _pad: vec2<u32>, };
+struct U2D { background: vec4<f32>, fb_size: vec2<u32>, _pad: vec2<u32>, };
 @group(0) @binding(0) var<uniform> U: U2D;
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
 
@@ -178,29 +233,36 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x >= U.fb_size.x || gid.y >= U.fb_size.y) { return; }
   let uv = vec2<f32>(f32(gid.x)/f32(U.fb_size.x), f32(gid.y)/f32(U.fb_size.y));
   // For now: solid color with simple uv tint; later: raster & lighting
-  let col = /*vec4<f32>(U.param.xyz, 1.0); */ vec4<f32>(uv.x, uv.y, 0.0, 1.0);
+  let col = /*vec4<f32>(U.background.xyz, 1.0); */ vec4<f32>(uv.x, uv.y, 0.0, 1.0);
   textureStore(color_out, vec2<i32>(i32(gid.x), i32(gid.y)), col);
 }
 "#;
 
 pub const SCENEVM_3D_CS_WGSL: &str = r#"
-struct U3D { param: vec4<f32>, fb_size: vec2<u32>, _pad: vec2<u32>, };
+struct U3D { background: vec4<f32>, fb_size: vec2<u32>, _pad: vec2<u32>, };
 @group(0) @binding(0) var<uniform> U: U3D;
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
 
 @compute @workgroup_size(8,8,1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x >= U.fb_size.x || gid.y >= U.fb_size.y) { return; }
-  // Placeholder: gradient with param.x as brightness; later we pathtrace here
+  // Placeholder: gradient with background.x as brightness; later we pathtrace here
   let uv = vec2<f32>(f32(gid.x)/f32(U.fb_size.x), f32(gid.y)/f32(U.fb_size.y));
-  let b = U.param.x;
+  let b = U.background.x;
   let col = vec4<f32>(uv.x*b, uv.y*b, b, 1.0);
   textureStore(color_out, vec2<i32>(i32(gid.x), i32(gid.y)), col);
 }
 "#;
 
 pub const SCENEVM_2D_HEADER: &str = r#"
-struct U2D { param: vec4<f32>, fb_size: vec2<u32>, _pad: vec2<u32>, };
+struct U2D {
+  background: vec4<f32>,
+  fb_size: vec2<u32>, _pad0: vec2<u32>,
+  gp0: vec4<f32>, gp1: vec4<f32>, gp2: vec4<f32>,
+  mat2d_c0: vec4<f32>,
+  mat2d_c1: vec4<f32>,
+  mat2d_c2: vec4<f32>,
+};
 @group(0) @binding(0) var<uniform> U: U2D;
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var atlas_tex: texture_2d<f32>;
@@ -210,21 +272,33 @@ struct Verts { data: array<Vert> };
 struct Indices { data: array<u32> };
 @group(0) @binding(4) var<storage, read> verts: Verts;
 @group(0) @binding(5) var<storage, read> indices: Indices;
+struct U32s { data: array<u32> };
+@group(0) @binding(6) var<storage, read> tile_offsets: U32s;
+@group(0) @binding(7) var<storage, read> tile_counts:  U32s;
+@group(0) @binding(8) var<storage, read> tile_tris:    U32s;
 
-// Helpers
+fn tiles_x() -> u32 { return (U.fb_size.x + 7u) / 8u; }
+fn tiles_y() -> u32 { return (U.fb_size.y + 7u) / 8u; }
+fn tile_index(tx: u32, ty: u32) -> u32 { return ty * tiles_x() + tx; }
+
 fn sv_write(px: u32, py: u32, c: vec4<f32>) {
   textureStore(color_out, vec2<i32>(i32(px), i32(py)), c);
 }
 fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
   return textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
 }
-
-// @compute @workgroup_size(8,8,1)
-// fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) { ... }
 "#;
 
 pub const SCENEVM_3D_HEADER: &str = r#"
-struct U3D { param: vec4<f32>, fb_size: vec2<u32>, _pad: vec2<u32>, };
+struct U3D {
+  background: vec4<f32>,
+  fb_size: vec2<u32>, _pad0: vec2<u32>,
+  gp0: vec4<f32>, gp1: vec4<f32>, gp2: vec4<f32>,
+  mat3d_c0: vec4<f32>,
+  mat3d_c1: vec4<f32>,
+  mat3d_c2: vec4<f32>,
+  mat3d_c3: vec4<f32>,
+};
 @group(0) @binding(0) var<uniform> U: U3D;
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var atlas_tex: texture_2d<f32>;
@@ -236,24 +310,29 @@ fn sv_write(px: u32, py: u32, c: vec4<f32>) {
 fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
   return textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
 }
-
-// @compute @workgroup_size(8,8,1)
-// fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) { ... }
 "#;
 
 pub const DEFAULT_2D_BODY: &str = r#"
 @compute @workgroup_size(8,8,1)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  // bounds check
-  if (gid.x >= U.fb_size.x || gid.y >= U.fb_size.y) { return; }
+fn cs_main(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(workgroup_id) wg: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>
+) {
+  let px = wg.x * 8u + lid.x;
+  let py = wg.y * 8u + lid.y;
+  if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
+  let p = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
 
-  // pixel center in screen space
-  let p = vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5);
+  // Clear to background first
+  sv_write(px, py, U.background);
 
-  let tri_count = arrayLength(&indices.data) / 3u;
+  let tid = tile_index(wg.x, wg.y);
+  let off = tile_offsets.data[tid];
+  let cnt = tile_counts.data[tid];
 
-  // loop all triangles (MVP)
-  for (var t: u32 = 0u; t < tri_count; t = t + 1u) {
+  for (var k: u32 = 0u; k < cnt; k = k + 1u) {
+    let t  = tile_tris.data[off + k];
     let i0 = indices.data[3u*t + 0u];
     let i1 = indices.data[3u*t + 1u];
     let i2 = indices.data[3u*t + 2u];
@@ -261,42 +340,24 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b = verts.data[i1].pos;
     let c = verts.data[i2].pos;
 
-    // quick bbox reject
-    let minx = min(a.x, min(b.x, c.x));
-    let maxx = max(a.x, max(b.x, c.x));
-    let miny = min(a.y, min(b.y, c.y));
-    let maxy = max(a.y, max(b.y, c.y));
-    if (p.x < minx || p.x >= maxx || p.y < miny || p.y >= maxy) { continue; }
+    let e0 = (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
+    let e1 = (p.x - b.x)*(c.y - b.y) - (p.y - b.y)*(c.x - a.x + a.x - b.x); // keep form consistent
+    let e2 = (p.x - c.x)*(a.y - c.y) - (p.y - c.y)*(a.x - c.x);
 
-    // edge functions
-    let e0 = (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
-    let e1 = (p.x - b.x) * (c.y - b.y) - (p.y - b.y) * (c.x - b.x);
-    let e2 = (p.x - c.x) * (a.y - c.y) - (p.y - c.y) * (a.x - c.x);
-
-    // accept either winding
+    // Use sign-consistent edge test
     if ((e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)) {
-      // Compute barycentrics using triangle area
       let area = abs((b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x));
-      if (area > 0.0) { // guard degenerate
+      if (area > 0.0) {
         let w0 = abs((b.x - p.x)*(c.y - p.y) - (b.y - p.y)*(c.x - p.x)) / area;
         let w1 = abs((c.x - p.x)*(a.y - p.y) - (c.y - p.y)*(a.x - p.x)) / area;
         let w2 = 1.0 - w0 - w1;
-
-        // Interpolate UVs and sample
-        let uv0 = verts.data[i0].uv;
-        let uv1 = verts.data[i1].uv;
-        let uv2 = verts.data[i2].uv;
-        let uv = uv0 * w0 + uv1 * w1 + uv2 * w2;
-
+        let uv = verts.data[i0].uv * w0 + verts.data[i1].uv * w1 + verts.data[i2].uv * w2;
         let col = sv_sample(uv);
-        sv_write(gid.x, gid.y, col);
-        return; // early-out once a covering tri is drawn
+        sv_write(px, py, col);
+        return;
       }
     }
   }
-
-  // No triangle covered this pixel → leave as-is (or clear below)
-  // sv_write(gid.x, gid.y, vec4<f32>(0.0, 0.0, 0.0, 1.0));
 }
 "#;
 
@@ -305,7 +366,7 @@ pub const DEFAULT_3D_BODY: &str = r#"
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x >= U.fb_size.x || gid.y >= U.fb_size.y) { return; }
   let uv = vec2<f32>(f32(gid.x)/f32(U.fb_size.x), f32(gid.y)/f32(U.fb_size.y));
-  let b = U.param.x;
+  let b = U.background.x;
   let col = vec4<f32>(uv.x*b, uv.y*b, b, 1.0);
   sv_write(gid.x, gid.y, col);
 }
@@ -333,9 +394,11 @@ pub struct VM {
     pub render_mode: RenderMode,
 
     pub gpu: Option<VMGpu>,
-    // --- Compute pipeline params
-    pub compute2d_params: Vec4<f32>,
-    pub compute3d_params: Vec4<f32>,
+    // --- Compute pipeline params (shared by 2D/3D)
+    pub background: Vec4<f32>,
+    pub gp0: Vec4<f32>,
+    pub gp1: Vec4<f32>,
+    pub gp2: Vec4<f32>,
     // --- Programmable compute shader sources
     pub source2d: String,
     pub source3d: String,
@@ -355,8 +418,10 @@ impl VM {
             animation_counter: 0,
             render_mode: RenderMode::Compute2D,
             gpu: None,
-            compute2d_params: Vec4::new(1.0, 0.8, 0.2, 1.0),
-            compute3d_params: Vec4::new(1.0, 1.0, 1.0, 1.0),
+            background: Vec4::new(1.0, 0.8, 0.2, 1.0),
+            gp0: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            gp1: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            gp2: Vec4::new(0.0, 0.0, 0.0, 0.0),
             source2d: DEFAULT_2D_BODY.to_string(),
             source3d: DEFAULT_3D_BODY.to_string(),
             transform2d: Mat3::identity(),
@@ -457,8 +522,87 @@ impl VM {
                     .polys_map
                     .insert(id, poly);
             }
+            Atom::AddLineStrip2D {
+                id,
+                tile_id,
+                points,
+                width,
+            } => {
+                if points.len() < 2 {
+                    return;
+                }
+                let half = 0.5 * width;
+                let mut vertices: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
+                let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
+                let mut indices: Vec<(usize, usize, usize)> =
+                    Vec::with_capacity((points.len() - 1) * 2);
+
+                for seg in 0..(points.len() - 1) {
+                    let p0 = points[seg];
+                    let p1 = points[seg + 1];
+                    let dx = p1[0] - p0[0];
+                    let dy = p1[1] - p0[1];
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len == 0.0 {
+                        continue;
+                    }
+                    let nx = -dy / len; // left-hand normal (perp)
+                    let ny = dx / len;
+                    let ox = nx * half;
+                    let oy = ny * half;
+
+                    // Quad corners (consistent winding: 0-1-2, 0-2-3)
+                    let v0 = [p0[0] - ox, p0[1] - oy]; // bottom-left
+                    let v1 = [p0[0] + ox, p0[1] + oy]; // top-left
+                    let v2 = [p1[0] + ox, p1[1] + oy]; // top-right
+                    let v3 = [p1[0] - ox, p1[1] - oy]; // bottom-right
+
+                    let base = vertices.len();
+                    vertices.extend_from_slice(&[v0, v1, v2, v3]);
+                    // Simple UVs per quad (stretch along segment)
+                    uvs.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+                    indices.push((base + 0, base + 1, base + 2));
+                    indices.push((base + 0, base + 2, base + 3));
+                }
+
+                if vertices.is_empty() {
+                    return;
+                }
+
+                let chunk_id = match self.current_chunk {
+                    Some(cid) => cid,
+                    None => {
+                        let cid = Uuid::new_v4();
+                        self.chunks_map.insert(cid, Chunk::default());
+                        self.current_chunk = Some(cid);
+                        cid
+                    }
+                };
+
+                let poly = Poly2D {
+                    id,
+                    tile_id,
+                    vertices,
+                    uvs,
+                    indices,
+                    transform: Mat3::identity(),
+                };
+
+                self.chunks_map
+                    .entry(chunk_id)
+                    .or_default()
+                    .polys_map
+                    .insert(id, poly);
+            }
             Atom::NewChunk { id } => {
                 self.chunks_map.entry(id).or_insert_with(Chunk::default);
+            }
+            Atom::RemoveChunk { id } => {
+                let was_current = self.current_chunk == Some(id);
+                self.chunks_map.remove(&id);
+                if was_current {
+                    self.current_chunk = None;
+                }
             }
             Atom::SetCurrentChunk { id } => {
                 if !self.chunks_map.contains_key(&id) {
@@ -484,7 +628,7 @@ impl VM {
             Atom::SetTransform2D(m) => {
                 self.transform2d = m;
             }
-            Atom::ClearAtlas => {
+            Atom::Clear => {
                 self.atlas_map.clear();
                 self.tiles_map.clear();
                 self.tiles_order.clear();
@@ -492,15 +636,30 @@ impl VM {
                 self.chunks_map.clear();
                 self.current_chunk = None;
                 self.animation_counter = 0;
-                self.compute2d_params = Vec4::new(1.0, 0.8, 0.2, 1.0);
-                self.compute3d_params = Vec4::new(1.0, 1.0, 1.0, 1.0);
+                self.background = Vec4::new(1.0, 0.8, 0.2, 1.0);
+                self.gp0 = Vec4::new(0.0, 0.0, 0.0, 0.0);
+                self.gp1 = Vec4::new(0.0, 0.0, 0.0, 0.0);
+                self.gp2 = Vec4::new(0.0, 0.0, 0.0, 0.0);
                 self.render_mode = RenderMode::Compute2D;
             }
-            Atom::SetCompute2DParams(v) => {
-                self.compute2d_params = v;
+            Atom::ClearTiles => {
+                // Clear tile-related state and atlas pixels; keep scene/chunks
+                self.atlas_map.clear();
+                self.tiles_map.clear();
+                self.tiles_order.clear();
+                self.atlas.data.fill(0);
             }
-            Atom::SetCompute3DParams(v) => {
-                self.compute3d_params = v;
+            Atom::SetBackground(v) => {
+                self.background = v;
+            }
+            Atom::SetGP0(v) => {
+                self.gp0 = v;
+            }
+            Atom::SetGP1(v) => {
+                self.gp1 = v;
+            }
+            Atom::SetGP2(v) => {
+                self.gp2 = v;
             }
             Atom::SetRenderMode(m) => {
                 self.render_mode = m;
@@ -623,6 +782,9 @@ impl VM {
             u3d_bg: None,
             v2d_ssbo: None,
             i2d_ssbo: None,
+            tile_offsets: None,
+            tile_counts: None,
+            tile_tris: None,
         });
     }
 
@@ -751,27 +913,16 @@ impl VM {
         }
     }
 
-    /// Iterate polygons ready for drawing (either current chunk or all chunks if none selected): (poly, atlas rect)
+    /// Iterate polygons ready for drawing: always yields all polygons in all chunks (ignores current_chunk).
     pub fn polys_2d(&self) -> impl Iterator<Item = (&Poly2D, Option<&AtlasEntry>)> {
         let anim = self.animation_counter as u32;
-        // Gather iterators depending on chunk selection
-        let it: Box<dyn Iterator<Item = &Poly2D> + '_> = if let Some(cid) = self.current_chunk {
-            if let Some(ch) = self.chunks_map.get(&cid) {
-                Box::new(ch.polys_map.values())
-            } else {
-                Box::new(std::iter::empty::<&Poly2D>())
-            }
-        } else {
-            Box::new(
-                self.chunks_map
-                    .values()
-                    .flat_map(|ch| ch.polys_map.values()),
-            )
-        };
-        it.map(move |p| {
-            let rect = self.frame_rect(&p.tile_id, anim);
-            (p, rect)
-        })
+        self.chunks_map
+            .values()
+            .flat_map(|ch| ch.polys_map.values())
+            .map(move |p| {
+                let rect = self.frame_rect(&p.tile_id, anim);
+                (p, rect)
+            })
     }
 }
 
@@ -844,6 +995,39 @@ impl VM {
                 wgpu::BindGroupLayoutEntry {
                     // indices SSBO
                     binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // tile offsets
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // tile counts
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // tile tris
+                    binding: 8,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -996,10 +1180,18 @@ impl VM {
         // Require surface to be STORAGE-capable. If your Texture lacks this, recreate with STORAGE_BINDING.
         surface.ensure_gpu_with(device);
         // Update uniforms
+        let m = self.transform2d;
         let u = Compute2DUniforms {
-            param: self.compute2d_params.into_array(),
+            background: self.background.into_array(),
             fb_size: [fb_w, fb_h],
-            _pad: [0, 0],
+            _pad0: [0, 0],
+            gp0: self.gp0.into_array(),
+            gp1: self.gp1.into_array(),
+            gp2: self.gp2.into_array(),
+            // Mat3 columns (col-major), pad .w = 0.0
+            mat2d_c0: [m[(0, 0)], m[(1, 0)], m[(2, 0)], 0.0],
+            mat2d_c1: [m[(0, 1)], m[(1, 1)], m[(2, 1)], 0.0],
+            mat2d_c2: [m[(0, 2)], m[(1, 2)], m[(2, 2)], 0.0],
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u2d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
@@ -1041,6 +1233,68 @@ impl VM {
                 ]);
             }
         }
+
+        // --- CPU tiling & binning (8x8 tiles) ---
+        let tiles_x = ((fb_w + 7) / 8).max(1);
+        let tiles_y = ((fb_h + 7) / 8).max(1);
+        let tiles_n = (tiles_x * tiles_y) as usize;
+        let mut bins: Vec<Vec<u32>> = vec![Vec::new(); tiles_n];
+
+        let tri_count = (indices_flat.len() / 3) as u32;
+        for t in 0..tri_count {
+            let i0 = indices_flat[(3 * t as usize) + 0] as usize;
+            let i1 = indices_flat[(3 * t as usize) + 1] as usize;
+            let i2 = indices_flat[(3 * t as usize) + 2] as usize;
+            let a = verts_flat[i0].pos;
+            let b = verts_flat[i1].pos;
+            let c = verts_flat[i2].pos;
+
+            // pixel-space bbox, clamped to framebuffer
+            let minx = f32::min(a[0], f32::min(b[0], c[0])).floor().max(0.0) as i32;
+            let maxx = f32::max(a[0], f32::max(b[0], c[0])).ceil().min(fb_w as f32) as i32;
+            let miny = f32::min(a[1], f32::min(b[1], c[1])).floor().max(0.0) as i32;
+            let maxy = f32::max(a[1], f32::max(b[1], c[1])).ceil().min(fb_h as f32) as i32;
+            if minx >= maxx || miny >= maxy {
+                continue;
+            }
+
+            let tx0 = (minx.max(0) as u32) / 8;
+            let ty0 = (miny.max(0) as u32) / 8;
+            let tx1 = ((maxx.max(0) as u32).saturating_sub(1)) / 8;
+            let ty1 = ((maxy.max(0) as u32).saturating_sub(1)) / 8;
+
+            for ty in ty0..=ty1 {
+                for tx in tx0..=tx1 {
+                    let idx = (ty * tiles_x + tx) as usize;
+                    bins[idx].push(t as u32);
+                }
+            }
+        }
+
+        // Flatten to offsets/counts/tris
+        let mut tile_offsets: Vec<u32> = Vec::with_capacity(tiles_n);
+        let mut tile_counts: Vec<u32> = Vec::with_capacity(tiles_n);
+        let mut tile_tris: Vec<u32> = Vec::new();
+        let mut running: u32 = 0;
+        for v in &bins {
+            tile_offsets.push(running);
+            let c = v.len() as u32;
+            tile_counts.push(c);
+            running += c;
+            tile_tris.extend_from_slice(v);
+        }
+
+        // Ensure non-zero-sized buffers
+        if tile_offsets.is_empty() {
+            tile_offsets.push(0);
+        }
+        if tile_counts.is_empty() {
+            tile_counts.push(0);
+        }
+        if tile_tris.is_empty() {
+            tile_tris.push(0);
+        }
+
         use wgpu::util::DeviceExt;
         // Ensure non-zero-sized buffers for binding validation
         let vbytes: Vec<u8> = if verts_flat.is_empty() {
@@ -1073,6 +1327,29 @@ impl VM {
         g.v2d_ssbo = Some(vbuf);
         g.i2d_ssbo = Some(ibuf);
 
+        // 1) Upload CPU vectors -> GPU buffers
+        let tile_offsets_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-2d-tile-offsets"),
+            contents: bytemuck::cast_slice(&tile_offsets),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let tile_counts_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-2d-tile-counts"),
+            contents: bytemuck::cast_slice(&tile_counts),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let tile_tris_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-2d-tile-tris"),
+            contents: bytemuck::cast_slice(&tile_tris),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // 2) Keep them on the GPU state
+        let g = self.gpu.as_mut().unwrap();
+        g.tile_offsets = Some(tile_offsets_buf);
+        g.tile_counts = Some(tile_counts_buf);
+        g.tile_tris = Some(tile_tris_buf);
+
         // Build bind group with surface view and atlas, plus 2D geometry SSBOs
         let view = &surface.gpu.as_ref().unwrap().view;
         let atlas_view = &self.atlas.gpu.as_ref().unwrap().view;
@@ -1103,6 +1380,18 @@ impl VM {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: g.i2d_ssbo.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: g.tile_offsets.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: g.tile_counts.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: g.tile_tris.as_ref().unwrap().as_entire_binding(),
                 },
             ],
         }));
@@ -1138,10 +1427,18 @@ impl VM {
         }
         self.init_compute(device);
         surface.ensure_gpu_with(device);
+        let m = vek::Mat4::<f32>::identity(); // TODO: store & set via atom later
         let u = Compute3DUniforms {
-            param: self.compute3d_params.into_array(),
+            background: self.background.into_array(),
             fb_size: [fb_w, fb_h],
-            _pad: [0, 0],
+            _pad0: [0, 0],
+            gp0: self.gp0.into_array(),
+            gp1: self.gp1.into_array(),
+            gp2: self.gp2.into_array(),
+            mat3d_c0: [m[(0, 0)], m[(1, 0)], m[(2, 0)], m[(3, 0)]],
+            mat3d_c1: [m[(0, 1)], m[(1, 1)], m[(2, 1)], m[(3, 1)]],
+            mat3d_c2: [m[(0, 2)], m[(1, 2)], m[(2, 2)], m[(3, 2)]],
+            mat3d_c3: [m[(0, 3)], m[(1, 3)], m[(2, 3)], m[(3, 3)]],
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u3d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));

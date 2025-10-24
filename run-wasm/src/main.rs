@@ -13,5 +13,5 @@ fn main() {
         outline: none;
     }"#;
 
-    cargo_run_wasm::run_wasm_with_css(css);
+    cargo_run_wasm::run_wasm_cli_with_css(css);
 }

@@ -1,4 +1,4 @@
-use scenevm::{Atom, SceneVM};
+use scenevm::{Atom, SceneVM, vm::GeoId};
 use theframework::prelude::*;
 
 pub struct Circle {
@@ -32,13 +32,15 @@ impl TheTrait for Circle {
         //     self.vm.execute(Atom::BuildAtlas);
         // }
 
+        self.vm.execute(Atom::SetBackground(Vec4::one()));
+
         self.vm.execute(Atom::AddSolid {
             id: tile_id,
             color: [255, 0, 0, 255],
         });
         self.vm.execute(Atom::BuildAtlas);
         self.vm.execute(Atom::AddPoly {
-            id: Uuid::new_v4(),
+            id: GeoId::Unknown(0),
             tile_id: tile_id,
             vertices: vec![
                 [100.0, 100.0],
@@ -48,6 +50,14 @@ impl TheTrait for Circle {
             ],
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![(0, 1, 2), (0, 2, 3)],
+        });
+
+        // Add a line strip
+        self.vm.execute(Atom::AddLineStrip2D {
+            id: GeoId::Linedef(1),
+            tile_id: tile_id,
+            points: vec![[400.0, 100.0], [500.0, 120.0], [560.0, 200.0]],
+            width: 1.5,
         });
     }
 
