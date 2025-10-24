@@ -5,10 +5,14 @@ pub mod vm;
 pub use crate::{
     intodata::IntoDataInput,
     texture::Texture,
-    vm::{Atom, VM},
+    vm::{Atom, Chunk, GeoId, VM},
 };
 
 use image;
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::OnceLock;
 #[cfg(target_arch = "wasm32")]
 use std::{cell::Cell, future::Future, rc::Rc};
 #[cfg(target_arch = "wasm32")]
@@ -37,6 +41,24 @@ pub struct GPUState {
     queue: wgpu::Queue,
     /// Main render surface for SceneVM
     surface: Texture,
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct GlobalGpu {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
+#[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
+static GLOBAL_GPU: OnceLock<GlobalGpu> = OnceLock::new();
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static GLOBAL_GPU_WASM: RefCell<Option<GlobalGpu>> = RefCell::new(None);
 }
 
 // --- WASM async map flag future support ---
@@ -71,6 +93,12 @@ pub struct SceneVM {
     init_in_flight: bool,
 
     vm: VM,
+}
+
+impl Default for SceneVM {
+    fn default() -> Self {
+        Self::new(100, 100)
+    }
 }
 
 impl SceneVM {
@@ -179,46 +207,25 @@ impl SceneVM {
             if !self.needs_gpu_init {
                 return;
             }
+            if global_gpu_get().is_none() {
+                global_gpu_init_async().await;
+            }
+            let gg = global_gpu_get().expect("Global GPU not initialized");
             let (w, h) = self.size;
-            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::BROWSER_WEBGPU,
-                ..Default::default()
-            });
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    force_fallback_adapter: false,
-                    compatible_surface: None,
-                })
-                .await
-                .expect("No compatible GPU adapter found (WebGPU)");
-
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("scenevm-device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    ..Default::default()
-                })
-                .await
-                .expect("Failed to create wgpu device (WebGPU)");
-
             let mut surface = Texture::new(w, h);
-            surface.ensure_gpu_with(&device);
-
+            surface.ensure_gpu_with(&gg.device);
             let gpu = GPUState {
-                _instance: instance,
-                _adapter: adapter,
-                device,
-                queue,
+                _instance: gg.instance,
+                _adapter: gg.adapter,
+                device: gg.device,
+                queue: gg.queue,
                 surface,
             };
             self.gpu = Some(gpu);
             self.needs_gpu_init = false;
             #[cfg(debug_assertions)]
             {
-                // Use web_sys console in debug to help trace init
-                web_sys::console::log_1(&"SceneVM WebGPU initialized".into());
+                web_sys::console::log_1(&"SceneVM WebGPU initialized (global)".into());
             }
         }
 
@@ -462,4 +469,45 @@ impl SceneVM {
         let (w, h) = rgba.dimensions();
         Some((rgba.into_raw(), w, h))
     }
+}
+
+// --- Global GPU helpers ---
+#[cfg(target_arch = "wasm32")]
+fn global_gpu_get() -> Option<GlobalGpu> {
+    GLOBAL_GPU_WASM.with(|c| c.borrow().clone())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn global_gpu_init_async() {
+    if global_gpu_get().is_some() {
+        return;
+    }
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::BROWSER_WEBGPU,
+        ..Default::default()
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        })
+        .await
+        .expect("No compatible GPU adapter found (WebGPU)");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("scenevm-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        })
+        .await
+        .expect("Failed to create wgpu device (WebGPU)");
+    let gg = GlobalGpu {
+        instance,
+        adapter,
+        device,
+        queue,
+    };
+    GLOBAL_GPU_WASM.with(|c| *c.borrow_mut() = Some(gg));
 }

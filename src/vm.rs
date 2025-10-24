@@ -61,6 +61,11 @@ pub enum Atom {
     NewChunk {
         id: Uuid,
     },
+    /// Insert or replace an entire chunk in one go (prepared externally, e.g., in Rusterix)
+    SetChunk {
+        id: Uuid,
+        chunk: Chunk,
+    },
     /// Remove an existing chunk; if it is the current chunk, unset it
     RemoveChunk {
         id: Uuid,
@@ -89,6 +94,8 @@ pub enum Atom {
     Clear,
     /// Clear only the tiles and atlas (keep scene/chunks intact)
     ClearTiles,
+    /// Clear only the scene geometry (chunks & current selection), keep tiles/atlas intact
+    ClearGeometry,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +119,122 @@ pub struct Poly2D {
 #[derive(Debug, Default, Clone)]
 pub struct Chunk {
     pub polys_map: FxHashMap<GeoId, Poly2D>,
+    pub priority: i32,
+}
+
+impl Chunk {
+    /// Add a 2D polygon with explicit vertices/uvs/indices. Indices are local to this chunk.
+    pub fn add_poly_2d(
+        &mut self,
+        id: GeoId,
+        tile_id: Uuid,
+        vertices: Vec<[f32; 2]>,
+        uvs: Vec<[f32; 2]>,
+        indices: Vec<(usize, usize, usize)>,
+    ) {
+        let poly = Poly2D {
+            id,
+            tile_id,
+            vertices,
+            uvs,
+            indices,
+            transform: Mat3::identity(),
+        };
+        self.polys_map.insert(id, poly);
+    }
+
+    /// Add a 2D line strip tessellated into thick quads (no caps/joins) as one poly.
+    /// `points` are in world coords; `width` is in world units.
+    pub fn add_line_strip_2d(
+        &mut self,
+        id: GeoId,
+        tile_id: Uuid,
+        points: Vec<[f32; 2]>,
+        width: f32,
+    ) {
+        if points.len() < 2 {
+            return;
+        }
+        let half = 0.5 * width;
+        let mut vertices: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
+        let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
+        let mut indices: Vec<(usize, usize, usize)> = Vec::with_capacity((points.len() - 1) * 2);
+
+        for seg in 0..(points.len() - 1) {
+            let p0 = points[seg];
+            let p1 = points[seg + 1];
+            let dx = p1[0] - p0[0];
+            let dy = p1[1] - p0[1];
+            let len = (dx * dx + dy * dy).sqrt();
+            if len == 0.0 {
+                continue;
+            }
+            let nx = -dy / len; // left-hand normal (perp)
+            let ny = dx / len;
+            let ox = nx * half;
+            let oy = ny * half;
+
+            // Quad corners (consistent winding: 0-1-2, 0-2-3)
+            let v0 = [p0[0] - ox, p0[1] - oy]; // bottom-left
+            let v1 = [p0[0] + ox, p0[1] + oy]; // top-left
+            let v2 = [p1[0] + ox, p1[1] + oy]; // top-right
+            let v3 = [p1[0] - ox, p1[1] - oy]; // bottom-right
+
+            let base = vertices.len();
+            vertices.extend_from_slice(&[v0, v1, v2, v3]);
+            // Simple UVs per quad (stretch along segment)
+            uvs.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+            indices.push((base + 0, base + 1, base + 2));
+            indices.push((base + 0, base + 2, base + 3));
+        }
+
+        if vertices.is_empty() {
+            return;
+        }
+
+        let poly = Poly2D {
+            id,
+            tile_id,
+            vertices,
+            uvs,
+            indices,
+            transform: Mat3::identity(),
+        };
+        self.polys_map.insert(id, poly);
+    }
+
+    /// Add a square (axis-aligned) centered at `center` with edge length `size`.
+    /// Inserts a new Poly2D using `tile_id` and `id`. UVs cover the full tile.
+    pub fn add_square_2d(&mut self, id: GeoId, tile_id: Uuid, center: [f32; 2], size: f32) {
+        if size <= 0.0 {
+            return;
+        }
+        let half = 0.5 * size;
+        let (cx, cy) = (center[0], center[1]);
+        let x0 = cx - half; // left
+        let x1 = cx + half; // right
+        let y0 = cy - half; // bottom
+        let y1 = cy + half; // top
+
+        let vertices = vec![
+            [x0, y0], // bottom-left
+            [x0, y1], // top-left
+            [x1, y1], // top-right
+            [x1, y0], // bottom-right
+        ];
+        let uvs = vec![[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        let indices = vec![(0, 1, 2), (0, 2, 3)];
+
+        let poly = Poly2D {
+            id,
+            tile_id,
+            vertices,
+            uvs,
+            indices,
+            transform: Mat3::identity(),
+        };
+        self.polys_map.insert(id, poly);
+    }
 }
 
 #[derive(Debug)]
@@ -205,6 +328,10 @@ pub struct Compute2DUniforms {
     pub mat2d_c0: [f32; 4],
     pub mat2d_c1: [f32; 4],
     pub mat2d_c2: [f32; 4],
+    // Inverse 2D matrix columns
+    pub mat2d_inv_c0: [f32; 4],
+    pub mat2d_inv_c1: [f32; 4],
+    pub mat2d_inv_c2: [f32; 4],
 }
 
 #[repr(C)]
@@ -262,6 +389,9 @@ struct U2D {
   mat2d_c0: vec4<f32>,
   mat2d_c1: vec4<f32>,
   mat2d_c2: vec4<f32>,
+  mat2d_inv_c0: vec4<f32>,
+  mat2d_inv_c1: vec4<f32>,
+  mat2d_inv_c2: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> U: U2D;
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
@@ -287,6 +417,62 @@ fn sv_write(px: u32, py: u32, c: vec4<f32>) {
 fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
   return textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
 }
+// ----- SceneVM 2D helpers -----
+struct BaryHit { hit: bool, w: vec3<f32> };
+struct ColorHit { hit: bool, color: vec4<f32> };
+
+fn sv_edge(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+  return (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
+}
+
+fn sv_tri_bary(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> BaryHit {
+  let e0 = sv_edge(p,a,b);
+  let e1 = sv_edge(p,b,c);
+  let e2 = sv_edge(p,c,a);
+  let ok = (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0);
+  if (!ok) { return BaryHit(false, vec3<f32>(0.0)); }
+  let area = abs((b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x));
+  if (area <= 0.0) { return BaryHit(false, vec3<f32>(0.0)); }
+  let w0 = abs((b.x - p.x)*(c.y - p.y) - (b.y - p.y)*(c.x - p.x)) / area;
+  let w1 = abs((c.x - p.x)*(a.y - p.y) - (c.y - p.y)*(a.x - p.x)) / area;
+  let w2 = 1.0 - w0 - w1;
+  return BaryHit(true, vec3<f32>(w0, w1, w2));
+}
+
+fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
+  let a = verts.data[i0].pos;
+  let b = verts.data[i1].pos;
+  let c = verts.data[i2].pos;
+  let bh = sv_tri_bary(p, a, b, c);
+  if (!bh.hit) { return ColorHit(false, vec4<f32>(0.0)); }
+  let w = bh.w;
+  let uv = verts.data[i0].uv * w.x + verts.data[i1].uv * w.y + verts.data[i2].uv * w.z;
+  let col = sv_sample(uv);
+  return ColorHit(true, col);
+}
+
+fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
+  let invM = mat3x3<f32>(U.mat2d_inv_c0.xyz, U.mat2d_inv_c1.xyz, U.mat2d_inv_c2.xyz);
+  let v = invM * vec3<f32>(pix, 1.0);
+  return v.xy;
+}
+fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> bool {
+  let off = tile_offsets.data[tid];
+  let cnt = tile_counts.data[tid];
+  for (var k: u32 = 0u; k < cnt; k = k + 1u) {
+    let t  = tile_tris.data[off + k];
+    let i0 = indices.data[3u*t + 0u];
+    let i1 = indices.data[3u*t + 1u];
+    let i2 = indices.data[3u*t + 2u];
+    let ch = sv_tri_color(p, i0, i1, i2);
+    if (ch.hit) {
+      sv_write(px, py, ch.color);
+      return true;
+    }
+  }
+  return false;
+}
+// ----- end helpers -----
 "#;
 
 pub const SCENEVM_3D_HEADER: &str = r#"
@@ -322,42 +508,19 @@ fn cs_main(
   let px = wg.x * 8u + lid.x;
   let py = wg.y * 8u + lid.y;
   if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
+
+  //let uv = vec2<f32>(f32(gid.x)/f32(U.fb_size.x), f32(gid.y)/f32(U.fb_size.y));
+
+  // Convert pixel coordinates into world coordinates
+  //let world_pos = sv_world_from_screen(vec2<f32>(f32(px), f32(py)));  
+
   let p = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
 
   // Clear to background first
   sv_write(px, py, U.background);
 
   let tid = tile_index(wg.x, wg.y);
-  let off = tile_offsets.data[tid];
-  let cnt = tile_counts.data[tid];
-
-  for (var k: u32 = 0u; k < cnt; k = k + 1u) {
-    let t  = tile_tris.data[off + k];
-    let i0 = indices.data[3u*t + 0u];
-    let i1 = indices.data[3u*t + 1u];
-    let i2 = indices.data[3u*t + 2u];
-    let a = verts.data[i0].pos;
-    let b = verts.data[i1].pos;
-    let c = verts.data[i2].pos;
-
-    let e0 = (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
-    let e1 = (p.x - b.x)*(c.y - b.y) - (p.y - b.y)*(c.x - a.x + a.x - b.x); // keep form consistent
-    let e2 = (p.x - c.x)*(a.y - c.y) - (p.y - c.y)*(a.x - c.x);
-
-    // Use sign-consistent edge test
-    if ((e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)) {
-      let area = abs((b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x));
-      if (area > 0.0) {
-        let w0 = abs((b.x - p.x)*(c.y - p.y) - (b.y - p.y)*(c.x - p.x)) / area;
-        let w1 = abs((c.x - p.x)*(a.y - p.y) - (c.y - p.y)*(a.x - p.x)) / area;
-        let w2 = 1.0 - w0 - w1;
-        let uv = verts.data[i0].uv * w0 + verts.data[i1].uv * w1 + verts.data[i2].uv * w2;
-        let col = sv_sample(uv);
-        sv_write(px, py, col);
-        return;
-      }
-    }
-  }
+  if (sv_shade_tile_pixel(p, px, py, tid)) { return; }
 }
 "#;
 
@@ -490,15 +653,6 @@ impl VM {
                 uvs,
                 indices,
             } => {
-                // Ensure we have a current chunk; if not, create one implicitly.
-                debug_assert_eq!(vertices.len(), uvs.len(), "vertices/uvs length mismatch");
-                #[cfg(debug_assertions)]
-                {
-                    let vlen = vertices.len();
-                    for &(a, b, c) in &indices {
-                        assert!(a < vlen && b < vlen && c < vlen, "index out of range");
-                    }
-                }
                 let chunk_id = match self.current_chunk {
                     Some(cid) => cid,
                     None => {
@@ -508,19 +662,10 @@ impl VM {
                         cid
                     }
                 };
-                let poly = Poly2D {
-                    id,
-                    tile_id,
-                    vertices,
-                    uvs,
-                    indices,
-                    transform: Mat3::identity(),
-                };
                 self.chunks_map
                     .entry(chunk_id)
                     .or_default()
-                    .polys_map
-                    .insert(id, poly);
+                    .add_poly_2d(id, tile_id, vertices, uvs, indices);
             }
             Atom::AddLineStrip2D {
                 id,
@@ -531,44 +676,6 @@ impl VM {
                 if points.len() < 2 {
                     return;
                 }
-                let half = 0.5 * width;
-                let mut vertices: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
-                let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
-                let mut indices: Vec<(usize, usize, usize)> =
-                    Vec::with_capacity((points.len() - 1) * 2);
-
-                for seg in 0..(points.len() - 1) {
-                    let p0 = points[seg];
-                    let p1 = points[seg + 1];
-                    let dx = p1[0] - p0[0];
-                    let dy = p1[1] - p0[1];
-                    let len = (dx * dx + dy * dy).sqrt();
-                    if len == 0.0 {
-                        continue;
-                    }
-                    let nx = -dy / len; // left-hand normal (perp)
-                    let ny = dx / len;
-                    let ox = nx * half;
-                    let oy = ny * half;
-
-                    // Quad corners (consistent winding: 0-1-2, 0-2-3)
-                    let v0 = [p0[0] - ox, p0[1] - oy]; // bottom-left
-                    let v1 = [p0[0] + ox, p0[1] + oy]; // top-left
-                    let v2 = [p1[0] + ox, p1[1] + oy]; // top-right
-                    let v3 = [p1[0] - ox, p1[1] - oy]; // bottom-right
-
-                    let base = vertices.len();
-                    vertices.extend_from_slice(&[v0, v1, v2, v3]);
-                    // Simple UVs per quad (stretch along segment)
-                    uvs.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
-                    indices.push((base + 0, base + 1, base + 2));
-                    indices.push((base + 0, base + 2, base + 3));
-                }
-
-                if vertices.is_empty() {
-                    return;
-                }
-
                 let chunk_id = match self.current_chunk {
                     Some(cid) => cid,
                     None => {
@@ -578,24 +685,17 @@ impl VM {
                         cid
                     }
                 };
-
-                let poly = Poly2D {
-                    id,
-                    tile_id,
-                    vertices,
-                    uvs,
-                    indices,
-                    transform: Mat3::identity(),
-                };
-
                 self.chunks_map
                     .entry(chunk_id)
                     .or_default()
-                    .polys_map
-                    .insert(id, poly);
+                    .add_line_strip_2d(id, tile_id, points, width);
             }
             Atom::NewChunk { id } => {
                 self.chunks_map.entry(id).or_insert_with(Chunk::default);
+            }
+            Atom::SetChunk { id, chunk } => {
+                // Insert or replace the chunk as-is; caller controls current_chunk separately
+                self.chunks_map.insert(id, chunk);
             }
             Atom::RemoveChunk { id } => {
                 let was_current = self.current_chunk == Some(id);
@@ -648,6 +748,11 @@ impl VM {
                 self.tiles_map.clear();
                 self.tiles_order.clear();
                 self.atlas.data.fill(0);
+            }
+            Atom::ClearGeometry => {
+                // Remove all chunks and unset current chunk; keep tiles/atlas/state
+                self.chunks_map.clear();
+                self.current_chunk = None;
             }
             Atom::SetBackground(v) => {
                 self.background = v;
@@ -924,6 +1029,22 @@ impl VM {
                 (p, rect)
             })
     }
+
+    /// Iterate polygons sorted by their chunk's priority (higher first). Allocates a small Vec each call.
+    pub fn polys_2d_sorted_by_chunk_priority(&self) -> Vec<(&Poly2D, Option<&AtlasEntry>)> {
+        let anim = self.animation_counter as u32;
+        let mut pairs: Vec<(&Poly2D, Option<&AtlasEntry>, i32)> = Vec::new();
+        for (_, ch) in &self.chunks_map {
+            let prio = ch.priority;
+            for poly in ch.polys_map.values() {
+                let rect = self.frame_rect(&poly.tile_id, anim);
+                pairs.push((poly, rect, prio));
+            }
+        }
+        // Sort by priority descending; stable to preserve insertion order within same chunk priority
+        pairs.sort_by(|a, b| b.2.cmp(&a.2));
+        pairs.into_iter().map(|(p, r, _)| (p, r)).collect()
+    }
 }
 
 impl VM {
@@ -1181,6 +1302,7 @@ impl VM {
         surface.ensure_gpu_with(device);
         // Update uniforms
         let m = self.transform2d;
+        let m_inv = mat3_inverse_f32(&m).unwrap_or(Mat3::<f32>::identity());
         let u = Compute2DUniforms {
             background: self.background.into_array(),
             fb_size: [fb_w, fb_h],
@@ -1192,6 +1314,9 @@ impl VM {
             mat2d_c0: [m[(0, 0)], m[(1, 0)], m[(2, 0)], 0.0],
             mat2d_c1: [m[(0, 1)], m[(1, 1)], m[(2, 1)], 0.0],
             mat2d_c2: [m[(0, 2)], m[(1, 2)], m[(2, 2)], 0.0],
+            mat2d_inv_c0: [m_inv[(0, 0)], m_inv[(1, 0)], m_inv[(2, 0)], 0.0],
+            mat2d_inv_c1: [m_inv[(0, 1)], m_inv[(1, 1)], m_inv[(2, 1)], 0.0],
+            mat2d_inv_c2: [m_inv[(0, 2)], m_inv[(1, 2)], m_inv[(2, 2)], 0.0],
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u2d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
@@ -1203,7 +1328,7 @@ impl VM {
         // Build transformed 2D geometry (screen-space) and upload to SSBOs
         let mut verts_flat: Vec<Vert2DPod> = Vec::new();
         let mut indices_flat: Vec<u32> = Vec::new();
-        for (poly, rect_opt) in self.polys_2d() {
+        for (poly, rect_opt) in self.polys_2d_sorted_by_chunk_priority() {
             let rect = if let Some(r) = rect_opt { r } else { continue };
             let base = verts_flat.len() as u32;
             let atlas_w = self.atlas.width as f32;
@@ -1503,3 +1628,48 @@ impl VM {
         }
     }
 } // end impl VM
+
+// Helper for inverting a 3x3 matrix (vek::Mat3<f32>)
+fn mat3_inverse_f32(m: &Mat3<f32>) -> Option<Mat3<f32>> {
+    // Treat elements as a standard 3x3 laid out by rows using vek indexing (col, row)
+    let a = m[(0, 0)];
+    let b = m[(1, 0)];
+    let c = m[(2, 0)];
+    let d = m[(0, 1)];
+    let e = m[(1, 1)];
+    let f = m[(2, 1)];
+    let g = m[(0, 2)];
+    let h = m[(1, 2)];
+    let i = m[(2, 2)];
+
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if det.abs() < 1e-8 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+
+    let m00 = (e * i - f * h) * inv_det;
+    let m01 = (c * h - b * i) * inv_det;
+    let m02 = (b * f - c * e) * inv_det;
+
+    let m10 = (f * g - d * i) * inv_det;
+    let m11 = (a * i - c * g) * inv_det;
+    let m12 = (c * d - a * f) * inv_det;
+
+    let m20 = (d * h - e * g) * inv_det;
+    let m21 = (b * g - a * h) * inv_det;
+    let m22 = (a * e - b * d) * inv_det;
+
+    let mut out = Mat3::<f32>::zero();
+    // Write back using vek's (col,row) indexing
+    out[(0, 0)] = m00;
+    out[(1, 0)] = m01;
+    out[(2, 0)] = m02;
+    out[(0, 1)] = m10;
+    out[(1, 1)] = m11;
+    out[(2, 1)] = m12;
+    out[(0, 2)] = m20;
+    out[(1, 2)] = m21;
+    out[(2, 2)] = m22;
+    Some(out)
+}
