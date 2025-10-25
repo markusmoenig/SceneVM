@@ -1,11 +1,17 @@
+pub mod bbox2d;
+pub mod chunk;
 pub mod intodata;
+pub mod light;
 pub mod texture;
 pub mod vm;
 
 pub use crate::{
+    bbox2d::BBox2D,
+    chunk::Chunk,
     intodata::IntoDataInput,
+    light::{Light, LightType},
     texture::Texture,
-    vm::{Atom, Chunk, GeoId, VM},
+    vm::{Atom, GeoId, Poly2D, VM},
 };
 
 use image;
