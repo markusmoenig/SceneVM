@@ -2,7 +2,7 @@ use crate::{Chunk, Light, LightType, Texture};
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
-use vek::{Mat3, Vec3, Vec4};
+use vek::{Mat3, Mat4, Vec3, Vec4};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// The Geometry Identifier for polygons and triangles.
@@ -24,18 +24,33 @@ pub struct Vert2DPod {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vert3DPod {
+    // 0..12
+    pub pos: [f32; 3],
+    // pad to 16 so next member is 16-aligned
+    pub _pad_pos: f32,
+    // 16..23
+    pub uv: [f32; 2],
+    // pad to 32 so next member starts at 32
+    pub _pad_uv: [f32; 2],
+    // 32..44
+    pub normal: [f32; 3],
+    // pad to 48 for 16B alignment of array stride
+    pub _pad_n: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightPod {
-    pub light_type: u32,     // 0 = Point
-    pub position: [f32; 3],  // world position
-    pub color: [f32; 3],     // rgb
-    pub intensity: f32,      // scalar multiplier
-    pub radius: f32,         // falloff radius
-    pub emitting: u32,       // 0/1
-    pub start_distance: f32, // inner start of falloff
-    pub end_distance: f32,   // outer end of falloff
-    pub flicker: f32,        // factor 0..1
-    _pad0: f32,              // pad to 16B alignment
+    // header: [light_type, emitting, pad, pad]
+    pub header: [u32; 4],
+    pub position: [f32; 4], // xyz, pad
+    pub color: [f32; 4],    // rgb, pad
+    // params0: [intensity, radius, start_distance, end_distance]
+    pub params0: [f32; 4],
+    // params1: [flicker, pad, pad, pad]
+    pub params1: [f32; 4],
 }
 
 /// VM instruction set
@@ -60,6 +75,14 @@ pub enum Atom {
         id: GeoId,     // geometry id (stable within the chunk)
         tile_id: Uuid, // which tile's frames to sample from
         vertices: Vec<[f32; 2]>,
+        uvs: Vec<[f32; 2]>,
+        indices: Vec<(usize, usize, usize)>,
+    },
+    /// Add a 3D polygon (world coords) that references a tile by UUID; indices are local to the chunk.
+    AddPoly3D {
+        id: GeoId,
+        tile_id: Uuid,
+        vertices: Vec<[f32; 4]>,
         uvs: Vec<[f32; 2]>,
         indices: Vec<(usize, usize, usize)>,
     },
@@ -111,8 +134,15 @@ pub enum Atom {
     SetRenderMode(RenderMode),
     /// Set a 2D transform (Mat3) applied on CPU to polygon vertices before 2D compute draw
     SetTransform2D(Mat3<f32>),
+    /// Set a 3D transform (Mat4) applied on CPU to polygon vertices before 3D compute draw
+    SetTransform3D(Mat4<f32>),
     /// Set current 2D/3D layer for subsequently added geometry
     SetLayer(i32),
+    /// Toggle visibility for a specific geometry id across all chunks
+    SetGeoVisible {
+        id: GeoId,
+        visible: bool,
+    },
     /// Provide a custom WGSL body for the 2D compute shader. The VM will prepend a header and compile at runtime.
     SetSource2D(String),
     /// Provide a custom WGSL body for the 3D compute shader. The VM will prepend a header and compile at runtime.
@@ -153,6 +183,18 @@ pub struct Poly2D {
     pub indices: Vec<(usize, usize, usize)>, // triangle list, LOCAL to its chunk
     pub transform: Mat3<f32>,                // per-poly local transform
     pub layer: i32,                          // visual layer; higher draws on top
+    pub visible: bool,                       // if false, skipped during draw
+}
+
+#[derive(Debug, Clone)]
+pub struct Poly3D {
+    pub id: GeoId,
+    pub tile_id: uuid::Uuid,
+    pub vertices: Vec<[f32; 4]>, // world-space XYZ(W)
+    pub uvs: Vec<[f32; 2]>,      // per-vertex UV
+    pub indices: Vec<(usize, usize, usize)>,
+    pub layer: i32, // for future (not used by ray depth)
+    pub visible: bool,
 }
 
 #[derive(Debug)]
@@ -185,6 +227,8 @@ pub struct VMGpu {
     pub u3d_bg: Option<wgpu::BindGroup>,
     pub v2d_ssbo: Option<wgpu::Buffer>,
     pub i2d_ssbo: Option<wgpu::Buffer>,
+    pub v3d_ssbo: Option<wgpu::Buffer>,
+    pub i3d_ssbo: Option<wgpu::Buffer>,
     // --- Tiling
     pub tile_offsets: Option<wgpu::Buffer>,
     pub tile_counts: Option<wgpu::Buffer>,
@@ -338,7 +382,7 @@ struct U2D {
   mat2d_inv_c1: vec4<f32>,
   mat2d_inv_c2: vec4<f32>,
   lights_count: u32,
-  _pad_lights: vec3<u32>,  
+  _pad_lights: vec3<u32>,
 };
 @group(0) @binding(0) var<uniform> U: U2D;
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
@@ -355,16 +399,11 @@ struct U32s { data: array<u32> };
 @group(0) @binding(8) var<storage, read> tile_tris:    U32s;
 
 struct LightWGSL {
-  light_type: u32,
-  position: vec3<f32>,
-  color: vec3<f32>,
-  intensity: f32,
-  radius: f32,
-  emitting: u32,
-  start_distance: f32,
-  end_distance: f32,
-  flicker: f32,
-  _pad0: f32,
+  header:   vec4<u32>,  // [light_type, emitting, _, _]
+  position: vec4<f32>,  // xyz, _
+  color:    vec4<f32>,  // rgb, _
+  params0:  vec4<f32>,  // [intensity, radius, startD, endD]
+  params1:  vec4<f32>,  // [flicker, _, _, _]
 };
 struct Lights { data: array<LightWGSL>, };
 @group(0) @binding(9) var<storage, read> lights: Lights;
@@ -485,19 +524,22 @@ struct U3D {
 @group(0) @binding(3) var atlas_smp: sampler;
 
 struct LightWGSL {
-  light_type: u32,
-  position: vec3<f32>,
-  color: vec3<f32>,
-  intensity: f32,
-  radius: f32,
-  emitting: u32,
-  start_distance: f32,
-  end_distance: f32,
-  flicker: f32,
-  _pad0: f32,
+  header:   vec4<u32>,  // [light_type, emitting, _, _]
+  position: vec4<f32>,  // xyz, _
+  color:    vec4<f32>,  // rgb, _
+  params0:  vec4<f32>,  // [intensity, radius, startD, endD]
+  params1:  vec4<f32>,  // [flicker, _, _, _]
 };
 struct Lights { data: array<LightWGSL>, };
 @group(0) @binding(4) var<storage, read> lights: Lights;
+
+// Geometry
+struct Vert3D { pos: vec3<f32>, _pad0: f32, uv: vec2<f32>, _pad1: vec2<f32>, normal: vec3<f32>, _pad2: f32 };
+struct Verts3D { data: array<Vert3D> };
+struct Indices { data: array<u32> };
+
+@group(0) @binding(5) var<storage, read> verts3d: Verts3D;
+@group(0) @binding(6) var<storage, read> indices3d: Indices;
 
 fn sv_write(px: u32, py: u32, c: vec4<f32>) {
   textureStore(color_out, vec2<i32>(i32(px), i32(py)), c);
@@ -505,6 +547,36 @@ fn sv_write(px: u32, py: u32, c: vec4<f32>) {
 fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
   return textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
 }
+// ---- 3D utilities ----
+// Full hit record including **geometric** normal (for debug/fallback). Shaders may
+// still compute/interpolate their own shading normal using vertex data.
+struct Hit3DFull { hit: bool, t: f32, u: f32, v: f32, Ng: vec3<f32> };
+
+fn sv_ray_tri_full(ro: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> Hit3DFull {
+  let e1 = b - a;
+  let e2 = c - a;
+  let p = cross(rd, e2);
+  let det = dot(e1, p);
+  if (abs(det) < 1e-8) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
+  let inv_det = 1.0 / det;
+  let tv = ro - a;
+  let u = dot(tv, p) * inv_det;
+  if (u < 0.0 || u > 1.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
+  let q = cross(tv, e1);
+  let v = dot(rd, q) * inv_det;
+  if (v < 0.0 || u + v > 1.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
+  let t = dot(e2, q) * inv_det;
+  if (t <= 0.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
+  // Geometric normal; flip to face the ray if needed for stability
+  var Ng = normalize(cross(e1, e2));
+  if (det > 0.0) { Ng = -Ng; }
+  return Hit3DFull(true, t, u, v, Ng);
+}
+
+fn sv_interp3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, u: f32, v: f32) -> vec3<f32> {
+  return a*(1.0-u-v) + b*u + c*v;
+}
+// ---- end 3D utilities ----
 "#;
 
 pub const DEFAULT_2D_BODY: &str = r#"
@@ -528,13 +600,96 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 pub const DEFAULT_3D_BODY: &str = r#"
+  // --- Test Lambert shading (kept in BODY so headers stay generic) ---
+  fn lambert_pointlights(P: vec3<f32>, N: vec3<f32>, base_col: vec3<f32>) -> vec3<f32> {
+    var diffuse = vec3<f32>(0.0);
+    // Use background as ambient; make it visible out of the box
+    let ambient = U.background.xyz;
+
+    for (var li: u32 = 0u; li < U.lights_count; li = li + 1u) {
+      if (lights.data[li].header.y == 0u) { continue; } // emitting flag
+
+      let Lp = lights.data[li].position;
+      let Lc = lights.data[li].color.xyz;
+      let Li = lights.data[li].params0.x + lights.data[li].params1.x;   // intensity + flicker
+
+      let start_d = lights.data[li].params0.z;
+      let end_d   = max(lights.data[li].params0.w, start_d + 1e-3);
+      let L = Lp.xyz - P;
+      let dist2 = max(dot(L, L), 1e-6);
+      let dist = sqrt(dist2);
+      let Ldir = normalize(L);
+
+      // Always two-sided: use |N·L|
+      let ndotl = abs(dot(N, Ldir));
+
+      let fall = clamp((end_d - dist) / max(end_d - start_d, 1e-3), 0.0, 1.0);
+      let atten = Li * ndotl * fall / dist2;
+      diffuse += Lc * atten;
+    }
+    return base_col * (ambient + diffuse);
+  }
+  
 @compute @workgroup_size(8,8,1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x >= U.fb_size.x || gid.y >= U.fb_size.y) { return; }
-  let uv = vec2<f32>(f32(gid.x)/f32(U.fb_size.x), f32(gid.y)/f32(U.fb_size.y));
-  let b = U.background.x;
-  let col = vec4<f32>(uv.x*b, uv.y*b, b, 1.0);
-  sv_write(gid.x, gid.y, col);
+  let px = gid.x; let py = gid.y;
+  if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
+
+  // Unpack camera
+  let cam_pos = U.gp0.xyz;
+  let fovy = U.gp0.w;
+  let dir = normalize(U.gp1.xyz);
+  let aspect = U.gp1.w;
+  let right = normalize(U.gp2.xyz);
+  let up = normalize(U.gp3.xyz);
+
+  // Pixel ray
+  let sx = (f32(px) + 0.5) / f32(U.fb_size.x);
+  let sy = (f32(py) + 0.5) / f32(U.fb_size.y);
+  let x_ndc = 2.0 * sx - 1.0;
+  let y_ndc = 1.0 - 2.0 * sy;
+  let t = tan(0.5 * fovy);
+  let rd = normalize(dir + x_ndc * t * aspect * right + y_ndc * t * up);
+  let ro = cam_pos;
+
+  var best_t = 1e30;
+  var best_uv = vec2<f32>(0.0);
+  var best_n  = vec3<f32>(0.0, 0.0, 1.0);
+  var hit = false;
+
+  let tri_count: u32 = arrayLength(&indices3d.data) / 3u;
+  for (var tix: u32 = 0u; tix < tri_count; tix = tix + 1u) {
+    let i0 = indices3d.data[3u*tix + 0u];
+    let i1 = indices3d.data[3u*tix + 1u];
+    let i2 = indices3d.data[3u*tix + 2u];
+
+    let a = verts3d.data[i0].pos;
+    let b = verts3d.data[i1].pos;
+    let c = verts3d.data[i2].pos;
+    let h = sv_ray_tri_full(ro, rd, a, b, c);
+    if (!h.hit) { continue; }
+    if (h.t < best_t) {
+      let uv0 = verts3d.data[i0].uv; let n0 = verts3d.data[i0].normal;
+      let uv1 = verts3d.data[i1].uv; let n1 = verts3d.data[i1].normal;
+      let uv2 = verts3d.data[i2].uv; let n2 = verts3d.data[i2].normal;
+      best_uv = uv0*(1.0-h.u-h.v) + uv1*h.u + uv2*h.v;
+      best_n  = normalize(sv_interp3(n0, n1, n2, h.u, h.v));
+      best_t  = h.t; hit = true;
+    }
+  }
+
+  if (!hit) { sv_write(px, py, U.background); return; }
+
+  let P = ro + rd * best_t;
+  let base_col = textureSampleLevel(atlas_tex, atlas_smp, best_uv, 0.0);
+   // Two-sided normal fix: flip N if it faces away from the view
+   var N = normalize(best_n);
+   if (dot(N, rd) > 0.0) {
+     N = -N;
+   }
+
+  let lit = lambert_pointlights(P, N, base_col.xyz);
+  sv_write(px, py, vec4<f32>(lit, base_col.a));
 }
 "#;
 
@@ -576,6 +731,7 @@ pub struct VM {
     pub source2d: String,
     pub source3d: String,
     pub transform2d: Mat3<f32>,
+    pub transform3d: Mat4<f32>,
     pub lights: FxHashMap<Uuid, Light>,
 
     pub current_layer: i32,
@@ -608,6 +764,7 @@ impl VM {
             source2d: DEFAULT_2D_BODY.to_string(),
             source3d: DEFAULT_3D_BODY.to_string(),
             transform2d: Mat3::identity(),
+            transform3d: Mat4::identity(),
             lights: FxHashMap::default(),
             current_layer: 0,
         }
@@ -616,6 +773,13 @@ impl VM {
     /// Interpret one instruction.
     pub fn execute(&mut self, atom: Atom) {
         match atom {
+            Atom::SetGeoVisible { id, visible } => {
+                for ch in self.chunks_map.values_mut() {
+                    if let Some(p) = ch.polys_map.get_mut(&id) {
+                        p.visible = visible;
+                    }
+                }
+            }
             Atom::AddTile {
                 id,
                 width,
@@ -691,6 +855,33 @@ impl VM {
                     uvs,
                     indices,
                     self.current_layer,
+                    true,
+                );
+            }
+            Atom::AddPoly3D {
+                id,
+                tile_id,
+                vertices,
+                uvs,
+                indices,
+            } => {
+                let chunk_id = match self.current_chunk {
+                    Some(cid) => cid,
+                    None => {
+                        let cid = Uuid::new_v4();
+                        self.chunks_map.insert(cid, Chunk::default());
+                        self.current_chunk = Some(cid);
+                        cid
+                    }
+                };
+                self.chunks_map.entry(chunk_id).or_default().add_poly_3d(
+                    id,
+                    tile_id,
+                    vertices,
+                    uvs,
+                    indices,
+                    self.current_layer,
+                    true,
                 );
             }
             Atom::AddLineStrip2D {
@@ -763,6 +954,9 @@ impl VM {
             }
             Atom::SetTransform2D(m) => {
                 self.transform2d = m;
+            }
+            Atom::SetTransform3D(m) => {
+                self.transform3d = m;
             }
             Atom::SetLayer(l) => {
                 self.current_layer = l;
@@ -956,6 +1150,8 @@ impl VM {
             u3d_bg: None,
             v2d_ssbo: None,
             i2d_ssbo: None,
+            v3d_ssbo: None,
+            i3d_ssbo: None,
             tile_offsets: None,
             tile_counts: None,
             tile_tris: None,
@@ -1275,6 +1471,28 @@ impl VM {
                     },
                     count: None,
                 },
+                // binding 5: verts3d
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 6: indices3d
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -1422,6 +1640,9 @@ impl VM {
         for (_cid, ch) in &self.chunks_map {
             let prio = ch.priority;
             for poly in ch.polys_map.values() {
+                if !poly.visible {
+                    continue;
+                }
                 let rect_opt = self.frame_rect(&poly.tile_id, self.animation_counter as u32);
                 let rect = if let Some(r) = rect_opt { r } else { continue };
                 let base = verts_flat.len() as u32;
@@ -1605,16 +1826,11 @@ impl VM {
         let mut lights_flat: Vec<LightPod> = Vec::with_capacity(self.lights.len().max(1));
         if self.lights.is_empty() {
             lights_flat.push(LightPod {
-                light_type: 0,
-                position: [0.0, 0.0, 0.0],
-                color: [0.0, 0.0, 0.0],
-                intensity: 0.0,
-                radius: 0.0,
-                emitting: 0,
-                start_distance: 0.0,
-                end_distance: 0.0,
-                flicker: 0.0,
-                _pad0: 0.0,
+                header: [0, 0, 0, 0],
+                position: [0.0, 0.0, 0.0, 0.0],
+                color: [0.0, 0.0, 0.0, 0.0],
+                params0: [0.0, 0.0, 0.0, 0.0],
+                params1: [0.0, 0.0, 0.0, 0.0],
             });
         } else {
             for (id, l) in &self.lights {
@@ -1628,18 +1844,18 @@ impl VM {
                 let flicker = l.flicker * rnd01; // bake result into pod
 
                 lights_flat.push(LightPod {
-                    light_type: match l.light_type {
-                        LightType::Point => 0,
-                    },
-                    position: [l.position.x, l.position.y, l.position.z],
-                    color: [l.color.x, l.color.y, l.color.z],
-                    intensity: l.intensity,
-                    radius: l.radius,
-                    emitting: if l.emitting { 1 } else { 0 },
-                    start_distance: l.start_distance,
-                    end_distance: l.end_distance,
-                    flicker,
-                    _pad0: 0.0,
+                    header: [
+                        match l.light_type {
+                            LightType::Point => 0,
+                        },
+                        if l.emitting { 1 } else { 0 },
+                        0,
+                        0,
+                    ],
+                    position: [l.position.x, l.position.y, l.position.z, 0.0],
+                    color: [l.color.x, l.color.y, l.color.z, 0.0],
+                    params0: [l.intensity, l.radius, l.start_distance, l.end_distance],
+                    params1: [flicker, 0.0, 0.0, 0.0],
                 });
             }
         }
@@ -1732,7 +1948,7 @@ impl VM {
         }
         self.init_compute(device);
         surface.ensure_gpu_with(device);
-        let m = vek::Mat4::<f32>::identity(); // TODO: store & set via atom later
+        let m = self.transform3d;
         let u = Compute3DUniforms {
             background: self.background.into_array(),
             fb_size: [fb_w, fb_h],
@@ -1763,16 +1979,11 @@ impl VM {
         let mut lights_flat: Vec<LightPod> = Vec::with_capacity(self.lights.len().max(1));
         if self.lights.is_empty() {
             lights_flat.push(LightPod {
-                light_type: 0,
-                position: [0.0, 0.0, 0.0],
-                color: [0.0, 0.0, 0.0],
-                intensity: 0.0,
-                radius: 0.0,
-                emitting: 0,
-                start_distance: 0.0,
-                end_distance: 0.0,
-                flicker: 0.0,
-                _pad0: 0.0,
+                header: [0, 0, 0, 0],
+                position: [0.0, 0.0, 0.0, 0.0],
+                color: [0.0, 0.0, 0.0, 0.0],
+                params0: [0.0, 0.0, 0.0, 0.0],
+                params1: [0.0, 0.0, 0.0, 0.0],
             });
         } else {
             for (id, l) in &self.lights {
@@ -1786,18 +1997,18 @@ impl VM {
                 let flicker = l.flicker * rnd01; // bake result into pod
 
                 lights_flat.push(LightPod {
-                    light_type: match l.light_type {
-                        LightType::Point => 0,
-                    },
-                    position: [l.position.x, l.position.y, l.position.z],
-                    color: [l.color.x, l.color.y, l.color.z],
-                    intensity: l.intensity,
-                    radius: l.radius,
-                    emitting: if l.emitting { 1 } else { 0 },
-                    start_distance: l.start_distance,
-                    end_distance: l.end_distance,
-                    flicker,
-                    _pad0: 0.0,
+                    header: [
+                        match l.light_type {
+                            LightType::Point => 0,
+                        },
+                        if l.emitting { 1 } else { 0 },
+                        0,
+                        0,
+                    ],
+                    position: [l.position.x, l.position.y, l.position.z, 0.0],
+                    color: [l.color.x, l.color.y, l.color.z, 0.0],
+                    params0: [l.intensity, l.radius, l.start_distance, l.end_distance],
+                    params1: [flicker, 0.0, 0.0, 0.0],
                 });
             }
         }
@@ -1815,6 +2026,121 @@ impl VM {
         self.upload_atlas_to_gpu_with(device, queue);
         let view = &surface.gpu.as_ref().unwrap().view;
         let atlas_view = &self.atlas.gpu.as_ref().unwrap().view;
+
+        // --- Build 3D geometry (world space) and upload to SSBOs ---
+        let mut v3: Vec<Vert3DPod> = Vec::new();
+        let mut i3: Vec<u32> = Vec::new();
+
+        for (_cid, ch) in &self.chunks_map {
+            for poly in ch.polys3d_map.values() {
+                if !poly.visible {
+                    continue;
+                }
+
+                let rect = match self.frame_rect(&poly.tile_id, self.animation_counter as u32) {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                // Prepare per-poly transformed positions and normals
+                let vcount = poly.vertices.len();
+                let mut poly_pos: Vec<[f32; 3]> = Vec::with_capacity(vcount);
+                let mut poly_nrm: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]];
+                poly_nrm.resize(vcount, [0.0, 0.0, 0.0]);
+
+                for v in &poly.vertices {
+                    let p = m * Vec4::new(v[0], v[1], v[2], v[3]);
+                    let w = if p.w != 0.0 { p.w } else { 1.0 };
+                    poly_pos.push([p.x / w, p.y / w, p.z / w]);
+                }
+
+                // Accumulate area-weighted face normals
+                for &(a, b, c) in &poly.indices {
+                    let pa = poly_pos[a];
+                    let pb = poly_pos[b];
+                    let pc = poly_pos[c];
+                    let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+                    let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+                    let nx = e1[1] * e2[2] - e1[2] * e2[1];
+                    let ny = e1[2] * e2[0] - e1[0] * e2[2];
+                    let nz = e1[0] * e2[1] - e1[1] * e2[0];
+                    // area weight is |cross|; accumulate unnormalized
+                    poly_nrm[a][0] += nx;
+                    poly_nrm[a][1] += ny;
+                    poly_nrm[a][2] += nz;
+                    poly_nrm[b][0] += nx;
+                    poly_nrm[b][1] += ny;
+                    poly_nrm[b][2] += nz;
+                    poly_nrm[c][0] += nx;
+                    poly_nrm[c][1] += ny;
+                    poly_nrm[c][2] += nz;
+                }
+
+                // Normalize vertex normals
+                for n in &mut poly_nrm {
+                    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    if len > 1e-12 {
+                        n[0] /= len;
+                        n[1] /= len;
+                        n[2] /= len;
+                    }
+                }
+
+                let base = v3.len() as u32;
+                let atlas_w = self.atlas.width as f32;
+                let atlas_h = self.atlas.height as f32;
+
+                for (i, p) in poly_pos.iter().enumerate() {
+                    let uv0 = poly.uvs[i];
+                    let u = (rect.x as f32 + uv0[0] * rect.w as f32) / atlas_w;
+                    let v_uv = (rect.y as f32 + uv0[1] * rect.h as f32) / atlas_h;
+                    let n = poly_nrm[i];
+                    v3.push(Vert3DPod {
+                        pos: [p[0], p[1], p[2]],
+                        _pad_pos: 0.0,
+                        uv: [u, v_uv],
+                        _pad_uv: [0.0, 0.0],
+                        normal: [n[0], n[1], n[2]],
+                        _pad_n: 0.0,
+                    });
+                }
+
+                for &(a, b, c) in &poly.indices {
+                    i3.extend_from_slice(&[base + a as u32, base + b as u32, base + c as u32]);
+                }
+            }
+        }
+
+        // ensure non-empty buffers (wgpu validation)
+        if v3.is_empty() {
+            v3.push(Vert3DPod {
+                pos: [0.0; 3],
+                _pad_pos: 0.0,
+                uv: [0.0; 2],
+                _pad_uv: [0.0; 2],
+                normal: [0.0, 0.0, 1.0],
+                _pad_n: 0.0,
+            });
+        }
+        if i3.is_empty() {
+            i3.push(0);
+        }
+
+        let v3_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-3d-verts-ssbo"),
+            contents: bytemuck::cast_slice(&v3),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let i3_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-3d-indices-ssbo"),
+            contents: bytemuck::cast_slice(&i3),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        // store
+        let g = self.gpu.as_mut().unwrap();
+        g.v3d_ssbo = Some(v3_buf);
+        g.i3d_ssbo = Some(i3_buf);
+
         let g = self.gpu.as_mut().unwrap();
         g.u3d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vm-u3d-bg"),
@@ -1839,6 +2165,14 @@ impl VM {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: g.lights_ssbo.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: g.v3d_ssbo.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: g.i3d_ssbo.as_ref().unwrap().as_entire_binding(),
                 },
             ],
         }));

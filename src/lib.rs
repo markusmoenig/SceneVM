@@ -11,7 +11,7 @@ pub use crate::{
     intodata::IntoDataInput,
     light::{Light, LightType},
     texture::Texture,
-    vm::{Atom, GeoId, Poly2D, VM},
+    vm::{Atom, GeoId, Poly2D, Poly3D, RenderMode, VM},
 };
 
 use image;

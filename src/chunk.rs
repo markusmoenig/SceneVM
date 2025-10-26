@@ -1,4 +1,4 @@
-use crate::{BBox2D, GeoId, Poly2D};
+use crate::{BBox2D, GeoId, Poly2D, Poly3D};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -10,8 +10,11 @@ pub struct Chunk {
     pub size: i32,
     pub bbox: BBox2D,
 
-    /// 2D Geometrt
+    /// 2D Geometry
     pub polys_map: FxHashMap<GeoId, Poly2D>,
+
+    /// 3D Geometry,
+    pub polys3d_map: rustc_hash::FxHashMap<GeoId, Poly3D>,
 
     /// The priority of the chunk.
     pub priority: i32,
@@ -37,6 +40,7 @@ impl Chunk {
         uvs: Vec<[f32; 2]>,
         indices: Vec<(usize, usize, usize)>,
         layer: i32,
+        visible: bool,
     ) {
         let poly = Poly2D {
             id,
@@ -46,6 +50,7 @@ impl Chunk {
             indices,
             transform: Mat3::identity(),
             layer,
+            visible,
         };
         self.polys_map.insert(id, poly);
     }
@@ -108,6 +113,7 @@ impl Chunk {
             indices,
             transform: Mat3::identity(),
             layer,
+            visible: true,
         };
         self.polys_map.insert(id, poly);
     }
@@ -121,6 +127,7 @@ impl Chunk {
         center: [f32; 2],
         size: f32,
         layer: i32,
+        visible: bool,
     ) {
         if size <= 0.0 {
             return;
@@ -149,7 +156,33 @@ impl Chunk {
             indices,
             transform: Mat3::identity(),
             layer,
+            visible,
         };
         self.polys_map.insert(id, poly);
+    }
+
+    /// Add a 3D polygon
+    pub fn add_poly_3d(
+        &mut self,
+        id: GeoId,
+        tile_id: uuid::Uuid,
+        vertices: Vec<[f32; 4]>,
+        uvs: Vec<[f32; 2]>,
+        indices: Vec<(usize, usize, usize)>,
+        layer: i32,
+        visible: bool,
+    ) {
+        self.polys3d_map.insert(
+            id,
+            Poly3D {
+                id,
+                tile_id,
+                vertices,
+                uvs,
+                indices,
+                layer,
+                visible,
+            },
+        );
     }
 }
