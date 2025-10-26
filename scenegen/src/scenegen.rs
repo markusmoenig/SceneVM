@@ -1,12 +1,12 @@
 use scenevm::{Atom, GeoId, Light, RenderMode, SceneVM};
 use theframework::prelude::*;
 
-use vek::Mat3;
+use vek::Mat4;
 
 pub struct Circle {
     vm: SceneVM,
 
-    matrix: Mat3<f32>,
+    matrix: Mat4<f32>,
 }
 
 impl TheTrait for Circle {
@@ -16,7 +16,7 @@ impl TheTrait for Circle {
     {
         Self {
             vm: SceneVM::new(100, 100),
-            matrix: Mat3::identity(),
+            matrix: Mat4::identity(),
         }
     }
 
@@ -93,53 +93,66 @@ impl TheTrait for Circle {
             .execute(Atom::SetGP3(vek::Vec4::new(up.x, up.y, up.z, 0.0)));
 
         let size = 2.0;
-        let center = Vec4::zero();
+        let center: Vec4<f32> = Vec4::zero();
 
         let h = size * 0.5;
-        let cx: f32 = center.x;
-        let cy = center.y;
-        let cz = center.z;
+        let (cx, cy, cz) = (center.x, center.y, center.z);
 
+        // 24 vertices (4 per face) so each face can have its own UVs
         let verts = vec![
+            // -Z (back)
             [cx - h, cy - h, cz - h, 1.0],
             [cx + h, cy - h, cz - h, 1.0],
             [cx + h, cy + h, cz - h, 1.0],
-            [cx - h, cy + h, cz - h, 1.0], // back (z-)
+            [cx - h, cy + h, cz - h, 1.0],
+            // +Z (front)
             [cx - h, cy - h, cz + h, 1.0],
             [cx + h, cy - h, cz + h, 1.0],
             [cx + h, cy + h, cz + h, 1.0],
-            [cx - h, cy + h, cz + h, 1.0], // front (z+)
+            [cx - h, cy + h, cz + h, 1.0],
+            // -X (left)
+            [cx - h, cy - h, cz - h, 1.0],
+            [cx - h, cy + h, cz - h, 1.0],
+            [cx - h, cy + h, cz + h, 1.0],
+            [cx - h, cy - h, cz + h, 1.0],
+            // +X (right)
+            [cx + h, cy - h, cz - h, 1.0],
+            [cx + h, cy + h, cz - h, 1.0],
+            [cx + h, cy + h, cz + h, 1.0],
+            [cx + h, cy - h, cz + h, 1.0],
+            // -Y (bottom)
+            [cx - h, cy - h, cz - h, 1.0],
+            [cx - h, cy - h, cz + h, 1.0],
+            [cx + h, cy - h, cz + h, 1.0],
+            [cx + h, cy - h, cz - h, 1.0],
+            // +Y (top)
+            [cx - h, cy + h, cz - h, 1.0],
+            [cx - h, cy + h, cz + h, 1.0],
+            [cx + h, cy + h, cz + h, 1.0],
+            [cx + h, cy + h, cz - h, 1.0],
         ];
-        // simple per-vertex UVs (reused)
-        let uvs = vec![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ];
+
+        // same 0..1 UVs per face (6 faces × 4 verts)
+        let face_uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut uvs = Vec::with_capacity(24);
+        for _ in 0..6 {
+            uvs.extend_from_slice(&face_uv);
+        }
+
+        // two triangles per face, using the 24-vertex layout above
         let idx = vec![
-            // back  (0,1,2,3) : z = -h  (viewed from -Z side)
             (0, 1, 2),
-            (0, 2, 3),
-            // front (4,5,6,7) : z = +h  (viewed from +Z side)
+            (0, 2, 3), // -Z
             (4, 5, 6),
-            (4, 6, 7),
-            // left  (0,3,7,4) : x = -h  (viewed from -X side)
-            (0, 3, 7),
-            (0, 7, 4),
-            // right (1,5,6,2) : x = +h  (viewed from +X side)
-            (1, 5, 6),
-            (1, 6, 2),
-            // bottom(0,4,5,1) : y = -h  (viewed from -Y side)
-            (0, 4, 5),
-            (0, 5, 1),
-            // top   (3,2,6,7) : y = +h  (viewed from +Y side)
-            (3, 2, 6),
-            (3, 6, 7),
+            (4, 6, 7), // +Z
+            (8, 9, 10),
+            (8, 10, 11), // -X
+            (12, 13, 14),
+            (12, 14, 15), // +X
+            (16, 17, 18),
+            (16, 18, 19), // -Y
+            (20, 21, 22),
+            (20, 22, 23), // +Y
         ];
 
         self.vm.execute(Atom::AddPoly3D {
@@ -156,14 +169,15 @@ impl TheTrait for Circle {
         });
 
         self.vm
-            .execute(Atom::SetGP9(vek::Vec4::new(0.0, 1.0, 1.0, 1.0)));
+            .execute(Atom::SetGP9(vek::Vec4::new(0.0, 1.0, 0.0, 1.0)));
     }
 
     /// Draw a circle in the middle of the window
     fn draw(&mut self, pixels: &mut [u8], ctx: &mut TheContext) {
-        // Rotate matrix here
-
-        // self.vm.execute(Atom::SetTransform3D(()));
+        // Rotate a bit every frame to see the cube spinning (angles in radians per frame)
+        let rot = Mat4::<f32>::rotation_y(0.02) * Mat4::<f32>::rotation_x(0.01);
+        self.matrix = rot * self.matrix;
+        self.vm.execute(Atom::SetTransform3D(self.matrix));
 
         self.vm
             .render_frame(pixels, ctx.width as u32, ctx.height as u32);

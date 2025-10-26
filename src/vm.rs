@@ -806,6 +806,7 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
 
       let hit = sv_ray_tri_full(ro, rd, a, b, c);
       if (!hit.hit) { continue; }
+
       if (hit.t < best_t) {
         best_t  = hit.t;
         best_tri = tri;
@@ -925,28 +926,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let tproj = tan(0.5 * fovy);
   let rd = normalize(dir + x_ndc * tproj * aspect * right + y_ndc * tproj * up);
   let ro = cam_pos;
-
-  // Optional grid-debug visualization: enable by setting U.gp9.y > 0.5
-//   if (U.gp9.y > 0.5) {
-//     // let ro = U.gp0.xyz;
-//     // let rd = normalize(U.gp1.xyz); // or use your real camera basis
-//     let bmin = grid_bounds_min();
-//     let bmax = grid_bounds_max();
-//     let rb = ray_box(ro, rd, bmin, bmax);
-//     if (rb.x > 0.5) {
-//       let p0 = ro + rd * rb.y;
-//       let c0 = clamp_cell(grid_world_to_cell(p0));
-//       let idx = grid_cell_index(u32(c0.x), u32(c0.y), u32(c0.z));
-//       let count = grid_counts.data[idx];
-//       let v = clamp(f32(count) / 16.0, 0.0, 1.0);
-//       // Cyan=empty, Magenta=full; black=no AABB hit
-//       sv_write(px, py, vec4<f32>(v, 0.0, 1.0 - v, 1.0));
-//       return;
-//     } else {
-//       sv_write(px, py, vec4<f32>(0.0, 0.0, 0.0, 1.0));
-//       return;
-//     }
-//   }
 
   // ===== choose tracing mode =====
   var hit_any = false;
