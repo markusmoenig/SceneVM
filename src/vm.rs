@@ -1,8 +1,31 @@
+// Non-empty dummy buffers for wgpu STORAGE bindings when a scene grid is empty.
+const DUMMY_U32_1: [u32; 1] = [0];
+const DUMMY_I32_1: [i32; 1] = [0];
 use crate::{Chunk, Light, LightType, Texture};
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 use vek::{Mat3, Mat4, Vec3, Vec4};
+
+// --- Scene-wide acceleration structures (uniform grid over all 3D geometry) ---
+#[derive(Debug, Clone, Default)]
+pub struct SceneGridAccel {
+    pub origin: vek::Vec3<f32>,    // world-space min of the grid AABB
+    pub cell_size: vek::Vec3<f32>, // world size of a cell (x,y,z)
+    pub dims: [u32; 3],            // nx, ny, nz
+    // CSR arrays for cell -> tri list
+    pub cell_offsets: Vec<u32>, // len = nx*ny*nz
+    pub cell_counts: Vec<u32>,  // len = nx*ny*nz
+    pub cell_tris: Vec<u32>,    // flattened triangle indices
+    // Per-triangle metadata (kept flat and aligned with scene's 3D tri order)
+    pub tri_tile: Vec<u32>,  // tri -> tile index (for sampling)
+    pub tri_layer: Vec<i32>, // tri -> layer (optional ordering/debug)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SceneAccel {
+    pub grid: SceneGridAccel,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// The Geometry Identifier for polygons and triangles.
@@ -164,6 +187,13 @@ pub enum Atom {
     },
     /// Remove all lights from the scene
     ClearLights,
+    /// Build/replace the global scene uniform grid over all current 3D geometry
+    BuildSceneGrid {
+        cell_world: f32,
+        target_cells: u32,
+    },
+    /// Reset the scene acceleration structure (will be rebuilt on next BuildSceneGrid)
+    ClearSceneGrid,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +265,13 @@ pub struct VMGpu {
     pub tile_tris: Option<wgpu::Buffer>,
     // Lights
     pub lights_ssbo: Option<wgpu::Buffer>,
+    // --- Scene-wide uniform grid buffers (3D)
+    pub grid_hdr: Option<wgpu::Buffer>,
+    pub grid_offsets: Option<wgpu::Buffer>,
+    pub grid_counts: Option<wgpu::Buffer>,
+    pub grid_tris: Option<wgpu::Buffer>,
+    pub tri_tile: Option<wgpu::Buffer>,
+    pub tri_layer: Option<wgpu::Buffer>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -335,6 +372,14 @@ pub struct Compute3DUniforms {
     pub lights_count: u32,
     _pad_lights_align: [u32; 3],
     _pad_lights_vec3: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Grid3DHeader {
+    pub origin: [f32; 4],    // xyz, pad
+    pub cell_size: [f32; 4], // xyz, pad
+    pub dims: [u32; 4],      // nx, ny, nz, pad
 }
 
 pub const SCENEVM_2D_CS_WGSL: &str = r#"
@@ -541,6 +586,24 @@ struct Indices { data: array<u32> };
 @group(0) @binding(5) var<storage, read> verts3d: Verts3D;
 @group(0) @binding(6) var<storage, read> indices3d: Indices;
 
+// --- Scene-wide uniform grid (optional toggle via gp9.w) ---
+struct Grid3DHeader {
+  origin: vec4<f32>,     // xyz, pad
+  cell_size: vec4<f32>,  // xyz, pad
+  dims: vec4<u32>,       // nx, ny, nz, pad
+};
+@group(0) @binding(7) var<uniform> gridH: Grid3DHeader;
+struct U32s { data: array<u32> };
+struct I32s { data: array<i32> };
+
+@group(0) @binding(8)  var<storage, read> grid_offsets: U32s;
+@group(0) @binding(9)  var<storage, read> grid_counts:  U32s;
+@group(0) @binding(10) var<storage, read> grid_tris:    U32s;
+@group(0) @binding(11) var<storage, read> tri_tile:     U32s;
+@group(0) @binding(12) var<storage, read> tri_layer:    I32s;
+
+fn sv_grid_active() -> bool { return U.gp9.w > 0.5; }
+
 fn sv_write(px: u32, py: u32, c: vec4<f32>) {
   textureStore(color_out, vec2<i32>(i32(px), i32(py)), c);
 }
@@ -576,7 +639,219 @@ fn sv_ray_tri_full(ro: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: 
 fn sv_interp3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, u: f32, v: f32) -> vec3<f32> {
   return a*(1.0-u-v) + b*u + c*v;
 }
-// ---- end 3D utilities ----
+
+// ===== Uniform-grid DDA traversal over triangles =====
+
+// Packed hit record returned by DDA tracing.
+struct TraceHit {
+  hit: bool,
+  t: f32,        // distance along ray
+  tri: u32,      // winning triangle index (in indices3d, tri = tix)
+  u: f32,        // barycentric u
+  v: f32,        // barycentric v
+  Ng: vec3<f32>, // geometric normal
+};
+
+// Grid helpers
+fn grid_bounds_min() -> vec3<f32> { return gridH.origin.xyz; }
+fn grid_cell_size() -> vec3<f32> { return gridH.cell_size.xyz; }
+fn grid_dims() -> vec3<u32> { return gridH.dims.xyz; }
+
+fn grid_cell_index(ix: u32, iy: u32, iz: u32) -> u32 {
+  let nx = gridH.dims.x; let ny = gridH.dims.y;
+  return (iz * ny + iy) * nx + ix;
+}
+
+fn grid_world_to_cell(p: vec3<f32>) -> vec3<i32> {
+  let minb = grid_bounds_min();
+  let cs = grid_cell_size();
+  let rel = (p - minb) / cs;
+  return vec3<i32>(floor(rel));
+}
+
+fn clamp_cell(c: vec3<i32>) -> vec3<i32> {
+  let d = grid_dims();
+  return vec3<i32>(
+    clamp(c.x, 0, i32(d.x) - 1),
+    clamp(c.y, 0, i32(d.y) - 1),
+    clamp(c.z, 0, i32(d.z) - 1)
+  );
+}
+
+fn grid_bounds_max() -> vec3<f32> {
+  return grid_bounds_min() + grid_cell_size() * vec3<f32>(grid_dims());
+}
+
+// Ray/AABB for the whole grid, returns (hit, tEnter, tExit)
+fn ray_box(ro: vec3<f32>, rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> vec3<f32> {
+  let eps = 1e-6;
+
+  // For each axis: if |rd| >= eps use rd, else use sign(rd)*eps (preserve sign)
+  let rx = select(sign(rd.x) * eps, rd.x, abs(rd.x) >= eps);
+  let ry = select(sign(rd.y) * eps, rd.y, abs(rd.y) >= eps);
+  let rz = select(sign(rd.z) * eps, rd.z, abs(rd.z) >= eps);
+
+  let inv = vec3<f32>(1.0 / rx, 1.0 / ry, 1.0 / rz);
+
+  let t0 = (bmin - ro) * inv;
+  let t1 = (bmax - ro) * inv;
+
+  let tmin = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
+  let tmax = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+
+  let hit = select(0.0, 1.0, tmax >= max(tmin, 0.0));
+  return vec3<f32>(hit, tmin, tmax);
+}
+
+struct DDAState {
+  tMax:   vec3<f32>,  // absolute times when we hit the next boundary on each axis
+  tDelta: vec3<f32>,  // absolute time increment to cross one full cell along each axis
+  step:   vec3<i32>,  // -1 or +1 per axis
+};
+
+// p = point at tEnter (AABB entry), tEnter = absolute time
+fn dda_setup(p: vec3<f32>, rd: vec3<f32>, cell: vec3<i32>, tEnter: f32) -> DDAState {
+  let cs = grid_cell_size();
+  let minb = grid_bounds_min();
+  let fcell = vec3<f32>(cell);
+
+  let step = vec3<i32>(
+    select(-1, 1, rd.x >= 0.0),
+    select(-1, 1, rd.y >= 0.0),
+    select(-1, 1, rd.z >= 0.0)
+  );
+
+  // next boundary coordinate (on the side we are heading to)
+  let nb_x = minb.x + (select(fcell.x, fcell.x + 1.0, step.x > 0) * cs.x);
+  let nb_y = minb.y + (select(fcell.y, fcell.y + 1.0, step.y > 0) * cs.y);
+  let nb_z = minb.z + (select(fcell.z, fcell.z + 1.0, step.z > 0) * cs.z);
+
+  // safe reciprocals
+  let inv = 1.0 / max(abs(rd), vec3<f32>(1e-32));
+
+  // time from *p* to the next boundary per axis, then make them absolute by + tEnter
+  let tMax = vec3<f32>(
+    tEnter + (nb_x - p.x) * inv.x,
+    tEnter + (nb_y - p.y) * inv.y,
+    tEnter + (nb_z - p.z) * inv.z
+  );
+
+  // how much absolute time (Δt) to traverse exactly one cell per axis
+  let tDelta = vec3<f32>(cs.x * inv.x, cs.y * inv.y, cs.z * inv.z);
+
+  return DDAState(tMax, tDelta, step);
+}
+
+// Core: uniform-grid DDA traversal. Assumes grid buffers populated.
+// tmin/tmax clip the segment (e.g., near/far planes).
+fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit {
+  // Intersect ray with grid AABB
+  let bmin = grid_bounds_min();
+  let bmax = grid_bounds_max();
+  let rb = ray_box(ro, rd, bmin, bmax);
+  if (rb.x < 0.5) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0)); }
+
+  var tEnter = max(rb.y, tmin);
+  let tExit = min(rb.z, tmax);
+  if (tEnter > tExit) {
+    return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
+  }
+
+  // Start cell: point at tEnter
+  var p = ro + rd * tEnter;
+  var cell = clamp_cell(grid_world_to_cell(p));
+
+  // DDA setup
+  var st = dda_setup(p, rd, cell, tEnter);
+  var tNext = st.tMax;  // next boundary crossings
+  
+  let dims = grid_dims();
+
+  var best_t = 1e30;
+  var best_tri: u32 = 0u;
+  var best_u = 0.0;
+  var best_v = 0.0;
+  var best_Ng = vec3<f32>(0.0);
+
+  // Hard cap to prevent infinite loops; plenty for large screens
+  let MAX_STEPS: u32 = 1u << 20u;
+  var steps: u32 = 0u;
+
+  loop {
+    if (steps >= MAX_STEPS) { break; }
+    steps = steps + 1u;
+
+    // Cell index & triangle span
+    let ix = u32(cell.x);
+    let iy = u32(cell.y);
+    let iz = u32(cell.z);
+    let idx = grid_cell_index(ix, iy, iz);
+    let off = grid_offsets.data[idx];
+    let cnt = grid_counts.data[idx];
+
+    // Test tris in this cell; accept the closest hit that lies BEFORE we cross the next cell boundary
+    let tCellExit = min(tNext.x, min(tNext.y, tNext.z));
+    for (var k: u32 = 0u; k < cnt; k = k + 1u) {
+      let tri = grid_tris.data[off + k];
+
+      // Fetch tri indices (tri references indices3d in packs of 3)
+      let i0 = indices3d.data[3u*tri + 0u];
+      let i1 = indices3d.data[3u*tri + 1u];
+      let i2 = indices3d.data[3u*tri + 2u];
+
+      // Triangle vertices
+      let a = verts3d.data[i0].pos;
+      let b = verts3d.data[i1].pos;
+      let c = verts3d.data[i2].pos;
+
+      let hit = sv_ray_tri_full(ro, rd, a, b, c);
+      if (!hit.hit) { continue; }
+      if (hit.t < best_t) {
+        best_t  = hit.t;
+        best_tri = tri;
+        best_u  = hit.u;
+        best_v  = hit.v;
+        best_Ng = hit.Ng;
+      }
+    }
+
+    if (best_t < 1e29) {
+      // Hit inside current cell slab -> earliest along ray
+      return TraceHit(true, best_t, best_tri, best_u, best_v, best_Ng);
+    }
+
+    // Advance to next cell along the smallest tNext
+    if (tNext.x < tNext.y) {
+      if (tNext.x < tNext.z) {
+        cell.x += st.step.x;
+        tEnter = tNext.x;
+        tNext.x += abs(st.tDelta.x);
+      } else {
+        cell.z += st.step.z;
+        tEnter = tNext.z;
+        tNext.z += abs(st.tDelta.z);
+      }
+    } else {
+      if (tNext.y < tNext.z) {
+        cell.y += st.step.y;
+        tEnter = tNext.y;
+        tNext.y += abs(st.tDelta.y);
+      } else {
+        cell.z += st.step.z;
+        tEnter = tNext.z;
+        tNext.z += abs(st.tDelta.z);
+      }
+    }
+
+    // Out of grid or beyond segment
+    if (tEnter > tExit) { break; }
+    if (cell.x < 0 || cell.y < 0 || cell.z < 0) { break; }
+    if (u32(cell.x) >= dims.x || u32(cell.y) >= dims.y || u32(cell.z) >= dims.z) { break; }
+  }
+
+  return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
+}
+// ===== end DDA =====  
 "#;
 
 pub const DEFAULT_2D_BODY: &str = r#"
@@ -635,7 +910,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let px = gid.x; let py = gid.y;
   if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
 
-  // Unpack camera
+  // Unpack camera (unchanged) ...
   let cam_pos = U.gp0.xyz;
   let fovy = U.gp0.w;
   let dir = normalize(U.gp1.xyz);
@@ -643,50 +918,94 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let right = normalize(U.gp2.xyz);
   let up = normalize(U.gp3.xyz);
 
-  // Pixel ray
   let sx = (f32(px) + 0.5) / f32(U.fb_size.x);
   let sy = (f32(py) + 0.5) / f32(U.fb_size.y);
   let x_ndc = 2.0 * sx - 1.0;
   let y_ndc = 1.0 - 2.0 * sy;
-  let t = tan(0.5 * fovy);
-  let rd = normalize(dir + x_ndc * t * aspect * right + y_ndc * t * up);
+  let tproj = tan(0.5 * fovy);
+  let rd = normalize(dir + x_ndc * tproj * aspect * right + y_ndc * tproj * up);
   let ro = cam_pos;
 
-  var best_t = 1e30;
-  var best_uv = vec2<f32>(0.0);
-  var best_n  = vec3<f32>(0.0, 0.0, 1.0);
-  var hit = false;
+  // Optional grid-debug visualization: enable by setting U.gp9.y > 0.5
+//   if (U.gp9.y > 0.5) {
+//     // let ro = U.gp0.xyz;
+//     // let rd = normalize(U.gp1.xyz); // or use your real camera basis
+//     let bmin = grid_bounds_min();
+//     let bmax = grid_bounds_max();
+//     let rb = ray_box(ro, rd, bmin, bmax);
+//     if (rb.x > 0.5) {
+//       let p0 = ro + rd * rb.y;
+//       let c0 = clamp_cell(grid_world_to_cell(p0));
+//       let idx = grid_cell_index(u32(c0.x), u32(c0.y), u32(c0.z));
+//       let count = grid_counts.data[idx];
+//       let v = clamp(f32(count) / 16.0, 0.0, 1.0);
+//       // Cyan=empty, Magenta=full; black=no AABB hit
+//       sv_write(px, py, vec4<f32>(v, 0.0, 1.0 - v, 1.0));
+//       return;
+//     } else {
+//       sv_write(px, py, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+//       return;
+//     }
+//   }
 
-  let tri_count: u32 = arrayLength(&indices3d.data) / 3u;
-  for (var tix: u32 = 0u; tix < tri_count; tix = tix + 1u) {
-    let i0 = indices3d.data[3u*tix + 0u];
-    let i1 = indices3d.data[3u*tix + 1u];
-    let i2 = indices3d.data[3u*tix + 2u];
+  // ===== choose tracing mode =====
+  var hit_any = false;
+  var best_t  = 1e30;
+  var best_tri: u32 = 0u;
+  var best_u = 0.0;
+  var best_v = 0.0;
 
-    let a = verts3d.data[i0].pos;
-    let b = verts3d.data[i1].pos;
-    let c = verts3d.data[i2].pos;
-    let h = sv_ray_tri_full(ro, rd, a, b, c);
-    if (!h.hit) { continue; }
-    if (h.t < best_t) {
-      let uv0 = verts3d.data[i0].uv; let n0 = verts3d.data[i0].normal;
-      let uv1 = verts3d.data[i1].uv; let n1 = verts3d.data[i1].normal;
-      let uv2 = verts3d.data[i2].uv; let n2 = verts3d.data[i2].normal;
-      best_uv = uv0*(1.0-h.u-h.v) + uv1*h.u + uv2*h.v;
-      best_n  = normalize(sv_interp3(n0, n1, n2, h.u, h.v));
-      best_t  = h.t; hit = true;
+  if (sv_grid_active()) {
+    let th = sv_trace_grid(ro, rd, 0.001, 1e6);
+    if (th.hit) {
+      hit_any = true;
+      best_t = th.t;
+      best_tri = th.tri;
+      best_u = th.u;
+      best_v = th.v;
+    }
+  } else {
+    // Brute-force: loop all triangles in indices3d
+    let tri_count: u32 = arrayLength(&indices3d.data) / 3u;
+    for (var tri: u32 = 0u; tri < tri_count; tri = tri + 1u) {
+      let i0 = indices3d.data[3u*tri + 0u];
+      let i1 = indices3d.data[3u*tri + 1u];
+      let i2 = indices3d.data[3u*tri + 2u];
+      let a = verts3d.data[i0].pos;
+      let b = verts3d.data[i1].pos;
+      let c = verts3d.data[i2].pos;
+      let h = sv_ray_tri_full(ro, rd, a, b, c);
+      if (h.hit && h.t < best_t) {
+        hit_any = true;
+        best_t = h.t;
+        best_tri = tri;
+        best_u = h.u;
+        best_v = h.v;
+      }
     }
   }
 
-  if (!hit) { sv_write(px, py, U.background); return; }
+  if (!hit_any) {
+    sv_write(px, py, U.background);
+    return;
+  }
+
+  // Interpolate UV & smooth normal (unchanged) …
+  let i0 = indices3d.data[3u*best_tri + 0u];
+  let i1 = indices3d.data[3u*best_tri + 1u];
+  let i2 = indices3d.data[3u*best_tri + 2u];
+
+  let uv0 = verts3d.data[i0].uv; let n0 = verts3d.data[i0].normal;
+  let uv1 = verts3d.data[i1].uv; let n1 = verts3d.data[i1].normal;
+  let uv2 = verts3d.data[i2].uv; let n2 = verts3d.data[i2].normal;
+
+  let w0 = 1.0 - best_u - best_v;
+  let uv = uv0*w0 + uv1*best_u + uv2*best_v;
+  var N = normalize(n0*w0 + n1*best_u + n2*best_v);
 
   let P = ro + rd * best_t;
-  let base_col = textureSampleLevel(atlas_tex, atlas_smp, best_uv, 0.0);
-   // Two-sided normal fix: flip N if it faces away from the view
-   var N = normalize(best_n);
-   if (dot(N, rd) > 0.0) {
-     N = -N;
-   }
+  let base_col = textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
+  if (dot(N, rd) > 0.0) { N = -N; } // two-sided
 
   let lit = lambert_pointlights(P, N, base_col.xyz);
   sv_write(px, py, vec4<f32>(lit, base_col.a));
@@ -735,6 +1054,10 @@ pub struct VM {
     pub lights: FxHashMap<Uuid, Light>,
 
     pub current_layer: i32,
+
+    // Scene-wide acceleration (always present; grid will be built via Atom)
+    pub scene_accel: SceneAccel,
+    pub accel_dirty: bool,
 }
 
 impl VM {
@@ -767,6 +1090,8 @@ impl VM {
             transform3d: Mat4::identity(),
             lights: FxHashMap::default(),
             current_layer: 0,
+            scene_accel: SceneAccel::default(),
+            accel_dirty: true,
         }
     }
 
@@ -777,6 +1102,10 @@ impl VM {
                 for ch in self.chunks_map.values_mut() {
                     if let Some(p) = ch.polys_map.get_mut(&id) {
                         p.visible = visible;
+                    }
+                    if let Some(p3) = ch.polys3d_map.get_mut(&id) {
+                        p3.visible = visible;
+                        self.accel_dirty = true;
                     }
                 }
             }
@@ -883,6 +1212,7 @@ impl VM {
                     self.current_layer,
                     true,
                 );
+                self.accel_dirty = true;
             }
             Atom::AddLineStrip2D {
                 id,
@@ -906,13 +1236,16 @@ impl VM {
                     .entry(chunk_id)
                     .or_default()
                     .add_line_strip_2d(id, tile_id, points, width, self.current_layer);
+                self.accel_dirty = true;
             }
             Atom::NewChunk { id } => {
                 self.chunks_map.entry(id).or_insert_with(Chunk::default);
+                self.accel_dirty = true;
             }
             Atom::AddChunk { id, chunk } => {
                 // Insert or replace the chunk as-is; caller controls current_chunk separately
                 self.chunks_map.insert(id, chunk);
+                self.accel_dirty = true;
             }
             Atom::RemoveChunk { id } => {
                 let was_current = self.current_chunk == Some(id);
@@ -920,6 +1253,7 @@ impl VM {
                 if was_current {
                     self.current_chunk = None;
                 }
+                self.accel_dirty = true;
             }
             Atom::RemoveChunkAt { origin } => {
                 if let Some((id, _)) = self.chunks_map.iter().find(|(_, ch)| ch.origin == origin) {
@@ -930,6 +1264,7 @@ impl VM {
                         self.current_chunk = None;
                     }
                 }
+                self.accel_dirty = true;
             }
             Atom::SetCurrentChunk { id } => {
                 if !self.chunks_map.contains_key(&id) {
@@ -957,6 +1292,7 @@ impl VM {
             }
             Atom::SetTransform3D(m) => {
                 self.transform3d = m;
+                self.accel_dirty = true;
             }
             Atom::SetLayer(l) => {
                 self.current_layer = l;
@@ -986,6 +1322,7 @@ impl VM {
                 // Remove all chunks and unset current chunk; keep tiles/atlas/state
                 self.chunks_map.clear();
                 self.current_chunk = None;
+                self.accel_dirty = true;
             }
             Atom::SetBackground(v) => {
                 self.background = v;
@@ -1031,6 +1368,17 @@ impl VM {
             }
             Atom::ClearLights => {
                 self.lights.clear();
+            }
+            Atom::BuildSceneGrid {
+                cell_world,
+                target_cells,
+            } => {
+                self.accel_dirty = true;
+            }
+            Atom::ClearSceneGrid => {
+                // Reset to an empty 1x1 grid to keep bindings valid
+                self.scene_accel = SceneAccel::default();
+                self.accel_dirty = true;
             }
         }
     }
@@ -1156,6 +1504,12 @@ impl VM {
             tile_counts: None,
             tile_tris: None,
             lights_ssbo: None,
+            grid_hdr: None,
+            grid_offsets: None,
+            grid_counts: None,
+            grid_tris: None,
+            tri_tile: None,
+            tri_layer: None,
         });
     }
 
@@ -1485,6 +1839,72 @@ impl VM {
                 // binding 6: indices3d
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 7: grid header (uniform)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 8: grid offsets (storage read)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 9: grid counts (storage read)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 10: grid tris (storage read)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 11: tri_tile (storage read)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 12: tri_layer (storage read)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -1948,6 +2368,88 @@ impl VM {
         }
         self.init_compute(device);
         surface.ensure_gpu_with(device);
+
+        // --- Upload scene-wide grid to GPU (always present) ---
+        use wgpu::util::DeviceExt;
+        let gr = &self.scene_accel.grid;
+
+        // Make sure header dims are never 0 to avoid div-by-zero in WGSL.
+        let hdr = Grid3DHeader {
+            origin: [gr.origin.x, gr.origin.y, gr.origin.z, 0.0],
+            cell_size: [gr.cell_size.x, gr.cell_size.y, gr.cell_size.z, 0.0],
+            dims: [gr.dims[0].max(1), gr.dims[1].max(1), gr.dims[2].max(1), 0],
+        };
+
+        // wgpu forbids binding zero-sized STORAGE buffers. Use non-empty dummy slices if empty.
+        let cell_offsets_slice: &[u32] = if gr.cell_offsets.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &gr.cell_offsets
+        };
+        let cell_counts_slice: &[u32] = if gr.cell_counts.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &gr.cell_counts
+        };
+        let cell_tris_slice: &[u32] = if gr.cell_tris.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &gr.cell_tris
+        };
+        let tri_tile_slice: &[u32] = if gr.tri_tile.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &gr.tri_tile
+        };
+        let tri_layer_slice: &[i32] = if gr.tri_layer.is_empty() {
+            &DUMMY_I32_1
+        } else {
+            &gr.tri_layer
+        };
+
+        let grid_hdr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-grid3d-hdr"),
+            contents: bytemuck::bytes_of(&hdr),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let grid_offsets = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-grid3d-offsets"),
+            contents: bytemuck::cast_slice(cell_offsets_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let grid_counts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-grid3d-counts"),
+            contents: bytemuck::cast_slice(cell_counts_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let grid_tris = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-grid3d-tris"),
+            contents: bytemuck::cast_slice(cell_tris_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let tri_tile = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-tri-tile"),
+            contents: bytemuck::cast_slice(tri_tile_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let tri_layer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-tri-layer"),
+            contents: bytemuck::cast_slice(tri_layer_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        {
+            // short mutable borrow of self.gpu
+            let g = self.gpu.as_mut().unwrap();
+            g.grid_hdr = Some(grid_hdr);
+            g.grid_offsets = Some(grid_offsets);
+            g.grid_counts = Some(grid_counts);
+            g.grid_tris = Some(grid_tris);
+            g.tri_tile = Some(tri_tile);
+            g.tri_layer = Some(tri_layer);
+        }
+
+        // --- Uniforms ---
         let m = self.transform3d;
         let u = Compute3DUniforms {
             background: self.background.into_array(),
@@ -1975,7 +2477,7 @@ impl VM {
             queue.write_buffer(g.u3d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
         }
 
-        // Lights
+        // --- Lights ---
         let mut lights_flat: Vec<LightPod> = Vec::with_capacity(self.lights.len().max(1));
         if self.lights.is_empty() {
             lights_flat.push(LightPod {
@@ -1993,8 +2495,7 @@ impl VM {
                 let frame = self.animation_counter as u32;
                 let h = hash_u32(id_seed ^ frame);
                 let rnd01 = (h as f32) / 4294967295.0;
-
-                let flicker = l.flicker * rnd01; // bake result into pod
+                let flicker = l.flicker * rnd01;
 
                 lights_flat.push(LightPod {
                     header: [
@@ -2012,20 +2513,19 @@ impl VM {
                 });
             }
         }
-        use wgpu::util::DeviceExt;
         let lights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vm-lights-ssbo"),
             contents: bytemuck::cast_slice(&lights_flat),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-        let g = self.gpu.as_mut().unwrap();
-        g.lights_ssbo = Some(lights_buf);
+        {
+            let g = self.gpu.as_mut().unwrap();
+            g.lights_ssbo = Some(lights_buf);
+        }
 
         // Ensure atlas is available for sampling on GPU
         self.atlas.ensure_gpu_with(device);
         self.upload_atlas_to_gpu_with(device, queue);
-        let view = &surface.gpu.as_ref().unwrap().view;
-        let atlas_view = &self.atlas.gpu.as_ref().unwrap().view;
 
         // --- Build 3D geometry (world space) and upload to SSBOs ---
         let mut v3: Vec<Vert3DPod> = Vec::new();
@@ -2042,11 +2542,9 @@ impl VM {
                     None => continue,
                 };
 
-                // Prepare per-poly transformed positions and normals
                 let vcount = poly.vertices.len();
                 let mut poly_pos: Vec<[f32; 3]> = Vec::with_capacity(vcount);
-                let mut poly_nrm: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]];
-                poly_nrm.resize(vcount, [0.0, 0.0, 0.0]);
+                let mut poly_nrm: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; vcount];
 
                 for v in &poly.vertices {
                     let p = m * Vec4::new(v[0], v[1], v[2], v[3]);
@@ -2054,7 +2552,6 @@ impl VM {
                     poly_pos.push([p.x / w, p.y / w, p.z / w]);
                 }
 
-                // Accumulate area-weighted face normals
                 for &(a, b, c) in &poly.indices {
                     let pa = poly_pos[a];
                     let pb = poly_pos[b];
@@ -2064,7 +2561,6 @@ impl VM {
                     let nx = e1[1] * e2[2] - e1[2] * e2[1];
                     let ny = e1[2] * e2[0] - e1[0] * e2[2];
                     let nz = e1[0] * e2[1] - e1[1] * e2[0];
-                    // area weight is |cross|; accumulate unnormalized
                     poly_nrm[a][0] += nx;
                     poly_nrm[a][1] += ny;
                     poly_nrm[a][2] += nz;
@@ -2075,8 +2571,6 @@ impl VM {
                     poly_nrm[c][1] += ny;
                     poly_nrm[c][2] += nz;
                 }
-
-                // Normalize vertex normals
                 for n in &mut poly_nrm {
                     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
                     if len > 1e-12 {
@@ -2104,14 +2598,12 @@ impl VM {
                         _pad_n: 0.0,
                     });
                 }
-
                 for &(a, b, c) in &poly.indices {
                     i3.extend_from_slice(&[base + a as u32, base + b as u32, base + c as u32]);
                 }
             }
         }
 
-        // ensure non-empty buffers (wgpu validation)
         if v3.is_empty() {
             v3.push(Vert3DPod {
                 pos: [0.0; 3],
@@ -2126,6 +2618,12 @@ impl VM {
             i3.push(0);
         }
 
+        if self.accel_dirty {
+            // Build a grid from the actual uploaded geometry so slices won't be empty.
+            self.build_scene_grid_from(&v3, &i3, 0.0, 200_000);
+            self.accel_dirty = false;
+        }
+
         let v3_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vm-3d-verts-ssbo"),
             contents: bytemuck::cast_slice(&v3),
@@ -2136,50 +2634,85 @@ impl VM {
             contents: bytemuck::cast_slice(&i3),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-        // store
-        let g = self.gpu.as_mut().unwrap();
-        g.v3d_ssbo = Some(v3_buf);
-        g.i3d_ssbo = Some(i3_buf);
+        {
+            let g = self.gpu.as_mut().unwrap();
+            g.v3d_ssbo = Some(v3_buf);
+            g.i3d_ssbo = Some(i3_buf);
+        }
 
-        let g = self.gpu.as_mut().unwrap();
-        g.u3d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vm-u3d-bg"),
-            layout: g.u3d_bgl.as_ref().unwrap(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: g.u3d_buf.as_ref().unwrap().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&g.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: g.lights_ssbo.as_ref().unwrap().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: g.v3d_ssbo.as_ref().unwrap().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: g.i3d_ssbo.as_ref().unwrap().as_entire_binding(),
-                },
-            ],
-        }));
+        // Avoid borrowing self immutably while we need &mut for bind group creation.
+        let surface_view = surface.gpu.as_ref().unwrap().view.clone();
+        let atlas_view = self.atlas.gpu.as_ref().unwrap().view.clone();
+
+        // Build the bind group
+        {
+            let g = self.gpu.as_mut().unwrap();
+            g.u3d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vm-u3d-bg"),
+                layout: g.u3d_bgl.as_ref().unwrap(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: g.u3d_buf.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&surface_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&atlas_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&g.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: g.lights_ssbo.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: g.v3d_ssbo.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: g.i3d_ssbo.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: g.grid_hdr.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: g.grid_offsets.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: g.grid_counts.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: g.grid_tris.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: g.tri_tile.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: g.tri_layer.as_ref().unwrap().as_entire_binding(),
+                    },
+                ],
+            }));
+        }
+
+        // Dispatch
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("vm-3d-cs-enc"),
         });
         {
+            let g = self.gpu.as_ref().unwrap();
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vm-3d-cs-pass"),
                 timestamp_writes: None,
@@ -2191,6 +2724,144 @@ impl VM {
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         queue.submit(Some(encoder.finish()));
+    }
+
+    pub fn build_scene_grid_from(
+        &mut self,
+        v3: &[Vert3DPod],
+        i3: &[u32],
+        cell_world: f32,
+        target_cells: u32,
+    ) {
+        use vek::Vec3;
+
+        // AABB
+        let mut minb = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut maxb = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for v in v3 {
+            let p = Vec3::new(v.pos[0], v.pos[1], v.pos[2]);
+            minb = minb.map2(p, |a, b| a.min(b));
+            maxb = maxb.map2(p, |a, b| a.max(b));
+        }
+        let pad = 1e-3;
+        minb -= Vec3::broadcast(pad);
+        maxb += Vec3::broadcast(pad);
+        let extent = (maxb - minb).map(|x| x.max(1e-3));
+
+        // dims & cell size
+        let (dims, cell) = if cell_world > 0.0 {
+            let c = Vec3::broadcast(cell_world);
+            let dx = (extent.x / c.x).ceil().max(1.0) as u32;
+            let dy = (extent.y / c.y).ceil().max(1.0) as u32;
+            let dz = (extent.z / c.z).ceil().max(1.0) as u32;
+            ([dx.max(1), dy.max(1), dz.max(1)], c)
+        } else {
+            let tc = target_cells.max(8) as f32;
+            let vol = extent.x * extent.y * extent.z;
+            let edge = (vol / tc).max(1e-6).cbrt();
+            let c = Vec3::broadcast(edge);
+            let dx = (extent.x / edge).ceil().max(1.0) as u32;
+            let dy = (extent.y / edge).ceil().max(1.0) as u32;
+            let dz = (extent.z / edge).ceil().max(1.0) as u32;
+            ([dx.max(1), dy.max(1), dz.max(1)], c)
+        };
+        let nx = dims[0] as usize;
+        let ny = dims[1] as usize;
+        let nz = dims[2] as usize;
+        let n_cells = nx * ny * nz;
+
+        let grid_index = |ix: u32, iy: u32, iz: u32| -> usize {
+            ((iz as usize) * ny + (iy as usize)) * nx + (ix as usize)
+        };
+        let world_to_cell = |p: Vec3<f32>| {
+            let rel = (p - minb) / cell;
+            Vec3::new(
+                rel.x.floor() as i32,
+                rel.y.floor() as i32,
+                rel.z.floor() as i32,
+            )
+        };
+        let clamp_cell = |c: Vec3<i32>| {
+            Vec3::new(
+                c.x.clamp(0, nx as i32 - 1),
+                c.y.clamp(0, ny as i32 - 1),
+                c.z.clamp(0, nz as i32 - 1),
+            )
+        };
+
+        // Per-cell bins of triangle **ordinals**
+        let mut per_cell: Vec<Vec<u32>> = vec![Vec::new(); n_cells];
+        let tri_count = (i3.len() / 3) as u32;
+
+        for t in 0..tri_count {
+            let i0 = i3[(3 * t + 0) as usize] as usize;
+            let i1 = i3[(3 * t + 1) as usize] as usize;
+            let i2 = i3[(3 * t + 2) as usize] as usize;
+
+            let a = Vec3::new(v3[i0].pos[0], v3[i0].pos[1], v3[i0].pos[2]);
+            let b = Vec3::new(v3[i1].pos[0], v3[i1].pos[1], v3[i1].pos[2]);
+            let c = Vec3::new(v3[i2].pos[0], v3[i2].pos[1], v3[i2].pos[2]);
+
+            let tri_min = Vec3::new(
+                a.x.min(b.x).min(c.x),
+                a.y.min(b.y).min(c.y),
+                a.z.min(b.z).min(c.z),
+            );
+            let tri_max = Vec3::new(
+                a.x.max(b.x).max(c.x),
+                a.y.max(b.y).max(c.y),
+                a.z.max(b.z).max(c.z),
+            );
+
+            let cmin = clamp_cell(world_to_cell(tri_min));
+            let cmax = clamp_cell(world_to_cell(tri_max));
+            for iz in cmin.z as u32..=cmax.z as u32 {
+                for iy in cmin.y as u32..=cmax.y as u32 {
+                    for ix in cmin.x as u32..=cmax.x as u32 {
+                        per_cell[grid_index(ix, iy, iz)].push(t);
+                    }
+                }
+            }
+        }
+
+        // CSR flatten in the **same z-major, x-fastest** order that WGSL uses:
+        // idx = (iz * ny + iy) * nx + ix
+        let mut cell_offsets: Vec<u32> = Vec::with_capacity(n_cells);
+        let mut cell_counts: Vec<u32> = Vec::with_capacity(n_cells);
+        let mut cell_tris: Vec<u32> = Vec::new();
+        let mut running: u32 = 0;
+
+        for (idx, lst) in per_cell.iter().enumerate() {
+            // idx already matches ((iz * ny) + iy) * nx + ix because we created `per_cell`
+            // with `grid_index(ix, iy, iz)` using that exact mapping.
+            let c = lst.len() as u32;
+            cell_offsets.push(running);
+            cell_counts.push(c);
+            running += c;
+            cell_tris.extend_from_slice(lst);
+            debug_assert!(cell_offsets.len() == idx + 1);
+        }
+
+        debug_assert_eq!(
+            running as usize,
+            cell_tris.len(),
+            "CSR counts must sum to cell_tris.len()"
+        );
+
+        // Per-tri metadata aligned to tri_count (can fill with real data later)
+        let tri_tile = vec![0u32; tri_count as usize];
+        let tri_layer = vec![0i32; tri_count as usize];
+
+        self.scene_accel.grid = SceneGridAccel {
+            origin: minb,
+            cell_size: cell,
+            dims,
+            cell_offsets,
+            cell_counts,
+            cell_tris,
+            tri_tile,
+            tri_layer,
+        };
     }
 
     /// Unified draw entry: chooses 2D or 3D compute path based on `self.render_mode`.

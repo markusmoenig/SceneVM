@@ -1,8 +1,12 @@
 use scenevm::{Atom, GeoId, Light, RenderMode, SceneVM};
 use theframework::prelude::*;
 
+use vek::Mat3;
+
 pub struct Circle {
     vm: SceneVM,
+
+    matrix: Mat3<f32>,
 }
 
 impl TheTrait for Circle {
@@ -12,6 +16,7 @@ impl TheTrait for Circle {
     {
         Self {
             vm: SceneVM::new(100, 100),
+            matrix: Mat3::identity(),
         }
     }
 
@@ -19,25 +24,24 @@ impl TheTrait for Circle {
     fn init(&mut self, ctx: &mut TheContext) {
         let tile_id = Uuid::new_v4();
 
-        // if let Some((data, width, height)) = self
-        //     .vm
-        //     .load_image_rgba(std::path::Path::new("images/logo.png"))
-        // {
-        //     self.vm.execute(Atom::AddTile {
-        //         id: tile_id,
-        //         width: width,
-        //         height: height,
-        //         frames: vec![data],
-        //     });
-        //     self.vm.execute(Atom::BuildAtlas);
-        // }
+        if let Some((data, width, height)) = self
+            .vm
+            .load_image_rgba(std::path::Path::new("images/logo.png"))
+        {
+            self.vm.execute(Atom::AddTile {
+                id: tile_id,
+                width: width,
+                height: height,
+                frames: vec![data],
+            });
+            self.vm.execute(Atom::BuildAtlas);
+        }
 
         self.vm.execute(Atom::SetBackground(Vec4::zero()));
-
-        self.vm.execute(Atom::AddSolid {
-            id: tile_id,
-            color: [255, 0, 0, 255],
-        });
+        // self.vm.execute(Atom::AddSolid {
+        //     id: tile_id,
+        //     color: [255, 0, 0, 255],
+        // });
         self.vm.execute(Atom::BuildAtlas);
 
         /*
@@ -150,10 +154,17 @@ impl TheTrait for Circle {
             id: Uuid::new_v4(),
             light: Light::new_pointlight(Vec3::new(0.0, 1.0, -4.0)),
         });
+
+        self.vm
+            .execute(Atom::SetGP9(vek::Vec4::new(0.0, 1.0, 1.0, 1.0)));
     }
 
     /// Draw a circle in the middle of the window
     fn draw(&mut self, pixels: &mut [u8], ctx: &mut TheContext) {
+        // Rotate matrix here
+
+        // self.vm.execute(Atom::SetTransform3D(()));
+
         self.vm
             .render_frame(pixels, ctx.width as u32, ctx.height as u32);
     }
