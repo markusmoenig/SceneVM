@@ -2599,7 +2599,7 @@ impl VM {
 
         if self.accel_dirty {
             // Build a grid from the actual uploaded geometry so slices won't be empty.
-            self.build_scene_grid_from(&v3, &i3, 0.0, 200_000);
+            self.build_scene_grid_from(&v3, &i3, 0.0, 100); //200_000);
             self.accel_dirty = false;
         }
 
@@ -2705,139 +2705,170 @@ impl VM {
         queue.submit(Some(encoder.finish()));
     }
 
-    pub fn build_scene_grid_from(
+    fn build_scene_grid_from(
         &mut self,
-        v3: &[Vert3DPod],
-        i3: &[u32],
+        verts: &[Vert3DPod],
+        indices: &[u32],
         cell_world: f32,
         target_cells: u32,
     ) {
         use vek::Vec3;
 
-        // AABB
-        let mut minb = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
-        let mut maxb = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-        for v in v3 {
-            let p = Vec3::new(v.pos[0], v.pos[1], v.pos[2]);
-            minb = minb.map2(p, |a, b| a.min(b));
-            maxb = maxb.map2(p, |a, b| a.max(b));
+        #[inline(always)]
+        fn vmin(a: vek::Vec3<f32>, b: vek::Vec3<f32>) -> vek::Vec3<f32> {
+            vek::Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z))
         }
-        let pad = 1e-3;
-        minb -= Vec3::broadcast(pad);
-        maxb += Vec3::broadcast(pad);
-        let extent = (maxb - minb).map(|x| x.max(1e-3));
+        #[inline(always)]
+        fn vmax(a: vek::Vec3<f32>, b: vek::Vec3<f32>) -> vek::Vec3<f32> {
+            vek::Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z))
+        }
 
-        // dims & cell size
-        let (dims, cell) = if cell_world > 0.0 {
-            let c = Vec3::broadcast(cell_world);
-            let dx = (extent.x / c.x).ceil().max(1.0) as u32;
-            let dy = (extent.y / c.y).ceil().max(1.0) as u32;
-            let dz = (extent.z / c.z).ceil().max(1.0) as u32;
-            ([dx.max(1), dy.max(1), dz.max(1)], c)
+        // --- 1) Scene AABB (over all positions) ---
+        let mut bmin = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut bmax = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for v in verts {
+            let p = Vec3::new(v.pos[0], v.pos[1], v.pos[2]);
+            bmin = vmin(bmin, p);
+            bmax = vmax(bmax, p);
+        }
+
+        // Empty scene guard
+        if !bmin.x.is_finite() {
+            // Make a 1x1x1 dummy grid so bindings are valid
+            self.scene_accel.grid = SceneGridAccel {
+                origin: Vec3::zero(),
+                cell_size: Vec3::broadcast(1.0),
+                dims: [1, 1, 1],
+                cell_offsets: vec![0],
+                cell_counts: vec![0],
+                cell_tris: vec![0],
+                tri_tile: vec![0],
+                tri_layer: vec![0],
+            };
+            return;
+        }
+
+        // --- 2) Pad scene AABB slightly ---
+        let diag = (bmax - bmin).magnitude().max(1e-6);
+        let pad = 0.00001 * diag; // scene padding
+        bmin -= Vec3::broadcast(pad);
+        bmax += Vec3::broadcast(pad);
+
+        // --- 3) Choose grid resolution ---
+        let size = bmax - bmin;
+        let vol = (size.x * size.y * size.z).max(1e-9);
+        let nx: u32;
+        let ny: u32;
+        let nz;
+
+        if cell_world > 0.0 {
+            // User-enforced cell size
+            nx = (size.x / cell_world).ceil().max(1.0) as u32;
+            ny = (size.y / cell_world).ceil().max(1.0) as u32;
+            nz = (size.z / cell_world).ceil().max(1.0) as u32;
         } else {
-            let tc = target_cells.max(8) as f32;
-            let vol = extent.x * extent.y * extent.z;
-            let edge = (vol / tc).max(1e-6).cbrt();
-            let c = Vec3::broadcast(edge);
-            let dx = (extent.x / edge).ceil().max(1.0) as u32;
-            let dy = (extent.y / edge).ceil().max(1.0) as u32;
-            let dz = (extent.z / edge).ceil().max(1.0) as u32;
-            ([dx.max(1), dy.max(1), dz.max(1)], c)
-        };
-        let nx = dims[0] as usize;
-        let ny = dims[1] as usize;
-        let nz = dims[2] as usize;
-        let n_cells = nx * ny * nz;
+            // Aim for target_cells
+            let t = target_cells.max(1) as f32;
+            let s = (vol / t).cbrt(); // cubic cell size
+            nx = (size.x / s).ceil().max(1.0) as u32;
+            ny = (size.y / s).ceil().max(1.0) as u32;
+            nz = (size.z / s).ceil().max(1.0) as u32;
+        }
 
-        let grid_index = |ix: u32, iy: u32, iz: u32| -> usize {
-            ((iz as usize) * ny + (iy as usize)) * nx + (ix as usize)
-        };
-        let world_to_cell = |p: Vec3<f32>| {
-            let rel = (p - minb) / cell;
-            Vec3::new(
-                rel.x.floor() as i32,
-                rel.y.floor() as i32,
-                rel.z.floor() as i32,
-            )
-        };
-        let clamp_cell = |c: Vec3<i32>| {
-            Vec3::new(
-                c.x.clamp(0, nx as i32 - 1),
-                c.y.clamp(0, ny as i32 - 1),
-                c.z.clamp(0, nz as i32 - 1),
-            )
-        };
+        let dims = [nx, ny, nz];
+        let cell_size = Vec3::new(
+            size.x / nx.max(1) as f32,
+            size.y / ny.max(1) as f32,
+            size.z / nz.max(1) as f32,
+        );
 
-        // Per-cell bins of triangle **ordinals**
-        let mut per_cell: Vec<Vec<u32>> = vec![Vec::new(); n_cells];
-        let tri_count = (i3.len() / 3) as u32;
+        // Storage for CSR
+        let cell_count = (nx as usize) * (ny as usize) * (nz as usize);
+        let mut cell_vecs: Vec<Vec<u32>> = vec![Vec::new(); cell_count];
 
-        for t in 0..tri_count {
-            let i0 = i3[(3 * t + 0) as usize] as usize;
-            let i1 = i3[(3 * t + 1) as usize] as usize;
-            let i2 = i3[(3 * t + 2) as usize] as usize;
+        // Precompute an epsilon in **world** based on cell size (robustness)
+        let cell_eps = cell_size.x.max(cell_size.y).max(cell_size.z) * 0.8;
 
-            let a = Vec3::new(v3[i0].pos[0], v3[i0].pos[1], v3[i0].pos[2]);
-            let b = Vec3::new(v3[i1].pos[0], v3[i1].pos[1], v3[i1].pos[2]);
-            let c = Vec3::new(v3[i2].pos[0], v3[i2].pos[1], v3[i2].pos[2]);
+        // --- 4) Bin triangles into cells with **padded tri AABB** ---
+        let tri_count = indices.len() / 3;
+        for tri in 0..tri_count {
+            let i0 = indices[3 * tri + 0] as usize;
+            let i1 = indices[3 * tri + 1] as usize;
+            let i2 = indices[3 * tri + 2] as usize;
 
-            let tri_min = Vec3::new(
-                a.x.min(b.x).min(c.x),
-                a.y.min(b.y).min(c.y),
-                a.z.min(b.z).min(c.z),
-            );
-            let tri_max = Vec3::new(
-                a.x.max(b.x).max(c.x),
-                a.y.max(b.y).max(c.y),
-                a.z.max(b.z).max(c.z),
-            );
+            let p0 = Vec3::new(verts[i0].pos[0], verts[i0].pos[1], verts[i0].pos[2]);
+            let p1 = Vec3::new(verts[i1].pos[0], verts[i1].pos[1], verts[i1].pos[2]);
+            let p2 = Vec3::new(verts[i2].pos[0], verts[i2].pos[1], verts[i2].pos[2]);
 
-            let cmin = clamp_cell(world_to_cell(tri_min));
-            let cmax = clamp_cell(world_to_cell(tri_max));
-            for iz in cmin.z as u32..=cmax.z as u32 {
-                for iy in cmin.y as u32..=cmax.y as u32 {
-                    for ix in cmin.x as u32..=cmax.x as u32 {
-                        per_cell[grid_index(ix, iy, iz)].push(t);
+            // Triangle AABB (then pad!)
+            let mut tmin = vmin(vmin(p0, p1), p2);
+            let mut tmax = vmax(vmax(p0, p1), p2);
+            tmin -= Vec3::broadcast(cell_eps);
+            tmax += Vec3::broadcast(cell_eps);
+
+            // Map to cell coords
+            let rel_min = (tmin - bmin) / cell_size;
+            let rel_max = (tmax - bmin) / cell_size;
+
+            let mut ix0 = rel_min.x.floor() as i32;
+            let mut iy0 = rel_min.y.floor() as i32;
+            let mut iz0 = rel_min.z.floor() as i32;
+            let mut ix1 = rel_max.x.ceil() as i32;
+            let mut iy1 = rel_max.y.ceil() as i32;
+            let mut iz1 = rel_max.z.ceil() as i32;
+
+            // Clamp to grid
+            ix0 = ix0.clamp(0, nx as i32 - 1);
+            iy0 = iy0.clamp(0, ny as i32 - 1);
+            iz0 = iz0.clamp(0, nz as i32 - 1);
+            ix1 = ix1.clamp(0, nx as i32 - 1);
+            iy1 = iy1.clamp(0, ny as i32 - 1);
+            iz1 = iz1.clamp(0, nz as i32 - 1);
+
+            if ix0 > ix1 || iy0 > iy1 || iz0 > iz1 {
+                continue;
+            }
+
+            // Fill all overlapped cells
+            for z in iz0..=iz1 {
+                for y in iy0..=iy1 {
+                    for x in ix0..=ix1 {
+                        let idx = ((z as u32 * ny + y as u32) * nx + x as u32) as usize;
+                        cell_vecs[idx].push(tri as u32);
                     }
                 }
             }
         }
 
-        // CSR flatten in the **same z-major, x-fastest** order that WGSL uses:
-        // idx = (iz * ny + iy) * nx + ix
-        let mut cell_offsets: Vec<u32> = Vec::with_capacity(n_cells);
-        let mut cell_counts: Vec<u32> = Vec::with_capacity(n_cells);
-        let mut cell_tris: Vec<u32> = Vec::new();
-        let mut running: u32 = 0;
+        // --- 5) CSR flatten (stable order) ---
+        let mut offsets = vec![0u32; cell_count];
+        let mut counts = vec![0u32; cell_count];
+        let mut tris: Vec<u32> = Vec::new();
+        tris.reserve(cell_vecs.iter().map(|v| v.len()).sum());
 
-        for (idx, lst) in per_cell.iter().enumerate() {
-            // idx already matches ((iz * ny) + iy) * nx + ix because we created `per_cell`
-            // with `grid_index(ix, iy, iz)` using that exact mapping.
-            let c = lst.len() as u32;
-            cell_offsets.push(running);
-            cell_counts.push(c);
-            running += c;
-            cell_tris.extend_from_slice(lst);
-            debug_assert!(cell_offsets.len() == idx + 1);
+        let mut run = 0u32;
+        for (i, v) in cell_vecs.iter_mut().enumerate() {
+            offsets[i] = run;
+            // sort for determinism (optional)
+            v.sort_unstable();
+            v.dedup(); // optional de-dup if your binning can push the same tri twice
+            run += v.len() as u32;
+            counts[i] = v.len() as u32;
+            tris.extend(v.iter().copied());
         }
 
-        debug_assert_eq!(
-            running as usize,
-            cell_tris.len(),
-            "CSR counts must sum to cell_tris.len()"
-        );
+        // --- 6) Per-triangle metadata (optional; keep aligned length) ---
+        let tri_tile = vec![0u32; tri_count.max(1)];
+        let tri_layer = vec![0i32; tri_count.max(1)];
 
-        // Per-tri metadata aligned to tri_count (can fill with real data later)
-        let tri_tile = vec![0u32; tri_count as usize];
-        let tri_layer = vec![0i32; tri_count as usize];
-
+        // --- 7) Store on the VM ---
         self.scene_accel.grid = SceneGridAccel {
-            origin: minb,
-            cell_size: cell,
+            origin: bmin,
+            cell_size,
             dims,
-            cell_offsets,
-            cell_counts,
-            cell_tris,
+            cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
+            cell_counts: if counts.is_empty() { vec![0] } else { counts },
+            cell_tris: if tris.is_empty() { vec![0] } else { tris },
             tri_tile,
             tri_layer,
         };
