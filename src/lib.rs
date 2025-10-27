@@ -2,6 +2,7 @@ pub mod bbox2d;
 pub mod chunk;
 pub mod intodata;
 pub mod light;
+pub mod material;
 pub mod texture;
 pub mod vm;
 
@@ -10,6 +11,7 @@ pub use crate::{
     chunk::Chunk,
     intodata::IntoDataInput,
     light::{Light, LightType},
+    material::Material,
     texture::Texture,
     vm::{Atom, GeoId, Poly2D, Poly3D, RenderMode, VM},
 };

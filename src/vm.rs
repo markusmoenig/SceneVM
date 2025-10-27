@@ -1,7 +1,8 @@
 // Non-empty dummy buffers for wgpu STORAGE bindings when a scene grid is empty.
 const DUMMY_U32_1: [u32; 1] = [0];
 const DUMMY_I32_1: [i32; 1] = [0];
-use crate::{Chunk, Light, LightType, Texture};
+
+use crate::{Chunk, Light, LightType, Material, Texture};
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
@@ -74,6 +75,13 @@ pub struct LightPod {
     pub params0: [f32; 4],
     // params1: [flicker, pad, pad, pad]
     pub params1: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct MaterialPod {
+    pub tint: [f32; 4], // aligned 16
+    pub rmoe: [f32; 4], // roughness, metallic, opacity, emission
 }
 
 /// VM instruction set
@@ -187,6 +195,22 @@ pub enum Atom {
     },
     /// Remove all lights from the scene
     ClearLights,
+    /// Add/replace a material
+    AddMaterial {
+        id: Uuid,
+        material: Material,
+    },
+    /// Remove a material
+    RemoveMaterial {
+        id: Uuid,
+    },
+    /// Remove all materials
+    ClearMaterials,
+    /// Assign a material to a specific geometry id (2D or 3D)
+    SetGeoMaterial {
+        id: GeoId,
+        material_id: Option<Uuid>,
+    },
     /// Build/replace the global scene uniform grid over all current 3D geometry
     BuildSceneGrid {
         cell_world: f32,
@@ -214,6 +238,7 @@ pub struct Poly2D {
     pub transform: Mat3<f32>,                // per-poly local transform
     pub layer: i32,                          // visual layer; higher draws on top
     pub visible: bool,                       // if false, skipped during draw
+    pub material_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +250,7 @@ pub struct Poly3D {
     pub indices: Vec<(usize, usize, usize)>,
     pub layer: i32, // for future (not used by ray depth)
     pub visible: bool,
+    pub material_id: Option<Uuid>,
 }
 
 #[derive(Debug)]
@@ -272,6 +298,10 @@ pub struct VMGpu {
     pub grid_tris: Option<wgpu::Buffer>,
     pub tri_tile: Option<wgpu::Buffer>,
     pub tri_layer: Option<wgpu::Buffer>,
+    // Materials
+    pub tri_mat2d: Option<wgpu::Buffer>,
+    pub tri_mat3d: Option<wgpu::Buffer>,
+    pub materials_ssbo: Option<wgpu::Buffer>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -453,6 +483,15 @@ struct LightWGSL {
 struct Lights { data: array<LightWGSL>, };
 @group(0) @binding(9) var<storage, read> lights: Lights;
 
+@group(0) @binding(10) var<storage, read> tri_mat2d: U32s;
+
+struct MaterialWGSL {
+  tint: vec4<f32>,
+  rmoe: vec4<f32>, // roughness, metallic, opacity, emission
+};
+struct Materials { data: array<MaterialWGSL>, };
+@group(0) @binding(11) var<storage, read> materials: Materials;
+
 fn tiles_x() -> u32 { return (U.fb_size.x + 7u) / 8u; }
 fn tiles_y() -> u32 { return (U.fb_size.y + 7u) / 8u; }
 fn tile_index(tx: u32, ty: u32) -> u32 { return ty * tiles_x() + tx; }
@@ -470,7 +509,7 @@ fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
 }
 // ----- SceneVM 2D helpers -----
 struct BaryHit { hit: bool, w: vec3<f32> };
-struct ColorHit { hit: bool, color: vec4<f32> };
+struct ColorHit { hit: bool, color: vec4<f32>, tri: u32 };
 
 fn sv_edge(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
   return (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
@@ -495,12 +534,15 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   let b = verts.data[i1].pos;
   let c = verts.data[i2].pos;
   let bh = sv_tri_bary(p, a, b, c);
-  if (!bh.hit) { return ColorHit(false, vec4<f32>(0.0)); }
+  if (!bh.hit) { return ColorHit(false, vec4<f32>(0.0), 0u); }
+
   let w = bh.w;
   let uv = verts.data[i0].uv * w.x + verts.data[i1].uv * w.y + verts.data[i2].uv * w.z;
   let col = sv_sample(uv);
-  if (col.a < 0.01) { return ColorHit(false, vec4<f32>(0.0)); }
-  return ColorHit(true, col);
+  if (col.a < 0.01) { return ColorHit(false, vec4<f32>(0.0), 0u); }
+
+  // tri id is not known here; sv_shade_tile_pixel wraps this and sets it
+  return ColorHit(true, col, 0u);
 }
 
 fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
@@ -508,6 +550,7 @@ fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
   let v = invM * vec3<f32>(pix, 1.0);
   return v.xy;
 }
+
 fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
   let off = tile_offsets.data[tid];
   let cnt = tile_counts.data[tid];
@@ -518,12 +561,12 @@ fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
     let i2 = indices.data[3u*t + 2u];
     let ch = sv_tri_color(p, i0, i1, i2);
     if (ch.hit) {
-      // Defer writing so the caller can shade the color (lighting, blending, etc.)
-      return ch;
+      return ColorHit(true, ch.color, t);
     }
   }
-  return ColorHit(false, vec4<f32>(0.0));
+  return ColorHit(false, vec4<f32>(0.0), 0u);
 }
+
 // RNG Helper
 fn wang_hash(x0: u32) -> u32 {
   var x = x0;
@@ -599,8 +642,16 @@ struct I32s { data: array<i32> };
 @group(0) @binding(8)  var<storage, read> grid_offsets: U32s;
 @group(0) @binding(9)  var<storage, read> grid_counts:  U32s;
 @group(0) @binding(10) var<storage, read> grid_tris:    U32s;
-@group(0) @binding(11) var<storage, read> tri_tile:     U32s;
-@group(0) @binding(12) var<storage, read> tri_layer:    I32s;
+// material index per triangle (aligned with indices3d triangles)
+@group(0) @binding(13) var<storage, read> tri_mat: U32s;
+
+// Materials array
+struct MaterialWGSL {
+  tint: vec4<f32>,
+  rmoe: vec4<f32>, // roughness, metallic, opacity, emission
+};
+struct Materials { data: array<MaterialWGSL>, };
+@group(0) @binding(14) var<storage, read> materials: Materials;
 
 fn sv_grid_active() -> bool { return U.gp9.w > 0.5; }
 
@@ -853,6 +904,27 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
   return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
 }
 // ===== end DDA =====  
+
+// TBN from triangle positions/uvs, using geometric normal for stability.
+fn sv_tri_tbn(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>,
+              uv0: vec2<f32>, uv1: vec2<f32>, uv2: vec2<f32>) -> mat3x3<f32> {
+  let e1 = b - a;
+  let e2 = c - a;
+  let d1 = uv1 - uv0;
+  let d2 = uv2 - uv0;
+  let r = 1.0 / max(d1.x * d2.y - d1.y * d2.x, 1e-8);
+
+  var T = normalize((e1 * d2.y - e2 * d1.y) * r);
+  var Ng = normalize(cross(e1, e2));
+  T = normalize(T - Ng * dot(Ng, T));
+  let B = normalize(cross(Ng, T));
+  return mat3x3<f32>(T, B, Ng);
+}
+
+// Luma from color (height proxy)
+fn sv_luma(rgb: vec3<f32>) -> f32 {
+  return dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
+}
 "#;
 
 pub const DEFAULT_2D_BODY: &str = r#"
@@ -869,8 +941,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let tid = tile_of_px(px, py);
   let ch = sv_shade_tile_pixel(p, px, py, tid);
   if (ch.hit) {
-    let shaded = ch.color; // hook for lighting/tint
-    sv_write(px, py, shaded);
+    // Material look-up for winning triangle
+    let m_idx = tri_mat2d.data[ch.tri];
+    let M = materials.data[m_idx];
+
+    // Base texture color → apply tint & opacity; add emission (simple)
+    let base = ch.color;
+    let rgb = base.xyz * M.tint.xyz + M.rmoe.w * M.tint.xyz; // tint + emission
+    let a   = base.a * M.rmoe.z;                             // opacity
+    sv_write(px, py, vec4<f32>(rgb, a));
   }
 }
 "#;
@@ -969,7 +1048,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
 
-  // Interpolate UV & smooth normal (unchanged) …
+  // Interpolate UV & smooth normal
   let i0 = indices3d.data[3u*best_tri + 0u];
   let i1 = indices3d.data[3u*best_tri + 1u];
   let i2 = indices3d.data[3u*best_tri + 2u];
@@ -982,12 +1061,57 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let uv = uv0*w0 + uv1*best_u + uv2*best_v;
   var N = normalize(n0*w0 + n1*best_u + n2*best_v);
 
-  let P = ro + rd * best_t;
-  let base_col = textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
-  if (dot(N, rd) > 0.0) { N = -N; } // two-sided
+  // when filling Compute3DUniforms u:
+  // self.gp8.x = 1.0; // bump strength (0 = off)
+  // self.gp9.x = 1.0 / (self.atlas.width as f32);
+  // self.gp9.y = 1.0 / (self.atlas.height as f32);
 
-  let lit = lambert_pointlights(P, N, base_col.xyz);
-  sv_write(px, py, vec4<f32>(lit, base_col.a));
+  // Optional bump from the polygon's own texture as height
+  if (U.gp8.x > 0.0) {
+    // Reconstruct triangle positions for TBN
+    let a = verts3d.data[i0].pos;
+    let b = verts3d.data[i1].pos;
+    let c = verts3d.data[i2].pos;
+
+    // 1 texel steps in atlas UV space (provided by CPU)
+    let du = vec2<f32>(U.gp9.x, 0.0);
+    let dv = vec2<f32>(0.0, U.gp9.y);
+
+    // Sample height at uv and neighbors (use color as height proxy)
+    let h  = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0).xyz);
+    let hx = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv + du, 0.0).xyz);
+    let hy = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv + dv, 0.0).xyz);
+
+    // Finite differences
+    let dhdu = (hx - h);
+    let dhdv = (hy - h);
+
+    // Tangent frame of the triangle
+    let TBN = sv_tri_tbn(a, b, c, uv0, uv1, uv2);
+
+    // Map height gradient into tangent space normal and to world space
+    let n_ts = normalize(vec3<f32>(-dhdu * U.gp8.x, -dhdv * U.gp8.x, 1.0));
+    let n_ws = normalize(TBN * n_ts);
+
+    // Blend with your smooth vertex normal for stability
+    N = normalize(mix(N, n_ws, clamp(U.gp8.x, 0.0, 1.0)));
+  }  
+
+  let P = ro + rd * best_t;
+
+    let base_col = textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
+    if (dot(N, rd) > 0.0) { N = -N; } // two-sided
+
+    // Material lookup for the winning triangle
+    let m_idx = tri_mat.data[best_tri];
+    let M = materials.data[m_idx];
+    let base_rgb = base_col.xyz * M.tint.xyz;
+
+    let lit = lambert_pointlights(P, N, base_rgb);
+    // Add simple emission, apply opacity (from material)
+    let final_rgb = lit + M.rmoe.w * M.tint.xyz;
+    let final_a = base_col.a * M.rmoe.z;
+    sv_write(px, py, vec4<f32>(final_rgb, final_a));
 }
 "#;
 
@@ -1028,13 +1152,16 @@ pub struct VM {
     // --- Programmable compute shader sources
     pub source2d: String,
     pub source3d: String,
+
     pub transform2d: Mat3<f32>,
     pub transform3d: Mat4<f32>,
+
     pub lights: FxHashMap<Uuid, Light>,
+    pub materials: FxHashMap<Uuid, Material>,
 
     pub current_layer: i32,
 
-    // Scene-wide acceleration (always present; grid will be built via Atom)
+    // Scene-wide 3D acceleration via grid
     pub scene_accel: SceneAccel,
     pub accel_dirty: bool,
 }
@@ -1068,6 +1195,7 @@ impl VM {
             transform2d: Mat3::identity(),
             transform3d: Mat4::identity(),
             lights: FxHashMap::default(),
+            materials: FxHashMap::default(),
             current_layer: 0,
             scene_accel: SceneAccel::default(),
             accel_dirty: true,
@@ -1348,6 +1476,25 @@ impl VM {
             Atom::ClearLights => {
                 self.lights.clear();
             }
+            Atom::AddMaterial { id, material } => {
+                self.materials.insert(id, material);
+            }
+            Atom::RemoveMaterial { id } => {
+                self.materials.remove(&id);
+            }
+            Atom::ClearMaterials => {
+                self.materials.clear();
+            }
+            Atom::SetGeoMaterial { id, material_id } => {
+                for ch in self.chunks_map.values_mut() {
+                    if let Some(p) = ch.polys_map.get_mut(&id) {
+                        p.material_id = material_id;
+                    }
+                    if let Some(p3) = ch.polys3d_map.get_mut(&id) {
+                        p3.material_id = material_id;
+                    }
+                }
+            }
             Atom::BuildSceneGrid {
                 cell_world,
                 target_cells,
@@ -1489,6 +1636,9 @@ impl VM {
             grid_tris: None,
             tri_tile: None,
             tri_layer: None,
+            tri_mat3d: None,
+            materials_ssbo: None,
+            tri_mat2d: None,
         });
     }
 
@@ -1748,6 +1898,26 @@ impl VM {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10, // tri_mat2d
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11, // materials
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -1870,9 +2040,9 @@ impl VM {
                     },
                     count: None,
                 },
-                // binding 11: tri_tile (storage read)
+                // binding 13: tri_mat (storage read)
                 wgpu::BindGroupLayoutEntry {
-                    binding: 11,
+                    binding: 13,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -1881,9 +2051,9 @@ impl VM {
                     },
                     count: None,
                 },
-                // binding 12: tri_layer (storage read)
+                // binding 14: materials SSBO (storage read)
                 wgpu::BindGroupLayoutEntry {
-                    binding: 12,
+                    binding: 14,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -2032,6 +2202,7 @@ impl VM {
             layer: i32,
             prio: i32,
             ord: u32,
+            mat: Option<Uuid>,
         }
         let mut tri_meta: Vec<TriMeta> = Vec::new();
         let mut tri_ord: u32 = 0;
@@ -2074,6 +2245,7 @@ impl VM {
                         layer: poly.layer,
                         prio,
                         ord: tri_ord,
+                        mat: poly.material_id,
                     });
                     tri_ord = tri_ord.wrapping_add(1);
                 }
@@ -2167,6 +2339,50 @@ impl VM {
         }
 
         use wgpu::util::DeviceExt;
+        // ---- Build materials table (slot 0 = default) ----
+        let mut mat_index: FxHashMap<Uuid, u32> = FxHashMap::default();
+        let mut materials_flat: Vec<MaterialPod> = Vec::new();
+        // default material at 0: white tint, 100% opacity, no emission
+        mat_index.insert(Uuid::nil(), 0);
+        materials_flat.push(MaterialPod {
+            tint: [1.0, 1.0, 1.0, 1.0],
+            rmoe: [0.5, 0.0, 1.0, 0.0], // roughness=0.5, metallic=0.0, opacity=1.0, emission=0.0
+        });
+        // assign indices to all currently registered materials
+        for (mid, m) in &self.materials {
+            let idx = materials_flat.len() as u32;
+            mat_index.insert(*mid, idx);
+            materials_flat.push(MaterialPod {
+                tint: m.tint.into_array(),
+                rmoe: [m.roughness, m.metallic, m.opacity, m.emission],
+            });
+        }
+
+        // ---- Map each triangle (in tile_tris order) → material index ----
+        let mut tri_mat2d_vec: Vec<u32> = Vec::with_capacity(tile_tris.len());
+        for &tri in &tile_tris {
+            let m_id = tri_meta[tri as usize].mat.unwrap_or(Uuid::nil());
+            let idx = *mat_index.get(&m_id).unwrap_or(&0);
+            tri_mat2d_vec.push(idx);
+        }
+
+        // ---- Make GPU buffers (after you made verts/indices/tile_* buffers and lights) ----
+        let tri_mat2d_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-tri-mat2d"),
+            contents: bytemuck::cast_slice(&tri_mat2d_vec),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let materials_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-materials-ssbo"),
+            contents: bytemuck::cast_slice(&materials_flat),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let g = self.gpu.as_mut().unwrap();
+        g.tri_mat2d = Some(tri_mat2d_buf);
+        g.materials_ssbo = Some(materials_buf);
+
         // Ensure non-zero-sized buffers for binding validation
         let vbytes: Vec<u8> = if verts_flat.is_empty() {
             // one dummy Vert2DPod (pos=0, uv=0) -> 16 bytes
@@ -2312,6 +2528,14 @@ impl VM {
                 wgpu::BindGroupEntry {
                     binding: 9,
                     resource: g.lights_ssbo.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: g.tri_mat2d.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: g.materials_ssbo.as_ref().unwrap().as_entire_binding(),
                 },
             ],
         }));
@@ -2509,6 +2733,38 @@ impl VM {
         // --- Build 3D geometry (world space) and upload to SSBOs ---
         let mut v3: Vec<Vert3DPod> = Vec::new();
         let mut i3: Vec<u32> = Vec::new();
+        let mut tri_mat: Vec<u32> = Vec::new();
+
+        use std::collections::HashMap;
+        let mut mat_index: HashMap<Uuid, u32> = HashMap::new();
+        let mut materials_vec: Vec<MaterialPod> = Vec::new();
+
+        // slot 0: default material
+        materials_vec.push(MaterialPod {
+            tint: Vec4::one().into_array(),
+            rmoe: [0.5, 0.0, 1.0, 0.0],
+        });
+
+        let mut ensure_mat_index = |id_opt: Option<Uuid>| -> u32 {
+            match id_opt {
+                Some(id) => {
+                    if let Some(&idx) = mat_index.get(&id) {
+                        idx
+                    } else if let Some(m) = self.materials.get(&id) {
+                        let idx = materials_vec.len() as u32;
+                        mat_index.insert(id, idx);
+                        materials_vec.push(MaterialPod {
+                            tint: m.tint.into_array(),
+                            rmoe: [m.roughness, m.metallic, m.opacity, m.emission],
+                        });
+                        idx
+                    } else {
+                        0
+                    }
+                }
+                None => 0,
+            }
+        };
 
         for (_cid, ch) in &self.chunks_map {
             for poly in ch.polys3d_map.values() {
@@ -2577,8 +2833,10 @@ impl VM {
                         _pad_n: 0.0,
                     });
                 }
+                let mat_slot = ensure_mat_index(poly.material_id);
                 for &(a, b, c) in &poly.indices {
                     i3.extend_from_slice(&[base + a as u32, base + b as u32, base + c as u32]);
+                    tri_mat.push(mat_slot);
                 }
             }
         }
@@ -2613,6 +2871,31 @@ impl VM {
             contents: bytemuck::cast_slice(&i3),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
+        let tri_mat_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-3d-tri-mat"),
+            contents: bytemuck::cast_slice(if tri_mat.is_empty() {
+                &[0u32][..]
+            } else {
+                &tri_mat[..]
+            }),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let materials_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-materials-ssbo"),
+            contents: bytemuck::cast_slice(if materials_vec.is_empty() {
+                &[MaterialPod {
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                    rmoe: [0.5, 0.0, 1.0, 0.0],
+                }][..]
+            } else {
+                &materials_vec[..]
+            }),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let g = self.gpu.as_mut().unwrap();
+        g.tri_mat3d = Some(tri_mat_buf);
+        g.materials_ssbo = Some(materials_buf);
         {
             let g = self.gpu.as_mut().unwrap();
             g.v3d_ssbo = Some(v3_buf);
@@ -2675,12 +2958,12 @@ impl VM {
                         resource: g.grid_tris.as_ref().unwrap().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 11,
-                        resource: g.tri_tile.as_ref().unwrap().as_entire_binding(),
+                        binding: 13,
+                        resource: g.tri_mat3d.as_ref().unwrap().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: g.tri_layer.as_ref().unwrap().as_entire_binding(),
+                        binding: 14,
+                        resource: g.materials_ssbo.as_ref().unwrap().as_entire_binding(),
                     },
                 ],
             }));

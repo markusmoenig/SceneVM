@@ -51,6 +51,7 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible,
+            material_id: None,
         };
         self.polys_map.insert(id, poly);
     }
@@ -114,6 +115,7 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible: true,
+            material_id: None,
         };
         self.polys_map.insert(id, poly);
     }
@@ -157,6 +159,7 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible,
+            material_id: None,
         };
         self.polys_map.insert(id, poly);
     }
@@ -182,6 +185,7 @@ impl Chunk {
                 indices,
                 layer,
                 visible,
+                material_id: None,
             },
         );
     }

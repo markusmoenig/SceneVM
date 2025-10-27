@@ -42,9 +42,8 @@ impl TheTrait for Circle {
         //     id: tile_id,
         //     color: [255, 0, 0, 255],
         // });
-        self.vm.execute(Atom::BuildAtlas);
+        // self.vm.execute(Atom::BuildAtlas);
 
-        /*
         self.vm.execute(Atom::AddPoly {
             id: GeoId::Unknown(0),
             tile_id: tile_id,
@@ -64,7 +63,7 @@ impl TheTrait for Circle {
             tile_id: tile_id,
             points: vec![[400.0, 100.0], [500.0, 120.0], [560.0, 200.0]],
             width: 1.5,
-        });*/
+        });
 
         self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
 
@@ -168,8 +167,17 @@ impl TheTrait for Circle {
             light: Light::new_pointlight(Vec3::new(0.0, 1.0, -4.0)),
         });
 
+        // Enable bump mapping
         self.vm
-            .execute(Atom::SetGP9(vek::Vec4::new(0.0, 1.0, 0.0, 1.0)));
+            .execute(Atom::SetGP8(vek::Vec4::new(1.0, 0.0, 0.0, 0.0)));
+
+        // Enable bump mapping
+        self.vm.execute(Atom::SetGP9(vek::Vec4::new(
+            1.0 / 4096.0,
+            1.0 / 4096.0,
+            0.0,
+            1.0,
+        )));
     }
 
     /// Draw a circle in the middle of the window
