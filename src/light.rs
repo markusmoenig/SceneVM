@@ -32,4 +32,37 @@ impl Light {
             flicker: 0.0,
         }
     }
+
+    pub fn with_position(mut self, position: Vec3<f32>) -> Self {
+        self.position = position;
+        self
+    }
+    pub fn with_color(mut self, color: Vec3<f32>) -> Self {
+        self.color = color;
+        self
+    }
+    pub fn with_intensity(mut self, intensity: f32) -> Self {
+        self.intensity = intensity;
+        self
+    }
+    pub fn with_radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
+    pub fn with_emitting(mut self, emitting: bool) -> Self {
+        self.emitting = emitting;
+        self
+    }
+    pub fn with_start_distance(mut self, start_distance: f32) -> Self {
+        self.start_distance = start_distance;
+        self
+    }
+    pub fn with_end_distance(mut self, end_distance: f32) -> Self {
+        self.end_distance = end_distance;
+        self
+    }
+    pub fn with_flicker(mut self, flicker: f32) -> Self {
+        self.flicker = flicker;
+        self
+    }
 }
