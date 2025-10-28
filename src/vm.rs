@@ -2,7 +2,7 @@
 const DUMMY_U32_1: [u32; 1] = [0];
 const DUMMY_I32_1: [i32; 1] = [0];
 
-use crate::{Chunk, Light, LightType, Material, Texture};
+use crate::{Camera3D, CameraKind, Chunk, Light, LightType, Material, Poly2D, Poly3D, Texture};
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
@@ -106,21 +106,11 @@ pub enum Atom {
     BuildAtlas,
     /// Add a polygon (world coords) that references a tile by UUID into the CURRENT chunk; indices are local to the chunk.
     AddPoly {
-        id: GeoId,     // geometry id (stable within the chunk)
-        tile_id: Uuid, // which tile's frames to sample from
-        vertices: Vec<[f32; 2]>,
-        uvs: Vec<[f32; 2]>,
-        indices: Vec<(usize, usize, usize)>,
-        material_id: Option<Uuid>,
+        poly: Poly2D,
     },
     /// Add a 3D polygon (world coords) that references a tile by UUID; indices are local to the chunk.
     AddPoly3D {
-        id: GeoId,
-        tile_id: Uuid,
-        vertices: Vec<[f32; 4]>,
-        uvs: Vec<[f32; 2]>,
-        indices: Vec<(usize, usize, usize)>,
-        material_id: Option<Uuid>,
+        poly: Poly3D,
     },
     /// Add a simple 2D line strip as thick segments tessellated into quads (no caps/joins)
     /// Points are in world coordinates; width is in the same units.
@@ -223,6 +213,10 @@ pub enum Atom {
     },
     /// Reset the scene acceleration structure (will be rebuilt on next BuildSceneGrid)
     ClearSceneGrid,
+    /// Set the camera
+    SetCamera3D {
+        camera: Camera3D,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -231,31 +225,6 @@ pub struct AtlasEntry {
     pub y: u32,
     pub w: u32,
     pub h: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct Poly2D {
-    pub id: GeoId,
-    pub tile_id: Uuid,
-    pub vertices: Vec<[f32; 2]>,
-    pub uvs: Vec<[f32; 2]>,
-    pub indices: Vec<(usize, usize, usize)>, // triangle list, LOCAL to its chunk
-    pub transform: Mat3<f32>,                // per-poly local transform
-    pub layer: i32,                          // visual layer; higher draws on top
-    pub visible: bool,                       // if false, skipped during draw
-    pub material_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Poly3D {
-    pub id: GeoId,
-    pub tile_id: uuid::Uuid,
-    pub vertices: Vec<[f32; 4]>, // world-space XYZ(W)
-    pub uvs: Vec<[f32; 2]>,      // per-vertex UV
-    pub indices: Vec<(usize, usize, usize)>,
-    pub layer: i32, // for future (not used by ray depth)
-    pub visible: bool,
-    pub material_id: Option<Uuid>,
 }
 
 #[derive(Debug)]
@@ -404,9 +373,24 @@ pub struct Compute3DUniforms {
     pub mat3d_c2: [f32; 4],
     pub mat3d_c3: [f32; 4],
 
+    // Lights
     pub lights_count: u32,
     _pad_lights_align: [u32; 3],
     _pad_lights_vec3: [u32; 4],
+
+    // Camera3D
+    pub cam_pos: [f32; 4], // xyz, pad
+    pub cam_fwd: [f32; 4], // xyz, pad
+    pub cam_right: [f32; 4],
+    pub cam_up: [f32; 4],
+    pub cam_vfov_deg: f32,
+    pub cam_ortho_half_h: f32,
+    pub cam_near: f32,
+    pub cam_far: f32,
+    pub cam_kind: u32, // 0=OrthoIso, 1=OrbitPersp, 2=FirstPersonPersp
+    _pad_cam: [u32; 3],
+
+    pub _pad_tail: [u32; 4],
 }
 
 #[repr(C)]
@@ -445,707 +429,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let b = U.background.x;
   let col = vec4<f32>(uv.x*b, uv.y*b, b, 1.0);
   textureStore(color_out, vec2<i32>(i32(gid.x), i32(gid.y)), col);
-}
-"#;
-
-pub const SCENEVM_2D_HEADER: &str = r#"
-struct U2D {
-  background: vec4<f32>,
-  fb_size: vec2<u32>, _pad0: vec2<u32>,
-  gp0: vec4<f32>, gp1: vec4<f32>, gp2: vec4<f32>,
-  gp3: vec4<f32>, gp4: vec4<f32>, gp5: vec4<f32>,
-  gp6: vec4<f32>, gp7: vec4<f32>, gp8: vec4<f32>, gp9: vec4<f32>,
-  mat2d_c0: vec4<f32>,
-  mat2d_c1: vec4<f32>,
-  mat2d_c2: vec4<f32>,
-  mat2d_inv_c0: vec4<f32>,
-  mat2d_inv_c1: vec4<f32>,
-  mat2d_inv_c2: vec4<f32>,
-  lights_count: u32,
-  _pad_lights: vec3<u32>,
-};
-@group(0) @binding(0) var<uniform> U: U2D;
-@group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(2) var atlas_tex: texture_2d<f32>;
-@group(0) @binding(3) var atlas_smp: sampler;
-struct Vert { pos: vec2<f32>, uv: vec2<f32> };
-struct Verts { data: array<Vert> };
-struct Indices { data: array<u32> };
-@group(0) @binding(4) var<storage, read> verts: Verts;
-@group(0) @binding(5) var<storage, read> indices: Indices;
-struct U32s { data: array<u32> };
-@group(0) @binding(6) var<storage, read> tile_offsets: U32s;
-@group(0) @binding(7) var<storage, read> tile_counts:  U32s;
-@group(0) @binding(8) var<storage, read> tile_tris:    U32s;
-
-struct LightWGSL {
-  header:   vec4<u32>,  // [light_type, emitting, _, _]
-  position: vec4<f32>,  // xyz, _
-  color:    vec4<f32>,  // rgb, _
-  params0:  vec4<f32>,  // [intensity, radius, startD, endD]
-  params1:  vec4<f32>,  // [flicker, _, _, _]
-};
-struct Lights { data: array<LightWGSL>, };
-@group(0) @binding(9) var<storage, read> lights: Lights;
-
-@group(0) @binding(10) var<storage, read> tri_mat2d: U32s;
-
-struct MaterialWGSL {
-  tint:  vec4<f32>,
-  rmoe:  vec4<f32>,
-  model: vec4<f32>,
-};
-struct Materials { data: array<MaterialWGSL>, };
-@group(0) @binding(11) var<storage, read> materials: Materials;
-
-fn tiles_x() -> u32 { return (U.fb_size.x + 7u) / 8u; }
-fn tiles_y() -> u32 { return (U.fb_size.y + 7u) / 8u; }
-fn tile_index(tx: u32, ty: u32) -> u32 { return ty * tiles_x() + tx; }
-fn tile_of_px(px: u32, py: u32) -> u32 {
-  let tx = px / 8u;
-  let ty = py / 8u;
-  return tile_index(tx, ty);
-}
-
-fn sv_write(px: u32, py: u32, c: vec4<f32>) {
-  textureStore(color_out, vec2<i32>(i32(px), i32(py)), c);
-}
-fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
-  return textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
-}
-// ----- SceneVM 2D helpers -----
-struct BaryHit { hit: bool, w: vec3<f32> };
-struct ColorHit { hit: bool, color: vec4<f32>, tri: u32 };
-
-fn sv_edge(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-  return (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
-}
-
-fn sv_tri_bary(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> BaryHit {
-  let e0 = sv_edge(p,a,b);
-  let e1 = sv_edge(p,b,c);
-  let e2 = sv_edge(p,c,a);
-  let ok = (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0);
-  if (!ok) { return BaryHit(false, vec3<f32>(0.0)); }
-  let area = abs((b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x));
-  if (area <= 0.0) { return BaryHit(false, vec3<f32>(0.0)); }
-  let w0 = abs((b.x - p.x)*(c.y - p.y) - (b.y - p.y)*(c.x - p.x)) / area;
-  let w1 = abs((c.x - p.x)*(a.y - p.y) - (c.y - p.y)*(a.x - p.x)) / area;
-  let w2 = 1.0 - w0 - w1;
-  return BaryHit(true, vec3<f32>(w0, w1, w2));
-}
-
-fn sv_edge_signed(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-  // Same as sv_edge but signed consistently with winding
-  return (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
-}
-
-fn sv_edge_len(a: vec2<f32>, b: vec2<f32>) -> f32 {
-  return max(length(b - a), 1e-6);
-}
-
-// Distance to the closest triangle edge in *pixels*
-fn sv_min_edge_distance_px(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
-  let e0 = abs(sv_edge_signed(p, a, b)) / sv_edge_len(a, b);
-  let e1 = abs(sv_edge_signed(p, b, c)) / sv_edge_len(b, c);
-  let e2 = abs(sv_edge_signed(p, c, a)) / sv_edge_len(c, a);
-  return min(e0, min(e1, e2));
-}
-
-fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
-  let a = verts.data[i0].pos;
-  let b = verts.data[i1].pos;
-  let c = verts.data[i2].pos;
-  let bh = sv_tri_bary(p, a, b, c);
-  if (!bh.hit) { return ColorHit(false, vec4<f32>(0.0), 0u); }
-
-  let w = bh.w;
-  let uv = verts.data[i0].uv * w.x + verts.data[i1].uv * w.y + verts.data[i2].uv * w.z;
-  var col = sv_sample(uv);
-  if (col.a < 0.01) { return ColorHit(false, vec4<f32>(0.0), 0u); }
-
-  // --- Analytic edge AA ---
-  let feather = 1.0;
-  if (feather > 0.0) {
-    let d = sv_min_edge_distance_px(p, a, b, c);  // pixels
-    // Smooth coverage from 0..feather → 0..1 (softstep). Widen slightly for numeric stability.
-    let cov = smoothstep(0.0, feather, d);
-    // Multiply alpha by coverage (premultiplied not assumed here)
-    col.a = col.a * cov;
-  }
-
-  // tri id is not known here; sv_shade_tile_pixel wraps this and sets it
-  return ColorHit(true, col, 0u);
-}
-
-fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
-  let invM = mat3x3<f32>(U.mat2d_inv_c0.xyz, U.mat2d_inv_c1.xyz, U.mat2d_inv_c2.xyz);
-  let v = invM * vec3<f32>(pix, 1.0);
-  return v.xy;
-}
-
-fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
-  let off = tile_offsets.data[tid];
-  let cnt = tile_counts.data[tid];
-  for (var k: u32 = 0u; k < cnt; k = k + 1u) {
-    let t  = tile_tris.data[off + k];
-    let i0 = indices.data[3u*t + 0u];
-    let i1 = indices.data[3u*t + 1u];
-    let i2 = indices.data[3u*t + 2u];
-    let ch = sv_tri_color(p, i0, i1, i2);
-    if (ch.hit) {
-      return ColorHit(true, ch.color, t);
-    }
-  }
-  return ColorHit(false, vec4<f32>(0.0), 0u);
-}
-
-// RNG Helper
-fn wang_hash(x0: u32) -> u32 {
-  var x = x0;
-  x = (x ^ 61u) ^ (x >> 16u);
-  x = x + (x << 3u);
-  x = x ^ (x >> 4u);
-  x = x * 0x27d4eb2du;
-  x = x ^ (x >> 15u);
-  return x;
-}
-
-// Combine pixel, frame, and any salt to make a good seed
-fn sv_seed(px: u32, py: u32, salt: u32) -> u32 {
-  return wang_hash(px ^ (py << 11u) ^ salt);
-}
-
-// Convert seed to [0,1)
-fn sv_rand01(seed: u32) -> f32 {
-  let h = wang_hash(seed);
-  // 1/2^32 as f32
-  return f32(h) * (1.0 / 4294967296.0);
-}
-// ----- end helpers -----
-"#;
-
-pub const SCENEVM_3D_HEADER: &str = r#"
-struct U3D {
-  background: vec4<f32>,
-  fb_size: vec2<u32>, _pad0: vec2<u32>,
-  gp0: vec4<f32>, gp1: vec4<f32>, gp2: vec4<f32>,
-  gp3: vec4<f32>, gp4: vec4<f32>, gp5: vec4<f32>,
-  gp6: vec4<f32>, gp7: vec4<f32>, gp8: vec4<f32>, gp9: vec4<f32>,
-  mat3d_c0: vec4<f32>,
-  mat3d_c1: vec4<f32>,
-  mat3d_c2: vec4<f32>,
-  mat3d_c3: vec4<f32>,
-  lights_count: u32,
-  _pad_lights: vec3<u32>,
-};
-@group(0) @binding(0) var<uniform> U: U3D;
-@group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(2) var atlas_tex: texture_2d<f32>;
-@group(0) @binding(3) var atlas_smp: sampler;
-
-struct LightWGSL {
-  header:   vec4<u32>,  // [light_type, emitting, _, _]
-  position: vec4<f32>,  // xyz, _
-  color:    vec4<f32>,  // rgb, _
-  params0:  vec4<f32>,  // [intensity, radius, startD, endD]
-  params1:  vec4<f32>,  // [flicker, _, _, _]
-};
-struct Lights { data: array<LightWGSL>, };
-@group(0) @binding(4) var<storage, read> lights: Lights;
-
-// Geometry
-struct Vert3D { pos: vec3<f32>, _pad0: f32, uv: vec2<f32>, _pad1: vec2<f32>, normal: vec3<f32>, _pad2: f32 };
-struct Verts3D { data: array<Vert3D> };
-struct Indices { data: array<u32> };
-
-@group(0) @binding(5) var<storage, read> verts3d: Verts3D;
-@group(0) @binding(6) var<storage, read> indices3d: Indices;
-
-// --- Scene-wide uniform grid (optional toggle via gp9.w) ---
-struct Grid3DHeader {
-  origin: vec4<f32>,     // xyz, pad
-  cell_size: vec4<f32>,  // xyz, pad
-  dims: vec4<u32>,       // nx, ny, nz, pad
-};
-@group(0) @binding(7) var<uniform> gridH: Grid3DHeader;
-struct U32s { data: array<u32> };
-struct I32s { data: array<i32> };
-
-@group(0) @binding(8)  var<storage, read> grid_offsets: U32s;
-@group(0) @binding(9)  var<storage, read> grid_counts:  U32s;
-@group(0) @binding(10) var<storage, read> grid_tris:    U32s;
-// material index per triangle (aligned with indices3d triangles)
-@group(0) @binding(13) var<storage, read> tri_mat: U32s;
-
-// Materials array
-struct MaterialWGSL {
-  tint:  vec4<f32>,
-  rmoe:  vec4<f32>,
-  model: vec4<f32>,
-};
-struct Materials { data: array<MaterialWGSL>, };
-@group(0) @binding(14) var<storage, read> materials: Materials;
-
-fn sv_grid_active() -> bool { return U.gp9.w > 0.5; }
-
-fn sv_write(px: u32, py: u32, c: vec4<f32>) {
-  textureStore(color_out, vec2<i32>(i32(px), i32(py)), c);
-}
-fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
-  return textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
-}
-// ---- 3D utilities ----
-// Full hit record including **geometric** normal (for debug/fallback). Shaders may
-// still compute/interpolate their own shading normal using vertex data.
-struct Hit3DFull { hit: bool, t: f32, u: f32, v: f32, Ng: vec3<f32> };
-
-fn sv_ray_tri_full(ro: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> Hit3DFull {
-  let e1 = b - a;
-  let e2 = c - a;
-  let p = cross(rd, e2);
-  let det = dot(e1, p);
-  if (abs(det) < 1e-8) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
-  let inv_det = 1.0 / det;
-  let tv = ro - a;
-  let u = dot(tv, p) * inv_det;
-  if (u < 0.0 || u > 1.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
-  let q = cross(tv, e1);
-  let v = dot(rd, q) * inv_det;
-  if (v < 0.0 || u + v > 1.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
-  let t = dot(e2, q) * inv_det;
-  if (t <= 0.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
-  // Geometric normal; flip to face the ray if needed for stability
-  var Ng = normalize(cross(e1, e2));
-  if (det > 0.0) { Ng = -Ng; }
-  return Hit3DFull(true, t, u, v, Ng);
-}
-
-fn sv_interp3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, u: f32, v: f32) -> vec3<f32> {
-  return a*(1.0-u-v) + b*u + c*v;
-}
-
-// ===== Uniform-grid DDA traversal over triangles =====
-
-// Packed hit record returned by DDA tracing.
-struct TraceHit {
-  hit: bool,
-  t: f32,        // distance along ray
-  tri: u32,      // winning triangle index (in indices3d, tri = tix)
-  u: f32,        // barycentric u
-  v: f32,        // barycentric v
-  Ng: vec3<f32>, // geometric normal
-};
-
-// Grid helpers
-fn grid_bounds_min() -> vec3<f32> { return gridH.origin.xyz; }
-fn grid_cell_size() -> vec3<f32> { return gridH.cell_size.xyz; }
-fn grid_dims() -> vec3<u32> { return gridH.dims.xyz; }
-
-fn grid_cell_index(ix: u32, iy: u32, iz: u32) -> u32 {
-  let nx = gridH.dims.x; let ny = gridH.dims.y;
-  return (iz * ny + iy) * nx + ix;
-}
-
-fn grid_world_to_cell(p: vec3<f32>) -> vec3<i32> {
-  let minb = grid_bounds_min();
-  let cs = grid_cell_size();
-  let rel = (p - minb) / cs;
-  return vec3<i32>(floor(rel));
-}
-
-fn clamp_cell(c: vec3<i32>) -> vec3<i32> {
-  let d = grid_dims();
-  return vec3<i32>(
-    clamp(c.x, 0, i32(d.x) - 1),
-    clamp(c.y, 0, i32(d.y) - 1),
-    clamp(c.z, 0, i32(d.z) - 1)
-  );
-}
-
-fn grid_bounds_max() -> vec3<f32> {
-  return grid_bounds_min() + grid_cell_size() * vec3<f32>(grid_dims());
-}
-
-// Ray/AABB for the whole grid, returns (hit, tEnter, tExit)
-fn ray_box(ro: vec3<f32>, rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> vec3<f32> {
-  let eps = 1e-6;
-
-  // For each axis: if |rd| >= eps use rd, else use sign(rd)*eps (preserve sign)
-  let rx = select(sign(rd.x) * eps, rd.x, abs(rd.x) >= eps);
-  let ry = select(sign(rd.y) * eps, rd.y, abs(rd.y) >= eps);
-  let rz = select(sign(rd.z) * eps, rd.z, abs(rd.z) >= eps);
-
-  let inv = vec3<f32>(1.0 / rx, 1.0 / ry, 1.0 / rz);
-
-  let t0 = (bmin - ro) * inv;
-  let t1 = (bmax - ro) * inv;
-
-  let tmin = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
-  let tmax = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
-
-  let hit = select(0.0, 1.0, tmax >= max(tmin, 0.0));
-  return vec3<f32>(hit, tmin, tmax);
-}
-
-struct DDAState {
-  tMax:   vec3<f32>,  // absolute times when we hit the next boundary on each axis
-  tDelta: vec3<f32>,  // absolute time increment to cross one full cell along each axis
-  step:   vec3<i32>,  // -1 or +1 per axis
-};
-
-// p = point at tEnter (AABB entry), tEnter = absolute time
-fn dda_setup(p: vec3<f32>, rd: vec3<f32>, cell: vec3<i32>, tEnter: f32) -> DDAState {
-  let cs = grid_cell_size();
-  let minb = grid_bounds_min();
-  let fcell = vec3<f32>(cell);
-
-  let step = vec3<i32>(
-    select(-1, 1, rd.x >= 0.0),
-    select(-1, 1, rd.y >= 0.0),
-    select(-1, 1, rd.z >= 0.0)
-  );
-
-  // next boundary coordinate (on the side we are heading to)
-  let nb_x = minb.x + (select(fcell.x, fcell.x + 1.0, step.x > 0) * cs.x);
-  let nb_y = minb.y + (select(fcell.y, fcell.y + 1.0, step.y > 0) * cs.y);
-  let nb_z = minb.z + (select(fcell.z, fcell.z + 1.0, step.z > 0) * cs.z);
-
-  // safe reciprocals
-  let inv = 1.0 / max(abs(rd), vec3<f32>(1e-32));
-
-  // time from *p* to the next boundary per axis, then make them absolute by + tEnter
-  let tMax = vec3<f32>(
-    tEnter + (nb_x - p.x) * inv.x,
-    tEnter + (nb_y - p.y) * inv.y,
-    tEnter + (nb_z - p.z) * inv.z
-  );
-
-  // how much absolute time (Δt) to traverse exactly one cell per axis
-  let tDelta = vec3<f32>(cs.x * inv.x, cs.y * inv.y, cs.z * inv.z);
-
-  return DDAState(tMax, tDelta, step);
-}
-
-// Core: uniform-grid DDA traversal. Assumes grid buffers populated.
-// tmin/tmax clip the segment (e.g., near/far planes).
-fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit {
-  // Intersect ray with grid AABB
-  let bmin = grid_bounds_min();
-  let bmax = grid_bounds_max();
-  let rb = ray_box(ro, rd, bmin, bmax);
-  if (rb.x < 0.5) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0)); }
-
-  var tEnter = max(rb.y, tmin);
-  let tExit = min(rb.z, tmax);
-  if (tEnter > tExit) {
-    return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
-  }
-
-  // Start cell: point at tEnter
-  var p = ro + rd * tEnter;
-  var cell = clamp_cell(grid_world_to_cell(p));
-
-  // DDA setup
-  var st = dda_setup(p, rd, cell, tEnter);
-  var tNext = st.tMax;  // next boundary crossings
-  
-  let dims = grid_dims();
-
-  var best_t = 1e30;
-  var best_tri: u32 = 0u;
-  var best_u = 0.0;
-  var best_v = 0.0;
-  var best_Ng = vec3<f32>(0.0);
-
-  // Hard cap to prevent infinite loops; plenty for large screens
-  let MAX_STEPS: u32 = 1u << 20u;
-  var steps: u32 = 0u;
-
-  loop {
-    if (steps >= MAX_STEPS) { break; }
-    steps = steps + 1u;
-
-    // Cell index & triangle span
-    let ix = u32(cell.x);
-    let iy = u32(cell.y);
-    let iz = u32(cell.z);
-    let idx = grid_cell_index(ix, iy, iz);
-    let off = grid_offsets.data[idx];
-    let cnt = grid_counts.data[idx];
-
-    // Test tris in this cell; accept the closest hit that lies BEFORE we cross the next cell boundary
-    let tCellExit = min(tNext.x, min(tNext.y, tNext.z));
-    for (var k: u32 = 0u; k < cnt; k = k + 1u) {
-      let tri = grid_tris.data[off + k];
-
-      // Fetch tri indices (tri references indices3d in packs of 3)
-      let i0 = indices3d.data[3u*tri + 0u];
-      let i1 = indices3d.data[3u*tri + 1u];
-      let i2 = indices3d.data[3u*tri + 2u];
-
-      // Triangle vertices
-      let a = verts3d.data[i0].pos;
-      let b = verts3d.data[i1].pos;
-      let c = verts3d.data[i2].pos;
-
-      let hit = sv_ray_tri_full(ro, rd, a, b, c);
-      if (!hit.hit) { continue; }
-
-      if (hit.t < best_t) {
-        best_t  = hit.t;
-        best_tri = tri;
-        best_u  = hit.u;
-        best_v  = hit.v;
-        best_Ng = hit.Ng;
-      }
-    }
-
-    if (best_t < 1e29) {
-      // Hit inside current cell slab -> earliest along ray
-      return TraceHit(true, best_t, best_tri, best_u, best_v, best_Ng);
-    }
-
-    // Advance to next cell along the smallest tNext
-    if (tNext.x < tNext.y) {
-      if (tNext.x < tNext.z) {
-        cell.x += st.step.x;
-        tEnter = tNext.x;
-        tNext.x += abs(st.tDelta.x);
-      } else {
-        cell.z += st.step.z;
-        tEnter = tNext.z;
-        tNext.z += abs(st.tDelta.z);
-      }
-    } else {
-      if (tNext.y < tNext.z) {
-        cell.y += st.step.y;
-        tEnter = tNext.y;
-        tNext.y += abs(st.tDelta.y);
-      } else {
-        cell.z += st.step.z;
-        tEnter = tNext.z;
-        tNext.z += abs(st.tDelta.z);
-      }
-    }
-
-    // Out of grid or beyond segment
-    if (tEnter > tExit) { break; }
-    if (cell.x < 0 || cell.y < 0 || cell.z < 0) { break; }
-    if (u32(cell.x) >= dims.x || u32(cell.y) >= dims.y || u32(cell.z) >= dims.z) { break; }
-  }
-
-  return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
-}
-// ===== end DDA =====  
-
-// TBN from triangle positions/uvs, using geometric normal for stability.
-fn sv_tri_tbn(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>,
-              uv0: vec2<f32>, uv1: vec2<f32>, uv2: vec2<f32>) -> mat3x3<f32> {
-  let e1 = b - a;
-  let e2 = c - a;
-  let d1 = uv1 - uv0;
-  let d2 = uv2 - uv0;
-  let r = 1.0 / max(d1.x * d2.y - d1.y * d2.x, 1e-8);
-
-  var T = normalize((e1 * d2.y - e2 * d1.y) * r);
-  var Ng = normalize(cross(e1, e2));
-  T = normalize(T - Ng * dot(Ng, T));
-  let B = normalize(cross(Ng, T));
-  return mat3x3<f32>(T, B, Ng);
-}
-
-// Luma from color (height proxy)
-fn sv_luma(rgb: vec3<f32>) -> f32 {
-  return dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
-}
-"#;
-
-pub const DEFAULT_2D_BODY: &str = r#"
-@compute @workgroup_size(8,8,1)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let px = gid.x;
-  let py = gid.y;
-  if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
-
-  // Clear to background first
-  sv_write(px, py, U.background);
-
-  let p = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
-  let tid = tile_of_px(px, py);
-  let ch = sv_shade_tile_pixel(p, px, py, tid);
-  if (ch.hit) {
-    // Material look-up for winning triangle
-    let m_idx = tri_mat2d.data[ch.tri];
-    let M = materials.data[m_idx];
-
-    // Base texture color → apply tint & opacity; add emission (simple)
-    let base = ch.color;
-    let rgb = base.xyz * M.tint.xyz + M.rmoe.w * M.tint.xyz; // tint + emission
-    let a   = base.a * M.rmoe.z;                             // opacity
-    sv_write(px, py, vec4<f32>(rgb, a));
-  }
-}
-"#;
-
-pub const DEFAULT_3D_BODY: &str = r#"
-  // --- Test Lambert shading (kept in BODY so headers stay generic) ---
-  fn lambert_pointlights(P: vec3<f32>, N: vec3<f32>, base_col: vec3<f32>) -> vec3<f32> {
-    var diffuse = vec3<f32>(0.0);
-    // Use background as ambient; make it visible out of the box
-    let ambient = U.background.xyz;
-
-    for (var li: u32 = 0u; li < U.lights_count; li = li + 1u) {
-      if (lights.data[li].header.y == 0u) { continue; } // emitting flag
-
-      let Lp = lights.data[li].position;
-      let Lc = lights.data[li].color.xyz;
-      let Li = lights.data[li].params0.x + lights.data[li].params1.x;   // intensity + flicker
-
-      let start_d = lights.data[li].params0.z;
-      let end_d   = max(lights.data[li].params0.w, start_d + 1e-3);
-      let L = Lp.xyz - P;
-      let dist2 = max(dot(L, L), 1e-6);
-      let dist = sqrt(dist2);
-      let Ldir = normalize(L);
-
-      // Always two-sided: use |N·L|
-      let ndotl = abs(dot(N, Ldir));
-
-      let fall = clamp((end_d - dist) / max(end_d - start_d, 1e-3), 0.0, 1.0);
-      let atten = Li * ndotl * fall / dist2;
-      diffuse += Lc * atten;
-    }
-    return base_col * (ambient + diffuse);
-  }
-  
-@compute @workgroup_size(8,8,1)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let px = gid.x; let py = gid.y;
-  if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
-
-  // Unpack camera (unchanged) ...
-  let cam_pos = U.gp0.xyz;
-  let fovy = U.gp0.w;
-  let dir = normalize(U.gp1.xyz);
-  let aspect = U.gp1.w;
-  let right = normalize(U.gp2.xyz);
-  let up = normalize(U.gp3.xyz);
-
-  let sx = (f32(px) + 0.5) / f32(U.fb_size.x);
-  let sy = (f32(py) + 0.5) / f32(U.fb_size.y);
-  let x_ndc = 2.0 * sx - 1.0;
-  let y_ndc = 1.0 - 2.0 * sy;
-  let tproj = tan(0.5 * fovy);
-  let rd = normalize(dir + x_ndc * tproj * aspect * right + y_ndc * tproj * up);
-  let ro = cam_pos;
-
-  // ===== choose tracing mode =====
-  var hit_any = false;
-  var best_t  = 1e30;
-  var best_tri: u32 = 0u;
-  var best_u = 0.0;
-  var best_v = 0.0;
-
-  if (sv_grid_active()) {
-    let th = sv_trace_grid(ro, rd, 0.001, 1e6);
-    if (th.hit) {
-      hit_any = true;
-      best_t = th.t;
-      best_tri = th.tri;
-      best_u = th.u;
-      best_v = th.v;
-    }
-  } else {
-    // Brute-force: loop all triangles in indices3d
-    let tri_count: u32 = arrayLength(&indices3d.data) / 3u;
-    for (var tri: u32 = 0u; tri < tri_count; tri = tri + 1u) {
-      let i0 = indices3d.data[3u*tri + 0u];
-      let i1 = indices3d.data[3u*tri + 1u];
-      let i2 = indices3d.data[3u*tri + 2u];
-      let a = verts3d.data[i0].pos;
-      let b = verts3d.data[i1].pos;
-      let c = verts3d.data[i2].pos;
-      let h = sv_ray_tri_full(ro, rd, a, b, c);
-      if (h.hit && h.t < best_t) {
-        hit_any = true;
-        best_t = h.t;
-        best_tri = tri;
-        best_u = h.u;
-        best_v = h.v;
-      }
-    }
-  }
-
-  if (!hit_any) {
-    sv_write(px, py, U.background);
-    return;
-  }
-
-  // Interpolate UV & smooth normal
-  let i0 = indices3d.data[3u*best_tri + 0u];
-  let i1 = indices3d.data[3u*best_tri + 1u];
-  let i2 = indices3d.data[3u*best_tri + 2u];
-
-  let uv0 = verts3d.data[i0].uv; let n0 = verts3d.data[i0].normal;
-  let uv1 = verts3d.data[i1].uv; let n1 = verts3d.data[i1].normal;
-  let uv2 = verts3d.data[i2].uv; let n2 = verts3d.data[i2].normal;
-
-  let w0 = 1.0 - best_u - best_v;
-  let uv = uv0*w0 + uv1*best_u + uv2*best_v;
-  var N = normalize(n0*w0 + n1*best_u + n2*best_v);
-
-  // when filling Compute3DUniforms u:
-  // self.gp8.x = 1.0; // bump strength (0 = off)
-  // self.gp9.x = 1.0 / (self.atlas.width as f32);
-  // self.gp9.y = 1.0 / (self.atlas.height as f32);
-
-  // Optional bump from the polygon's own texture as height
-  if (U.gp8.x > 0.0) {
-    // Reconstruct triangle positions for TBN
-    let a = verts3d.data[i0].pos;
-    let b = verts3d.data[i1].pos;
-    let c = verts3d.data[i2].pos;
-
-    // 1 texel steps in atlas UV space (provided by CPU)
-    let du = vec2<f32>(U.gp9.x, 0.0);
-    let dv = vec2<f32>(0.0, U.gp9.y);
-
-    // Sample height at uv and neighbors (use color as height proxy)
-    let h  = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0).xyz);
-    let hx = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv + du, 0.0).xyz);
-    let hy = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv + dv, 0.0).xyz);
-
-    // Finite differences
-    let dhdu = (hx - h);
-    let dhdv = (hy - h);
-
-    // Tangent frame of the triangle
-    let TBN = sv_tri_tbn(a, b, c, uv0, uv1, uv2);
-
-    // Map height gradient into tangent space normal and to world space
-    let n_ts = normalize(vec3<f32>(-dhdu * U.gp8.x, -dhdv * U.gp8.x, 1.0));
-    let n_ws = normalize(TBN * n_ts);
-
-    // Blend with your smooth vertex normal for stability
-    N = normalize(mix(N, n_ws, clamp(U.gp8.x, 0.0, 1.0)));
-  }  
-
-  let P = ro + rd * best_t;
-
-    let base_col = textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
-    if (dot(N, rd) > 0.0) { N = -N; } // two-sided
-
-    // Material lookup for the winning triangle
-    let m_idx = tri_mat.data[best_tri];
-    let M = materials.data[m_idx];
-    let base_rgb = base_col.xyz * M.tint.xyz;
-
-    let lit = lambert_pointlights(P, N, base_rgb);
-    // Add simple emission, apply opacity (from material)
-    let final_rgb = lit + M.rmoe.w * M.tint.xyz;
-    let final_a = base_col.a * M.rmoe.z;
-    sv_write(px, py, vec4<f32>(final_rgb, final_a));
 }
 "#;
 
@@ -1199,11 +482,27 @@ pub struct VM {
     pub scene_grid_cells: u32,
     pub scene_accel: SceneAccel,
     pub accel_dirty: bool,
+
+    // Camera
+    pub camera3d: Camera3D,
 }
 
 impl VM {
     /// Create a VM with a fixed-size atlas (atlas_w x atlas_h).
     pub fn new(atlas_w: u32, atlas_h: u32) -> Self {
+        let mut source2d = String::new();
+        if let Some(bytes) = crate::Embedded::get("2d_body.wgsl") {
+            if let Ok(source) = std::str::from_utf8(bytes.data.as_ref()) {
+                source2d = source.to_string();
+            }
+        }
+
+        let mut source3d = String::new();
+        if let Some(bytes) = crate::Embedded::get("3d_body.wgsl") {
+            if let Ok(source) = std::str::from_utf8(bytes.data.as_ref()) {
+                source3d = source.to_string();
+            }
+        }
         Self {
             tiles_map: FxHashMap::default(),
             tiles_order: Vec::new(),
@@ -1225,8 +524,8 @@ impl VM {
             gp7: Vec4::new(0.0, 0.0, 0.0, 0.0),
             gp8: Vec4::new(0.0, 0.0, 0.0, 0.0),
             gp9: Vec4::new(0.0, 0.0, 0.0, 0.0),
-            source2d: DEFAULT_2D_BODY.to_string(),
-            source3d: DEFAULT_3D_BODY.to_string(),
+            source2d,
+            source3d,
             transform2d: Mat3::identity(),
             transform3d: Mat4::identity(),
             lights: FxHashMap::default(),
@@ -1235,6 +534,7 @@ impl VM {
             scene_accel: SceneAccel::default(),
             accel_dirty: true,
             scene_grid_cells: 5000,
+            camera3d: Camera3D::default(),
         }
     }
 
@@ -1304,14 +604,7 @@ impl VM {
             Atom::BuildAtlas => {
                 self.build_atlas();
             }
-            Atom::AddPoly {
-                id,
-                tile_id,
-                vertices,
-                uvs,
-                indices,
-                material_id,
-            } => {
+            Atom::AddPoly { poly } => {
                 let chunk_id = match self.current_chunk {
                     Some(cid) => cid,
                     None => {
@@ -1321,25 +614,9 @@ impl VM {
                         cid
                     }
                 };
-                self.chunks_map.entry(chunk_id).or_default().add_poly_2d(
-                    id,
-                    tile_id,
-                    vertices,
-                    uvs,
-                    indices,
-                    self.current_layer,
-                    true,
-                    material_id,
-                );
+                self.chunks_map.entry(chunk_id).or_default().add(poly);
             }
-            Atom::AddPoly3D {
-                id,
-                tile_id,
-                vertices,
-                uvs,
-                indices,
-                material_id,
-            } => {
+            Atom::AddPoly3D { poly } => {
                 let chunk_id = match self.current_chunk {
                     Some(cid) => cid,
                     None => {
@@ -1349,16 +626,7 @@ impl VM {
                         cid
                     }
                 };
-                self.chunks_map.entry(chunk_id).or_default().add_poly_3d(
-                    id,
-                    tile_id,
-                    vertices,
-                    uvs,
-                    indices,
-                    self.current_layer,
-                    true,
-                    material_id,
-                );
+                self.chunks_map.entry(chunk_id).or_default().add_3d(poly);
                 self.accel_dirty = true;
             }
             Atom::AddLineStrip2D {
@@ -1544,6 +812,9 @@ impl VM {
                 // Reset to an empty 1x1 grid to keep bindings valid
                 self.scene_accel = SceneAccel::default();
                 self.accel_dirty = true;
+            }
+            Atom::SetCamera3D { camera } => {
+                self.camera3d = camera;
             }
         }
     }
@@ -2113,7 +1384,13 @@ impl VM {
         }
 
         if g.compute2d_pipeline.is_none() {
-            let src2d = [SCENEVM_2D_HEADER, &self.source2d].concat();
+            let mut header_2d = String::new();
+            if let Some(bytes) = crate::Embedded::get("2d_header.wgsl") {
+                if let Ok(source) = std::str::from_utf8(bytes.data.as_ref()) {
+                    header_2d = source.to_string();
+                }
+            }
+            let src2d = [header_2d.as_str(), &self.source2d].concat();
             let cs2d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("vm-2d-cs"),
                 source: wgpu::ShaderSource::Wgsl(src2d.into()),
@@ -2136,7 +1413,14 @@ impl VM {
         }
 
         if g.compute3d_pipeline.is_none() {
-            let src3d = [SCENEVM_3D_HEADER, &self.source3d].concat();
+            let mut header_3d = String::new();
+            if let Some(bytes) = crate::Embedded::get("3d_header.wgsl") {
+                if let Ok(source) = std::str::from_utf8(bytes.data.as_ref()) {
+                    header_3d = source.to_string();
+                }
+            }
+
+            let src3d = [header_3d.as_str(), &self.source3d].concat();
             let cs3d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("vm-3d-cs"),
                 source: wgpu::ShaderSource::Wgsl(src3d.into()),
@@ -2641,6 +1925,7 @@ impl VM {
 
         // --- Uniforms ---
         let m = self.transform3d;
+        let c = self.camera3d;
         let u = Compute3DUniforms {
             background: self.background.into_array(),
             fb_size: [fb_w, fb_h],
@@ -2662,6 +1947,21 @@ impl VM {
             lights_count: self.lights.len() as u32,
             _pad_lights_align: [0, 0, 0],
             _pad_lights_vec3: [0, 0, 0, 0],
+            cam_pos: [c.pos.x, c.pos.y, c.pos.z, 0.0],
+            cam_fwd: [c.forward.x, c.forward.y, c.forward.z, 0.0],
+            cam_right: [c.right.x, c.right.y, c.right.z, 0.0],
+            cam_up: [c.up.x, c.up.y, c.up.z, 0.0],
+            cam_vfov_deg: c.vfov_deg,
+            cam_ortho_half_h: c.ortho_half_h,
+            cam_near: c.near,
+            cam_far: c.far,
+            cam_kind: match c.kind {
+                CameraKind::OrthoIso => 0,
+                CameraKind::OrbitPersp => 1,
+                CameraKind::FirstPersonPersp => 2,
+            },
+            _pad_cam: [0, 0, 0],
+            _pad_tail: [0, 0, 0, 0],
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u3d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));

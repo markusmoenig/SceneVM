@@ -1,84 +1,68 @@
-use crate::{BBox2D, GeoId, Poly2D, Poly3D};
-use rustc_hash::FxHashMap;
+use crate::GeoId;
 use uuid::Uuid;
+use vek::Mat3;
 
-use vek::{Mat3, Vec2};
-
-#[derive(Debug, Default, Clone)]
-pub struct Chunk {
-    pub origin: Vec2<i32>,
-    pub size: i32,
-    pub bbox: BBox2D,
-
-    /// 2D Geometry
-    pub polys_map: FxHashMap<GeoId, Poly2D>,
-
-    /// 3D Geometry,
-    pub polys3d_map: rustc_hash::FxHashMap<GeoId, Poly3D>,
-
-    /// The priority of the chunk.
-    pub priority: i32,
+#[derive(Debug, Clone)]
+pub struct Poly2D {
+    pub id: GeoId,
+    pub tile_id: Uuid,
+    pub vertices: Vec<[f32; 2]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<(usize, usize, usize)>, // triangle list, LOCAL to its chunk
+    pub transform: Mat3<f32>,                // per-poly local transform
+    pub layer: i32,                          // visual layer; higher draws on top
+    pub visible: bool,                       // if false, skipped during draw
+    pub material_id: Option<Uuid>,
 }
 
-impl Chunk {
-    pub fn new(origin: Vec2<i32>, size: i32) -> Self {
-        let bbox = BBox2D::from_pos_size(origin.map(|v| v as f32), Vec2::broadcast(size as f32));
+impl Default for Poly2D {
+    fn default() -> Self {
         Self {
-            origin,
-            size,
-            bbox,
-            ..Default::default()
+            id: GeoId::Unknown(0),
+            tile_id: Uuid::nil(),
+            vertices: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+            transform: Mat3::identity(),
+            layer: 0,
+            visible: true,
+            material_id: None,
         }
     }
+}
 
-    pub fn add(&mut self, poly: Poly2D) {
-        self.polys_map.insert(poly.id, poly);
-    }
-
-    pub fn add_3d(&mut self, poly: Poly3D) {
-        self.polys3d_map.insert(poly.id, poly);
-    }
-
-    /// Add a 2D polygon with explicit vertices/uvs/indices. Indices are local to this chunk.
-    pub fn add_poly_2d(
-        &mut self,
+impl Poly2D {
+    pub fn poly(
         id: GeoId,
         tile_id: Uuid,
         vertices: Vec<[f32; 2]>,
         uvs: Vec<[f32; 2]>,
         indices: Vec<(usize, usize, usize)>,
-        layer: i32,
-        visible: bool,
-        material_id: Option<Uuid>,
-    ) {
-        let poly = Poly2D {
+    ) -> Self {
+        Self {
             id,
             tile_id,
             vertices,
             uvs,
             indices,
             transform: Mat3::identity(),
-            layer,
-            visible,
-            material_id,
-        };
-        self.polys_map.insert(id, poly);
+            layer: 0,
+            visible: true,
+            material_id: None,
+        }
     }
 
-    /// Add a 2D line strip tessellated into thick quads (no caps/joins) as one poly.
+    /// Construct a 2D line strip tessellated into thick quads (no caps/joins) as one poly.
     /// `points` are in world coords; `width` is in world units.
-    pub fn add_line_strip_2d(
-        &mut self,
+    /// Returns `None` if there are fewer than 2 valid points or all segments are degenerate.
+    pub fn line(
         id: GeoId,
         tile_id: Uuid,
         points: Vec<[f32; 2]>,
         width: f32,
         layer: i32,
         material_id: Option<Uuid>,
-    ) {
-        if points.len() < 2 {
-            return;
-        }
+    ) -> Self {
         let half = 0.5 * width;
         let mut vertices: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
         let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
@@ -112,11 +96,7 @@ impl Chunk {
             indices.push((base + 0, base + 2, base + 3));
         }
 
-        if vertices.is_empty() {
-            return;
-        }
-
-        let poly = Poly2D {
+        Self {
             id,
             tile_id,
             vertices,
@@ -126,14 +106,12 @@ impl Chunk {
             layer,
             visible: true,
             material_id,
-        };
-        self.polys_map.insert(id, poly);
+        }
     }
 
-    /// Add a square (axis-aligned) centered at `center` with edge length `size`.
-    /// Inserts a new Poly2D using `tile_id` and `id`. UVs cover the full tile.
-    pub fn add_square_2d(
-        &mut self,
+    /// Construct a square (axis-aligned) centered at `center` with edge length `size`.
+    /// UVs cover the full tile. Returns `None` if `size` <= 0.
+    pub fn quad(
         id: GeoId,
         tile_id: Uuid,
         center: [f32; 2],
@@ -141,10 +119,7 @@ impl Chunk {
         layer: i32,
         visible: bool,
         material_id: Option<Uuid>,
-    ) {
-        if size <= 0.0 {
-            return;
-        }
+    ) -> Self {
         let half = 0.5 * size;
         let (cx, cy) = (center[0], center[1]);
         let x0 = cx - half; // left
@@ -161,7 +136,7 @@ impl Chunk {
         let uvs = vec![[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
         let indices = vec![(0, 1, 2), (0, 2, 3)];
 
-        let poly = Poly2D {
+        Self {
             id,
             tile_id,
             vertices,
@@ -171,34 +146,43 @@ impl Chunk {
             layer,
             visible,
             material_id,
-        };
-        self.polys_map.insert(id, poly);
+        }
     }
 
-    /// Add a 3D polygon
-    pub fn add_poly_3d(
-        &mut self,
-        id: GeoId,
-        tile_id: uuid::Uuid,
-        vertices: Vec<[f32; 4]>,
-        uvs: Vec<[f32; 2]>,
-        indices: Vec<(usize, usize, usize)>,
-        layer: i32,
-        visible: bool,
-        material_id: Option<Uuid>,
-    ) {
-        self.polys3d_map.insert(
-            id,
-            Poly3D {
-                id,
-                tile_id,
-                vertices,
-                uvs,
-                indices,
-                layer,
-                visible,
-                material_id,
-            },
-        );
+    pub fn with_id(mut self, id: GeoId) -> Self {
+        self.id = id;
+        self
+    }
+    pub fn with_tile_id(mut self, tile_id: Uuid) -> Self {
+        self.tile_id = tile_id;
+        self
+    }
+    pub fn with_vertices(mut self, vertices: Vec<[f32; 2]>) -> Self {
+        self.vertices = vertices;
+        self
+    }
+    pub fn with_uvs(mut self, uvs: Vec<[f32; 2]>) -> Self {
+        self.uvs = uvs;
+        self
+    }
+    pub fn with_indices(mut self, indices: Vec<(usize, usize, usize)>) -> Self {
+        self.indices = indices;
+        self
+    }
+    pub fn with_transform(mut self, transform: Mat3<f32>) -> Self {
+        self.transform = transform;
+        self
+    }
+    pub fn with_layer(mut self, layer: i32) -> Self {
+        self.layer = layer;
+        self
+    }
+    pub fn with_visible(mut self, visible: bool) -> Self {
+        self.visible = visible;
+        self
+    }
+    pub fn with_material_id(mut self, material_id: Option<Uuid>) -> Self {
+        self.material_id = material_id;
+        self
     }
 }

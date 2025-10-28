@@ -1,19 +1,32 @@
 pub mod bbox2d;
+pub mod camera3d;
 pub mod chunk;
 pub mod intodata;
 pub mod light;
 pub mod material;
+pub mod poly2d;
+pub mod poly3d;
 pub mod texture;
 pub mod vm;
 
+use rust_embed::RustEmbed;
+#[derive(RustEmbed)]
+#[folder = "embedded/"]
+#[exclude = "*.txt"]
+#[exclude = "*.DS_Store"]
+pub struct Embedded;
+
 pub use crate::{
     bbox2d::BBox2D,
+    camera3d::{Camera3D, CameraKind},
     chunk::Chunk,
     intodata::IntoDataInput,
     light::{Light, LightType},
     material::{Material, ShadingModel},
+    poly2d::Poly2D,
+    poly3d::Poly3D,
     texture::Texture,
-    vm::{Atom, GeoId, Poly2D, Poly3D, RenderMode, VM},
+    vm::{Atom, GeoId, RenderMode, VM},
 };
 
 use image;

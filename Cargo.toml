@@ -29,6 +29,9 @@ image = { version = "0.25.8", default-features = false, features = [
     "bmp",
     "tga",
 ] }
+rust-embed = { version = "8.5", default-features = true, features = [
+    "include-exclude",
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
