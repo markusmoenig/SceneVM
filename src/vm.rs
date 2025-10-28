@@ -2400,24 +2400,47 @@ impl VM {
         }
 
         // ---- Map each triangle id (absolute in indices_flat/3 order) → material index ----
+        // IMPORTANT: tri_mat2d is indexed by *absolute* triangle id coming from tile_tris.
         let tri_count_abs: usize = (indices_flat.len() / 3) as usize;
         let mut tri_mat2d_vec: Vec<u32> = Vec::with_capacity(tri_count_abs);
+
         for t in 0..tri_count_abs {
             let m_id = tri_meta[t].mat.unwrap_or(Uuid::nil());
             let idx = *mat_index.get(&m_id).unwrap_or(&0);
             tri_mat2d_vec.push(idx);
         }
 
-        // ---- Make GPU buffers (after you made verts/indices/tile_* buffers and lights) ----
+        // Keep buffer non-empty for wgpu validation (even if there are 0 triangles)
+        if tri_mat2d_vec.is_empty() {
+            tri_mat2d_vec.push(0);
+        }
+
+        // --- Create non-empty GPU buffers ---
+        let tri_mat2d_slice: &[u32] = if tri_mat2d_vec.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &tri_mat2d_vec
+        };
+        let materials_slice: &[MaterialPod] = if materials_flat.is_empty() {
+            // keep at least one material
+            &[MaterialPod {
+                tint: [1.0, 1.0, 1.0, 1.0],
+                rmoe: [0.5, 0.0, 1.0, 0.0],
+                model: [0.0, 0.0, 0.0, 0.0],
+            }]
+        } else {
+            &materials_flat
+        };
+
         let tri_mat2d_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vm-tri-mat2d"),
-            contents: bytemuck::cast_slice(&tri_mat2d_vec),
+            contents: bytemuck::cast_slice(tri_mat2d_slice),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let materials_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vm-materials-ssbo"),
-            contents: bytemuck::cast_slice(&materials_flat),
+            contents: bytemuck::cast_slice(materials_slice),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
