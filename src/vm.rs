@@ -37,6 +37,8 @@ pub enum GeoId {
     Sector(u32),
     Character(u32),
     Item(u32),
+    Light(u32),
+    ItemLight(u32),
     Triangle(u32),
 }
 
@@ -78,10 +80,11 @@ pub struct LightPod {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialPod {
-    pub tint: [f32; 4], // aligned 16
-    pub rmoe: [f32; 4], // roughness, metallic, opacity, emission
+    pub tint: [f32; 4],
+    pub rmoe: [f32; 4],
+    pub model: [f32; 4],
 }
 
 /// VM instruction set
@@ -108,6 +111,7 @@ pub enum Atom {
         vertices: Vec<[f32; 2]>,
         uvs: Vec<[f32; 2]>,
         indices: Vec<(usize, usize, usize)>,
+        material_id: Option<Uuid>,
     },
     /// Add a 3D polygon (world coords) that references a tile by UUID; indices are local to the chunk.
     AddPoly3D {
@@ -116,6 +120,7 @@ pub enum Atom {
         vertices: Vec<[f32; 4]>,
         uvs: Vec<[f32; 2]>,
         indices: Vec<(usize, usize, usize)>,
+        material_id: Option<Uuid>,
     },
     /// Add a simple 2D line strip as thick segments tessellated into quads (no caps/joins)
     /// Points are in world coordinates; width is in the same units.
@@ -124,6 +129,7 @@ pub enum Atom {
         tile_id: Uuid,
         points: Vec<[f32; 2]>,
         width: f32,
+        material_id: Option<Uuid>,
     },
     /// Create an empty chunk (no switch)
     NewChunk {
@@ -186,12 +192,12 @@ pub enum Atom {
     ClearGeometry,
     /// Add a light to the scene
     AddLight {
-        id: Uuid,
+        id: GeoId,
         light: Light,
     },
     /// Remove a light by its id
     RemoveLight {
-        id: Uuid,
+        id: GeoId,
     },
     /// Remove all lights from the scene
     ClearLights,
@@ -212,8 +218,7 @@ pub enum Atom {
         material_id: Option<Uuid>,
     },
     /// Build/replace the global scene uniform grid over all current 3D geometry
-    BuildSceneGrid {
-        cell_world: f32,
+    SetSceneGridCells {
         target_cells: u32,
     },
     /// Reset the scene acceleration structure (will be rebuilt on next BuildSceneGrid)
@@ -486,8 +491,9 @@ struct Lights { data: array<LightWGSL>, };
 @group(0) @binding(10) var<storage, read> tri_mat2d: U32s;
 
 struct MaterialWGSL {
-  tint: vec4<f32>,
-  rmoe: vec4<f32>, // roughness, metallic, opacity, emission
+  tint:  vec4<f32>,
+  rmoe:  vec4<f32>,
+  model: vec4<f32>,
 };
 struct Materials { data: array<MaterialWGSL>, };
 @group(0) @binding(11) var<storage, read> materials: Materials;
@@ -529,6 +535,23 @@ fn sv_tri_bary(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> BaryHi
   return BaryHit(true, vec3<f32>(w0, w1, w2));
 }
 
+fn sv_edge_signed(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+  // Same as sv_edge but signed consistently with winding
+  return (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
+}
+
+fn sv_edge_len(a: vec2<f32>, b: vec2<f32>) -> f32 {
+  return max(length(b - a), 1e-6);
+}
+
+// Distance to the closest triangle edge in *pixels*
+fn sv_min_edge_distance_px(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+  let e0 = abs(sv_edge_signed(p, a, b)) / sv_edge_len(a, b);
+  let e1 = abs(sv_edge_signed(p, b, c)) / sv_edge_len(b, c);
+  let e2 = abs(sv_edge_signed(p, c, a)) / sv_edge_len(c, a);
+  return min(e0, min(e1, e2));
+}
+
 fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   let a = verts.data[i0].pos;
   let b = verts.data[i1].pos;
@@ -538,8 +561,18 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
 
   let w = bh.w;
   let uv = verts.data[i0].uv * w.x + verts.data[i1].uv * w.y + verts.data[i2].uv * w.z;
-  let col = sv_sample(uv);
+  var col = sv_sample(uv);
   if (col.a < 0.01) { return ColorHit(false, vec4<f32>(0.0), 0u); }
+
+  // --- Analytic edge AA ---
+  let feather = 1.0;
+  if (feather > 0.0) {
+    let d = sv_min_edge_distance_px(p, a, b, c);  // pixels
+    // Smooth coverage from 0..feather → 0..1 (softstep). Widen slightly for numeric stability.
+    let cov = smoothstep(0.0, feather, d);
+    // Multiply alpha by coverage (premultiplied not assumed here)
+    col.a = col.a * cov;
+  }
 
   // tri id is not known here; sv_shade_tile_pixel wraps this and sets it
   return ColorHit(true, col, 0u);
@@ -647,8 +680,9 @@ struct I32s { data: array<i32> };
 
 // Materials array
 struct MaterialWGSL {
-  tint: vec4<f32>,
-  rmoe: vec4<f32>, // roughness, metallic, opacity, emission
+  tint:  vec4<f32>,
+  rmoe:  vec4<f32>,
+  model: vec4<f32>,
 };
 struct Materials { data: array<MaterialWGSL>, };
 @group(0) @binding(14) var<storage, read> materials: Materials;
@@ -1156,12 +1190,13 @@ pub struct VM {
     pub transform2d: Mat3<f32>,
     pub transform3d: Mat4<f32>,
 
-    pub lights: FxHashMap<Uuid, Light>,
+    pub lights: FxHashMap<GeoId, Light>,
     pub materials: FxHashMap<Uuid, Material>,
 
     pub current_layer: i32,
 
     // Scene-wide 3D acceleration via grid
+    pub scene_grid_cells: u32,
     pub scene_accel: SceneAccel,
     pub accel_dirty: bool,
 }
@@ -1199,6 +1234,7 @@ impl VM {
             current_layer: 0,
             scene_accel: SceneAccel::default(),
             accel_dirty: true,
+            scene_grid_cells: 5000,
         }
     }
 
@@ -1274,6 +1310,7 @@ impl VM {
                 vertices,
                 uvs,
                 indices,
+                material_id,
             } => {
                 let chunk_id = match self.current_chunk {
                     Some(cid) => cid,
@@ -1292,6 +1329,7 @@ impl VM {
                     indices,
                     self.current_layer,
                     true,
+                    material_id,
                 );
             }
             Atom::AddPoly3D {
@@ -1300,6 +1338,7 @@ impl VM {
                 vertices,
                 uvs,
                 indices,
+                material_id,
             } => {
                 let chunk_id = match self.current_chunk {
                     Some(cid) => cid,
@@ -1318,6 +1357,7 @@ impl VM {
                     indices,
                     self.current_layer,
                     true,
+                    material_id,
                 );
                 self.accel_dirty = true;
             }
@@ -1326,6 +1366,7 @@ impl VM {
                 tile_id,
                 points,
                 width,
+                material_id,
             } => {
                 if points.len() < 2 {
                     return;
@@ -1342,7 +1383,7 @@ impl VM {
                 self.chunks_map
                     .entry(chunk_id)
                     .or_default()
-                    .add_line_strip_2d(id, tile_id, points, width, self.current_layer);
+                    .add_line_strip_2d(id, tile_id, points, width, self.current_layer, material_id);
                 self.accel_dirty = true;
             }
             Atom::NewChunk { id } => {
@@ -1495,10 +1536,8 @@ impl VM {
                     }
                 }
             }
-            Atom::BuildSceneGrid {
-                cell_world,
-                target_cells,
-            } => {
+            Atom::SetSceneGridCells { target_cells } => {
+                self.scene_grid_cells = target_cells;
                 self.accel_dirty = true;
             }
             Atom::ClearSceneGrid => {
@@ -2347,6 +2386,7 @@ impl VM {
         materials_flat.push(MaterialPod {
             tint: [1.0, 1.0, 1.0, 1.0],
             rmoe: [0.5, 0.0, 1.0, 0.0], // roughness=0.5, metallic=0.0, opacity=1.0, emission=0.0
+            model: [0.0, 0.0, 0.0, 0.0],
         });
         // assign indices to all currently registered materials
         for (mid, m) in &self.materials {
@@ -2355,13 +2395,15 @@ impl VM {
             materials_flat.push(MaterialPod {
                 tint: m.tint.into_array(),
                 rmoe: [m.roughness, m.metallic, m.opacity, m.emission],
+                model: [m.encode_model(), 0.0, 0.0, 0.0],
             });
         }
 
-        // ---- Map each triangle (in tile_tris order) → material index ----
-        let mut tri_mat2d_vec: Vec<u32> = Vec::with_capacity(tile_tris.len());
-        for &tri in &tile_tris {
-            let m_id = tri_meta[tri as usize].mat.unwrap_or(Uuid::nil());
+        // ---- Map each triangle id (absolute in indices_flat/3 order) → material index ----
+        let tri_count_abs: usize = (indices_flat.len() / 3) as usize;
+        let mut tri_mat2d_vec: Vec<u32> = Vec::with_capacity(tri_count_abs);
+        for t in 0..tri_count_abs {
+            let m_id = tri_meta[t].mat.unwrap_or(Uuid::nil());
             let idx = *mat_index.get(&m_id).unwrap_or(&0);
             tri_mat2d_vec.push(idx);
         }
@@ -2448,15 +2490,17 @@ impl VM {
                 params1: [0.0, 0.0, 0.0, 0.0],
             });
         } else {
-            for (id, l) in &self.lights {
-                let id_bytes = id.as_bytes();
-                let id_seed =
-                    u32::from_le_bytes([id_bytes[0], id_bytes[1], id_bytes[2], id_bytes[3]]);
-                let frame = self.animation_counter as u32;
-                let h = hash_u32(id_seed ^ frame);
-                let rnd01 = (h as f32) / 4294967295.0;
-
-                let flicker = l.flicker * rnd01; // bake result into pod
+            for (_id, l) in &self.lights {
+                let flicker: f32 = if l.flicker > 0.0 {
+                    let hash = hash_u32(self.animation_counter as u32);
+                    let combined_hash = hash.wrapping_add(
+                        (l.position.x as u32 + l.position.y as u32 + l.position.z as u32) * 100,
+                    );
+                    let flicker_value = (combined_hash as f32 / u32::MAX as f32).clamp(0.0, 1.0);
+                    1.0 - flicker_value * l.flicker
+                } else {
+                    1.0
+                };
 
                 lights_flat.push(LightPod {
                     header: [
@@ -2572,86 +2616,6 @@ impl VM {
         self.init_compute(device);
         surface.ensure_gpu_with(device);
 
-        // --- Upload scene-wide grid to GPU (always present) ---
-        use wgpu::util::DeviceExt;
-        let gr = &self.scene_accel.grid;
-
-        // Make sure header dims are never 0 to avoid div-by-zero in WGSL.
-        let hdr = Grid3DHeader {
-            origin: [gr.origin.x, gr.origin.y, gr.origin.z, 0.0],
-            cell_size: [gr.cell_size.x, gr.cell_size.y, gr.cell_size.z, 0.0],
-            dims: [gr.dims[0].max(1), gr.dims[1].max(1), gr.dims[2].max(1), 0],
-        };
-
-        // wgpu forbids binding zero-sized STORAGE buffers. Use non-empty dummy slices if empty.
-        let cell_offsets_slice: &[u32] = if gr.cell_offsets.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &gr.cell_offsets
-        };
-        let cell_counts_slice: &[u32] = if gr.cell_counts.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &gr.cell_counts
-        };
-        let cell_tris_slice: &[u32] = if gr.cell_tris.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &gr.cell_tris
-        };
-        let tri_tile_slice: &[u32] = if gr.tri_tile.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &gr.tri_tile
-        };
-        let tri_layer_slice: &[i32] = if gr.tri_layer.is_empty() {
-            &DUMMY_I32_1
-        } else {
-            &gr.tri_layer
-        };
-
-        let grid_hdr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-grid3d-hdr"),
-            contents: bytemuck::bytes_of(&hdr),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let grid_offsets = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-grid3d-offsets"),
-            contents: bytemuck::cast_slice(cell_offsets_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let grid_counts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-grid3d-counts"),
-            contents: bytemuck::cast_slice(cell_counts_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let grid_tris = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-grid3d-tris"),
-            contents: bytemuck::cast_slice(cell_tris_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let tri_tile = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-tri-tile"),
-            contents: bytemuck::cast_slice(tri_tile_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let tri_layer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-tri-layer"),
-            contents: bytemuck::cast_slice(tri_layer_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        {
-            // short mutable borrow of self.gpu
-            let g = self.gpu.as_mut().unwrap();
-            g.grid_hdr = Some(grid_hdr);
-            g.grid_offsets = Some(grid_offsets);
-            g.grid_counts = Some(grid_counts);
-            g.grid_tris = Some(grid_tris);
-            g.tri_tile = Some(tri_tile);
-            g.tri_layer = Some(tri_layer);
-        }
-
         // --- Uniforms ---
         let m = self.transform3d;
         let u = Compute3DUniforms {
@@ -2691,14 +2655,17 @@ impl VM {
                 params1: [0.0, 0.0, 0.0, 0.0],
             });
         } else {
-            for (id, l) in &self.lights {
-                let id_bytes = id.as_bytes();
-                let id_seed =
-                    u32::from_le_bytes([id_bytes[0], id_bytes[1], id_bytes[2], id_bytes[3]]);
-                let frame = self.animation_counter as u32;
-                let h = hash_u32(id_seed ^ frame);
-                let rnd01 = (h as f32) / 4294967295.0;
-                let flicker = l.flicker * rnd01;
+            for (_id, l) in &self.lights {
+                let flicker: f32 = if l.flicker > 0.0 {
+                    let hash = hash_u32(self.animation_counter as u32);
+                    let combined_hash = hash.wrapping_add(
+                        (l.position.x as u32 + l.position.y as u32 + l.position.z as u32) * 100,
+                    );
+                    let flicker_value = (combined_hash as f32 / u32::MAX as f32).clamp(0.0, 1.0);
+                    1.0 - flicker_value * l.flicker
+                } else {
+                    1.0
+                };
 
                 lights_flat.push(LightPod {
                     header: [
@@ -2743,6 +2710,7 @@ impl VM {
         materials_vec.push(MaterialPod {
             tint: Vec4::one().into_array(),
             rmoe: [0.5, 0.0, 1.0, 0.0],
+            model: [0.0, 0.0, 0.0, 0.0],
         });
 
         let mut ensure_mat_index = |id_opt: Option<Uuid>| -> u32 {
@@ -2756,6 +2724,7 @@ impl VM {
                         materials_vec.push(MaterialPod {
                             tint: m.tint.into_array(),
                             rmoe: [m.roughness, m.metallic, m.opacity, m.emission],
+                            model: [m.encode_model(), 0.0, 0.0, 0.0],
                         });
                         idx
                     } else {
@@ -2857,8 +2826,88 @@ impl VM {
 
         if self.accel_dirty {
             // Build a grid from the actual uploaded geometry so slices won't be empty.
-            self.build_scene_grid_from(&v3, &i3, 0.0, 100); //200_000);
+            self.build_scene_grid_from(&v3, &i3, 0.0, self.scene_grid_cells); //200_000);
             self.accel_dirty = false;
+        }
+
+        // --- Upload scene-wide grid to GPU (always present) ---
+        use wgpu::util::DeviceExt;
+        let gr = &self.scene_accel.grid;
+
+        // Make sure header dims are never 0 to avoid div-by-zero in WGSL.
+        let hdr = Grid3DHeader {
+            origin: [gr.origin.x, gr.origin.y, gr.origin.z, 0.0],
+            cell_size: [gr.cell_size.x, gr.cell_size.y, gr.cell_size.z, 0.0],
+            dims: [gr.dims[0].max(1), gr.dims[1].max(1), gr.dims[2].max(1), 0],
+        };
+
+        // wgpu forbids binding zero-sized STORAGE buffers. Use non-empty dummy slices if empty.
+        let cell_offsets_slice: &[u32] = if gr.cell_offsets.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &gr.cell_offsets
+        };
+        let cell_counts_slice: &[u32] = if gr.cell_counts.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &gr.cell_counts
+        };
+        let cell_tris_slice: &[u32] = if gr.cell_tris.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &gr.cell_tris
+        };
+        let tri_tile_slice: &[u32] = if gr.tri_tile.is_empty() {
+            &DUMMY_U32_1
+        } else {
+            &gr.tri_tile
+        };
+        let tri_layer_slice: &[i32] = if gr.tri_layer.is_empty() {
+            &DUMMY_I32_1
+        } else {
+            &gr.tri_layer
+        };
+
+        let grid_hdr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-grid3d-hdr"),
+            contents: bytemuck::bytes_of(&hdr),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let grid_offsets = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-grid3d-offsets"),
+            contents: bytemuck::cast_slice(cell_offsets_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let grid_counts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-grid3d-counts"),
+            contents: bytemuck::cast_slice(cell_counts_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let grid_tris = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-grid3d-tris"),
+            contents: bytemuck::cast_slice(cell_tris_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let tri_tile = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-tri-tile"),
+            contents: bytemuck::cast_slice(tri_tile_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let tri_layer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vm-tri-layer"),
+            contents: bytemuck::cast_slice(tri_layer_slice),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        {
+            // short mutable borrow of self.gpu
+            let g = self.gpu.as_mut().unwrap();
+            g.grid_hdr = Some(grid_hdr);
+            g.grid_offsets = Some(grid_offsets);
+            g.grid_counts = Some(grid_counts);
+            g.grid_tris = Some(grid_tris);
+            g.tri_tile = Some(tri_tile);
+            g.tri_layer = Some(tri_layer);
         }
 
         let v3_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2886,6 +2935,7 @@ impl VM {
                 &[MaterialPod {
                     tint: [1.0, 1.0, 1.0, 1.0],
                     rmoe: [0.5, 0.0, 1.0, 0.0],
+                    model: [0.0, 0.0, 0.0, 0.0],
                 }][..]
             } else {
                 &materials_vec[..]

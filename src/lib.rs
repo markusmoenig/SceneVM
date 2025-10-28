@@ -11,7 +11,7 @@ pub use crate::{
     chunk::Chunk,
     intodata::IntoDataInput,
     light::{Light, LightType},
-    material::Material,
+    material::{Material, ShadingModel},
     texture::Texture,
     vm::{Atom, GeoId, Poly2D, Poly3D, RenderMode, VM},
 };

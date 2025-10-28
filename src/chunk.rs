@@ -41,6 +41,7 @@ impl Chunk {
         indices: Vec<(usize, usize, usize)>,
         layer: i32,
         visible: bool,
+        material_id: Option<Uuid>,
     ) {
         let poly = Poly2D {
             id,
@@ -51,7 +52,7 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible,
-            material_id: None,
+            material_id,
         };
         self.polys_map.insert(id, poly);
     }
@@ -65,6 +66,7 @@ impl Chunk {
         points: Vec<[f32; 2]>,
         width: f32,
         layer: i32,
+        material_id: Option<Uuid>,
     ) {
         if points.len() < 2 {
             return;
@@ -115,7 +117,7 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible: true,
-            material_id: None,
+            material_id,
         };
         self.polys_map.insert(id, poly);
     }
@@ -130,6 +132,7 @@ impl Chunk {
         size: f32,
         layer: i32,
         visible: bool,
+        material_id: Option<Uuid>,
     ) {
         if size <= 0.0 {
             return;
@@ -159,7 +162,7 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible,
-            material_id: None,
+            material_id,
         };
         self.polys_map.insert(id, poly);
     }
@@ -174,6 +177,7 @@ impl Chunk {
         indices: Vec<(usize, usize, usize)>,
         layer: i32,
         visible: bool,
+        material_id: Option<Uuid>,
     ) {
         self.polys3d_map.insert(
             id,
@@ -185,7 +189,7 @@ impl Chunk {
                 indices,
                 layer,
                 visible,
-                material_id: None,
+                material_id,
             },
         );
     }

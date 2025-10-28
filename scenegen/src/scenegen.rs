@@ -21,7 +21,7 @@ impl TheTrait for Circle {
     }
 
     // #[cfg(not(target_arch = "wasm32"))]
-    fn init(&mut self, ctx: &mut TheContext) {
+    fn init(&mut self, _ctx: &mut TheContext) {
         let tile_id = Uuid::new_v4();
 
         if let Some((data, width, height)) = self
@@ -55,6 +55,7 @@ impl TheTrait for Circle {
             ],
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![(0, 1, 2), (0, 2, 3)],
+            material_id: None,
         });
 
         // Add a line strip
@@ -63,6 +64,7 @@ impl TheTrait for Circle {
             tile_id: tile_id,
             points: vec![[400.0, 100.0], [500.0, 120.0], [560.0, 200.0]],
             width: 1.5,
+            material_id: None,
         });
 
         self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
@@ -160,10 +162,11 @@ impl TheTrait for Circle {
             vertices: verts,
             uvs,
             indices: idx,
+            material_id: None,
         });
 
         self.vm.execute(Atom::AddLight {
-            id: Uuid::new_v4(),
+            id: GeoId::Light(0),
             light: Light::new_pointlight(Vec3::new(0.0, 1.0, -4.0)),
         });
 
