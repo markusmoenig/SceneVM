@@ -2859,7 +2859,9 @@ dependencies = [
  "rustc-hash 2.1.1",
  "uuid",
  "vek",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "wgpu 27.0.1",
 ]
 

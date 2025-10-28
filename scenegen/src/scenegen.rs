@@ -24,25 +24,25 @@ impl TheTrait for Circle {
     fn init(&mut self, _ctx: &mut TheContext) {
         let tile_id = Uuid::new_v4();
 
-        if let Some((data, width, height)) = self
-            .vm
-            .load_image_rgba(std::path::Path::new("images/logo.png"))
-        {
-            self.vm.execute(Atom::AddTile {
-                id: tile_id,
-                width: width,
-                height: height,
-                frames: vec![data],
-            });
-            self.vm.execute(Atom::BuildAtlas);
-        }
+        // if let Some((data, width, height)) = self
+        //     .vm
+        //     .load_image_rgba(std::path::Path::new("images/logo.png"))
+        // {
+        //     self.vm.execute(Atom::AddTile {
+        //         id: tile_id,
+        //         width: width,
+        //         height: height,
+        //         frames: vec![data],
+        //     });
+        //     self.vm.execute(Atom::BuildAtlas);
+        // }
 
         self.vm.execute(Atom::SetBackground(Vec4::zero()));
-        // self.vm.execute(Atom::AddSolid {
-        //     id: tile_id,
-        //     color: [255, 0, 0, 255],
-        // });
-        // self.vm.execute(Atom::BuildAtlas);
+        self.vm.execute(Atom::AddSolid {
+            id: tile_id,
+            color: [255, 0, 0, 255],
+        });
+        self.vm.execute(Atom::BuildAtlas);
 
         self.vm.execute(Atom::AddPoly {
             id: GeoId::Unknown(0),
