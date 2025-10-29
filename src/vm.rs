@@ -2438,96 +2438,206 @@ impl VM {
             size.z / nz.max(1) as f32,
         );
 
-        // Storage for CSR
-        let cell_count = (nx as usize) * (ny as usize) * (nz as usize);
-        let mut cell_vecs: Vec<Vec<u32>> = vec![Vec::new(); cell_count];
-
         // Precompute an epsilon in **world** based on cell size (robustness)
         let cell_eps = cell_size.x.max(cell_size.y).max(cell_size.z) * 0.8;
 
         // --- 4) Bin triangles into cells with **padded tri AABB** ---
-        let tri_count = indices.len() / 3;
-        for tri in 0..tri_count {
-            let i0 = indices[3 * tri + 0] as usize;
-            let i1 = indices[3 * tri + 1] as usize;
-            let i2 = indices[3 * tri + 2] as usize;
 
-            let p0 = Vec3::new(verts[i0].pos[0], verts[i0].pos[1], verts[i0].pos[2]);
-            let p1 = Vec3::new(verts[i1].pos[0], verts[i1].pos[1], verts[i1].pos[2]);
-            let p2 = Vec3::new(verts[i2].pos[0], verts[i2].pos[1], verts[i2].pos[2]);
+        let tri_count: usize = indices.len() / 3;
 
-            // Triangle AABB (then pad!)
-            let mut tmin = vmin(vmin(p0, p1), p2);
-            let mut tmax = vmax(vmax(p0, p1), p2);
-            tmin -= Vec3::broadcast(cell_eps);
-            tmax += Vec3::broadcast(cell_eps);
+        // Parallel version using Rayon (feature-gated); fallback to previous sequential if feature is off.
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
 
-            // Map to cell coords
-            let rel_min = (tmin - bmin) / cell_size;
-            let rel_max = (tmax - bmin) / cell_size;
+            // 4a) generate (cell_idx, tri) pairs in parallel
+            let mut pairs: Vec<(u32, u32)> = (0..tri_count)
+                .into_par_iter()
+                .map(|tri| {
+                    let i0 = indices[3 * tri + 0] as usize;
+                    let i1 = indices[3 * tri + 1] as usize;
+                    let i2 = indices[3 * tri + 2] as usize;
 
-            let mut ix0 = rel_min.x.floor() as i32;
-            let mut iy0 = rel_min.y.floor() as i32;
-            let mut iz0 = rel_min.z.floor() as i32;
-            let mut ix1 = rel_max.x.ceil() as i32;
-            let mut iy1 = rel_max.y.ceil() as i32;
-            let mut iz1 = rel_max.z.ceil() as i32;
+                    let p0 = Vec3::new(verts[i0].pos[0], verts[i0].pos[1], verts[i0].pos[2]);
+                    let p1 = Vec3::new(verts[i1].pos[0], verts[i1].pos[1], verts[i1].pos[2]);
+                    let p2 = Vec3::new(verts[i2].pos[0], verts[i2].pos[1], verts[i2].pos[2]);
 
-            // Clamp to grid
-            ix0 = ix0.clamp(0, nx as i32 - 1);
-            iy0 = iy0.clamp(0, ny as i32 - 1);
-            iz0 = iz0.clamp(0, nz as i32 - 1);
-            ix1 = ix1.clamp(0, nx as i32 - 1);
-            iy1 = iy1.clamp(0, ny as i32 - 1);
-            iz1 = iz1.clamp(0, nz as i32 - 1);
+                    let mut tmin = vmin(vmin(p0, p1), p2);
+                    let mut tmax = vmax(vmax(p0, p1), p2);
+                    tmin -= Vec3::broadcast(cell_eps);
+                    tmax += Vec3::broadcast(cell_eps);
 
-            if ix0 > ix1 || iy0 > iy1 || iz0 > iz1 {
-                continue;
+                    let rel_min = (tmin - bmin) / cell_size;
+                    let rel_max = (tmax - bmin) / cell_size;
+
+                    let mut ix0 = rel_min.x.floor() as i32;
+                    let mut iy0 = rel_min.y.floor() as i32;
+                    let mut iz0 = rel_min.z.floor() as i32;
+                    let mut ix1 = rel_max.x.ceil() as i32;
+                    let mut iy1 = rel_max.y.ceil() as i32;
+                    let mut iz1 = rel_max.z.ceil() as i32;
+
+                    ix0 = ix0.clamp(0, nx as i32 - 1);
+                    iy0 = iy0.clamp(0, ny as i32 - 1);
+                    iz0 = iz0.clamp(0, nz as i32 - 1);
+                    ix1 = ix1.clamp(0, nx as i32 - 1);
+                    iy1 = iy1.clamp(0, ny as i32 - 1);
+                    iz1 = iz1.clamp(0, nz as i32 - 1);
+
+                    let mut local: Vec<(u32, u32)> = Vec::new();
+                    if ix0 <= ix1 && iy0 <= iy1 && iz0 <= iz1 {
+                        for z in iz0..=iz1 {
+                            for y in iy0..=iy1 {
+                                for x in ix0..=ix1 {
+                                    let idx = (z as u32 * ny + y as u32) * nx + x as u32;
+                                    local.push((idx, tri as u32));
+                                }
+                            }
+                        }
+                    }
+                    local
+                })
+                .reduce(
+                    || Vec::new(),
+                    |mut a, mut b| {
+                        a.append(&mut b);
+                        a
+                    },
+                );
+
+            // 4b) sort pairs by cell index (deterministic)
+            use rayon::slice::ParallelSliceMut;
+            pairs.par_sort_unstable_by_key(|p| p.0);
+
+            // 4c) build CSR with per-cell dedup (deterministic order)
+            let cell_count_usize = (nx as usize) * (ny as usize) * (nz as usize);
+            let mut offsets = vec![0u32; cell_count_usize];
+            let mut counts = vec![0u32; cell_count_usize];
+            let mut tris: Vec<u32> = Vec::with_capacity(pairs.len());
+
+            let mut run = 0u32;
+            let mut i = 0usize;
+            while i < pairs.len() {
+                let cell = pairs[i].0 as usize;
+                let start = i;
+                let key = pairs[i].0;
+                // advance i to end of this cell's run
+                while i < pairs.len() && pairs[i].0 == key {
+                    i += 1;
+                }
+                // dedup tri ids within this cell
+                let mut cell_tris: Vec<u32> = pairs[start..i].iter().map(|&(_, t)| t).collect();
+                cell_tris.sort_unstable();
+                cell_tris.dedup();
+
+                offsets[cell] = run;
+                counts[cell] = cell_tris.len() as u32;
+                run += counts[cell];
+
+                tris.extend_from_slice(&cell_tris);
             }
 
-            // Fill all overlapped cells
-            for z in iz0..=iz1 {
-                for y in iy0..=iy1 {
-                    for x in ix0..=ix1 {
-                        let idx = ((z as u32 * ny + y as u32) * nx + x as u32) as usize;
-                        cell_vecs[idx].push(tri as u32);
+            // --- 6) Per-triangle metadata (optional; keep aligned length) ---
+            let tri_tile = vec![0u32; tri_count.max(1)];
+            let tri_layer = vec![0i32; tri_count.max(1)];
+
+            // --- 7) Store on the VM ---
+            self.scene_accel.grid = SceneGridAccel {
+                origin: bmin,
+                cell_size,
+                dims,
+                cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
+                cell_counts: if counts.is_empty() { vec![0] } else { counts },
+                cell_tris: if tris.is_empty() { vec![0] } else { tris },
+                tri_tile,
+                tri_layer,
+            };
+            return;
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            // Storage for CSR
+            let cell_count = (nx as usize) * (ny as usize) * (nz as usize);
+            let mut cell_vecs: Vec<Vec<u32>> = vec![Vec::new(); cell_count];
+            // your existing sequential version (unchanged)
+            for tri in 0..tri_count {
+                let i0 = indices[3 * tri + 0] as usize;
+                let i1 = indices[3 * tri + 1] as usize;
+                let i2 = indices[3 * tri + 2] as usize;
+
+                let p0 = Vec3::new(verts[i0].pos[0], verts[i0].pos[1], verts[i0].pos[2]);
+                let p1 = Vec3::new(verts[i1].pos[0], verts[i1].pos[1], verts[i1].pos[2]);
+                let p2 = Vec3::new(verts[i2].pos[0], verts[i2].pos[1], verts[i2].pos[2]);
+
+                let mut tmin = vmin(vmin(p0, p1), p2);
+                let mut tmax = vmax(vmax(p0, p1), p2);
+                tmin -= Vec3::broadcast(cell_eps);
+                tmax += Vec3::broadcast(cell_eps);
+
+                let rel_min = (tmin - bmin) / cell_size;
+                let rel_max = (tmax - bmin) / cell_size;
+
+                let mut ix0 = rel_min.x.floor() as i32;
+                let mut iy0 = rel_min.y.floor() as i32;
+                let mut iz0 = rel_min.z.floor() as i32;
+                let mut ix1 = rel_max.x.ceil() as i32;
+                let mut iy1 = rel_max.y.ceil() as i32;
+                let mut iz1 = rel_max.z.ceil() as i32;
+
+                ix0 = ix0.clamp(0, nx as i32 - 1);
+                iy0 = iy0.clamp(0, ny as i32 - 1);
+                iz0 = iz0.clamp(0, nz as i32 - 1);
+                ix1 = ix1.clamp(0, nx as i32 - 1);
+                iy1 = iy1.clamp(0, ny as i32 - 1);
+                iz1 = iz1.clamp(0, nz as i32 - 1);
+
+                if ix0 > ix1 || iy0 > iy1 || iz0 > iz1 {
+                    continue;
+                }
+
+                for z in iz0..=iz1 {
+                    for y in iy0..=iy1 {
+                        for x in ix0..=ix1 {
+                            let idx = ((z as u32 * ny + y as u32) * nx + x as u32) as usize;
+                            cell_vecs[idx].push(tri as u32);
+                        }
                     }
                 }
             }
+            // --- 5) CSR flatten (stable order) ---
+            let mut offsets = vec![0u32; cell_count];
+            let mut counts = vec![0u32; cell_count];
+            let mut tris: Vec<u32> = Vec::new();
+            tris.reserve(cell_vecs.iter().map(|v| v.len()).sum());
+
+            let mut run = 0u32;
+            for (i, v) in cell_vecs.iter_mut().enumerate() {
+                offsets[i] = run;
+                // sort for determinism (optional)
+                v.sort_unstable();
+                v.dedup(); // optional de-dup if your binning can push the same tri twice
+                run += v.len() as u32;
+                counts[i] = v.len() as u32;
+                tris.extend(v.iter().copied());
+            }
+
+            // --- 6) Per-triangle metadata (optional; keep aligned length) ---
+            let tri_tile = vec![0u32; tri_count.max(1)];
+            let tri_layer = vec![0i32; tri_count.max(1)];
+
+            // --- 7) Store on the VM ---
+            self.scene_accel.grid = SceneGridAccel {
+                origin: bmin,
+                cell_size,
+                dims,
+                cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
+                cell_counts: if counts.is_empty() { vec![0] } else { counts },
+                cell_tris: if tris.is_empty() { vec![0] } else { tris },
+                tri_tile,
+                tri_layer,
+            };
         }
-
-        // --- 5) CSR flatten (stable order) ---
-        let mut offsets = vec![0u32; cell_count];
-        let mut counts = vec![0u32; cell_count];
-        let mut tris: Vec<u32> = Vec::new();
-        tris.reserve(cell_vecs.iter().map(|v| v.len()).sum());
-
-        let mut run = 0u32;
-        for (i, v) in cell_vecs.iter_mut().enumerate() {
-            offsets[i] = run;
-            // sort for determinism (optional)
-            v.sort_unstable();
-            v.dedup(); // optional de-dup if your binning can push the same tri twice
-            run += v.len() as u32;
-            counts[i] = v.len() as u32;
-            tris.extend(v.iter().copied());
-        }
-
-        // --- 6) Per-triangle metadata (optional; keep aligned length) ---
-        let tri_tile = vec![0u32; tri_count.max(1)];
-        let tri_layer = vec![0i32; tri_count.max(1)];
-
-        // --- 7) Store on the VM ---
-        self.scene_accel.grid = SceneGridAccel {
-            origin: bmin,
-            cell_size,
-            dims,
-            cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
-            cell_counts: if counts.is_empty() { vec![0] } else { counts },
-            cell_tris: if tris.is_empty() { vec![0] } else { tris },
-            tri_tile,
-            tri_layer,
-        };
     }
 
     /// Unified draw entry: chooses 2D or 3D compute path based on `self.render_mode`.
