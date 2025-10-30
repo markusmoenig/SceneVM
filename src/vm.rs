@@ -121,6 +121,15 @@ pub enum Atom {
         width: f32,
         material_id: Option<Uuid>,
     },
+    /// Add a 2D line strip rendered in screen space with a constant pixel width.
+    /// Points are in world coordinates; width is in pixels.
+    AddLineStrip2Dpx {
+        id: GeoId,
+        tile_id: Uuid,
+        points: Vec<[f32; 2]>,
+        width_px: f32,
+        material_id: Option<Uuid>,
+    },
     /// Create an empty chunk (no switch)
     NewChunk {
         id: Uuid,
@@ -232,6 +241,18 @@ struct Tile {
     w: u32,
     h: u32,
     frames: Vec<Vec<u8>>,
+}
+
+/// Screen-space line strip description (width in pixels; rendered as quads built in screen space).
+#[derive(Debug, Clone)]
+pub struct LineStrip2D {
+    pub id: GeoId,
+    pub tile_id: uuid::Uuid,
+    pub points: Vec<[f32; 2]>, // world-space points (will be transformed, then rasterized in screen space)
+    pub width_px: f32,         // line width in pixels (constant regardless of world scale)
+    pub layer: i32,
+    pub visible: bool,
+    pub material_id: Option<uuid::Uuid>,
 }
 
 // GPU rendering resources managed directly by VM
@@ -653,6 +674,37 @@ impl VM {
                     .or_default()
                     .add_line_strip_2d(id, tile_id, points, width, self.current_layer, material_id);
                 self.accel_dirty = true;
+            }
+            Atom::AddLineStrip2Dpx {
+                id,
+                tile_id,
+                points,
+                width_px,
+                material_id,
+            } => {
+                if points.len() < 2 || width_px <= 0.0 {
+                    return;
+                }
+                let chunk_id = match self.current_chunk {
+                    Some(cid) => cid,
+                    None => {
+                        let cid = Uuid::new_v4();
+                        self.chunks_map.insert(cid, Chunk::default());
+                        self.current_chunk = Some(cid);
+                        cid
+                    }
+                };
+                self.chunks_map
+                    .entry(chunk_id)
+                    .or_default()
+                    .add_line_strip_2d_px(
+                        id,
+                        tile_id,
+                        points,
+                        width_px,
+                        self.current_layer,
+                        material_id,
+                    );
             }
             Atom::NewChunk { id } => {
                 self.chunks_map.entry(id).or_insert_with(Chunk::default);
@@ -1571,6 +1623,105 @@ impl VM {
                         mat: poly.material_id,
                     });
                     tri_ord = tri_ord.wrapping_add(1);
+                }
+            }
+        }
+
+        // --- Screen-space constant-width lines from chunks (built as quads per segment) ---
+        // Transform each point with the same 2D transform used for polys, then expand to a quad
+        // using a pixel-space normal so the width is independent of world scale.
+        {
+            let atlas_w = self.atlas.width as f32;
+            let atlas_h = self.atlas.height as f32;
+
+            for (_cid, ch) in &self.chunks_map {
+                if ch.lines2d_px.is_empty() {
+                    continue;
+                }
+                for ls in ch.lines2d_px.values() {
+                    if !ls.visible {
+                        continue;
+                    }
+                    // Resolve the atlas frame for this tile
+                    let rect = match self.frame_rect(&ls.tile_id, self.animation_counter as u32) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    // Precompute full-rect UVs (we'll map along segment length 0..1)
+                    let v0v1v2v3 = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+
+                    // Transform points to screen space first (same as polys)
+                    let mut pts_scr: Vec<[f32; 2]> = Vec::with_capacity(ls.points.len());
+                    for p in &ls.points {
+                        let local = Vec3::new(p[0], p[1], 1.0);
+                        let world = self.transform2d * local;
+                        pts_scr.push([world.x, world.y]);
+                    }
+
+                    // Emit quads per segment
+                    let half = 0.5 * ls.width_px.max(0.0);
+                    for seg in 0..(pts_scr.len().saturating_sub(1)) {
+                        let p0 = pts_scr[seg];
+                        let p1 = pts_scr[seg + 1];
+                        let dx = p1[0] - p0[0];
+                        let dy = p1[1] - p0[1];
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len < 1e-6 {
+                            continue;
+                        }
+                        let nx = -dy / len;
+                        let ny = dx / len;
+                        let ox = nx * half;
+                        let oy = ny * half;
+
+                        // Screen-space quad corners (consistent winding)
+                        let q0 = [p0[0] - ox, p0[1] - oy]; // bottom-left
+                        let q1 = [p0[0] + ox, p0[1] + oy]; // top-left
+                        let q2 = [p1[0] + ox, p1[1] + oy]; // top-right
+                        let q3 = [p1[0] - ox, p1[1] - oy]; // bottom-right
+
+                        // Atlas UVs mapped to full rect; U stretched along segment
+                        let base = verts_flat.len() as u32;
+                        for uv01 in v0v1v2v3 {
+                            let u = (rect.x as f32 + uv01[0] * rect.w as f32) / atlas_w;
+                            let v = (rect.y as f32 + uv01[1] * rect.h as f32) / atlas_h;
+                            verts_flat.push(Vert2DPod {
+                                pos: [0.0, 0.0],
+                                uv: [u, v],
+                            });
+                        }
+                        // Overwrite positions with the quad
+                        let n = verts_flat.len();
+                        verts_flat[n - 4].pos = q0;
+                        verts_flat[n - 3].pos = q1;
+                        verts_flat[n - 2].pos = q2;
+                        verts_flat[n - 1].pos = q3;
+
+                        indices_flat.extend_from_slice(&[
+                            base + 0,
+                            base + 1,
+                            base + 2,
+                            base + 0,
+                            base + 2,
+                            base + 3,
+                        ]);
+
+                        // Track sorting info: layer from line, prio=0, ord increases
+                        tri_meta.push(TriMeta {
+                            layer: ls.layer,
+                            prio: 0,
+                            ord: tri_ord,
+                            mat: ls.material_id,
+                        });
+                        tri_ord = tri_ord.wrapping_add(1);
+                        tri_meta.push(TriMeta {
+                            layer: ls.layer,
+                            prio: 0,
+                            ord: tri_ord,
+                            mat: ls.material_id,
+                        });
+                        tri_ord = tri_ord.wrapping_add(1);
+                    }
                 }
             }
         }

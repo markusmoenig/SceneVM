@@ -1,4 +1,4 @@
-use crate::{BBox2D, GeoId, Poly2D, Poly3D};
+use crate::{BBox2D, GeoId, LineStrip2D, Poly2D, Poly3D};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -12,6 +12,9 @@ pub struct Chunk {
 
     /// 2D Geometry
     pub polys_map: FxHashMap<GeoId, Poly2D>,
+
+    /// 2D screen-space line strips (constant pixel width)
+    pub lines2d_px: FxHashMap<GeoId, LineStrip2D>,
 
     /// 3D Geometry,
     pub polys3d_map: rustc_hash::FxHashMap<GeoId, Poly3D>,
@@ -128,6 +131,32 @@ impl Chunk {
             material_id,
         };
         self.polys_map.insert(id, poly);
+    }
+
+    /// Add a 2D line strip rendered with a constant pixel width (screen-space).
+    /// `points` are in **world** coordinates; expansion to pixel-thick quads happens later.
+    pub fn add_line_strip_2d_px(
+        &mut self,
+        id: GeoId,
+        tile_id: Uuid,
+        points: Vec<[f32; 2]>,
+        width_px: f32,
+        layer: i32,
+        material_id: Option<Uuid>,
+    ) {
+        if points.len() < 2 {
+            return;
+        }
+        let line = LineStrip2D {
+            id,
+            tile_id,
+            points,
+            width_px,
+            layer,
+            visible: true,
+            material_id,
+        };
+        self.lines2d_px.insert(id, line);
     }
 
     /// Add a square (axis-aligned) centered at `center` with edge length `size`.

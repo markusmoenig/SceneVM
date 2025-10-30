@@ -26,7 +26,7 @@ pub use crate::{
     poly2d::Poly2D,
     poly3d::Poly3D,
     texture::Texture,
-    vm::{Atom, GeoId, RenderMode, VM},
+    vm::{Atom, GeoId, LineStrip2D, RenderMode, VM},
 };
 
 use image;
