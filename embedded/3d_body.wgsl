@@ -3,8 +3,8 @@
 // --- Test Lambert shading (kept in BODY so headers stay generic) ---
 fn lambert_pointlights(P: vec3<f32>, N: vec3<f32>, base_col: vec3<f32>) -> vec3<f32> {
     var diffuse = vec3<f32>(0.0);
-    // Use background as ambient; make it visible out of the box
-    let ambient = U.background.xyz;
+    // Use background as ambient; clamp to a small minimum so unlit scenes aren't black
+    let ambient = max(U.background.xyz, vec3<f32>(0.05, 0.05, 0.05));
 
     for (var li: u32 = 0u; li < U.lights_count; li = li + 1u) {
         if (lights.data[li].header.y == 0u) { continue; } // emitting flag
@@ -35,12 +35,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.x; let py = gid.y;
     if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
 
+    let bg = U.background;
+    sv_write(px, py, bg);
+
     // Build pixel uv and get ray from the header-provided camera function
     let cam_uv = vec2<f32>( (f32(px) + 0.5) / f32(U.fb_size.x),
-                        (f32(py) + 0.5) / f32(U.fb_size.y) );
+                            (f32(py) + 0.5) / f32(U.fb_size.y) );
     let ray = cam_ray(cam_uv);
     let ro = ray.ro;
-    let rd = ray.rd;
+    let rd = normalize(ray.rd);
 
     // ===== choose tracing mode =====
     var hit_any = false;
@@ -49,6 +52,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var best_u = 0.0;
     var best_v = 0.0;
 
+    // Try grid first; if it misses, fall back to brute-force triangle loop.
+    var grid_used = false;
     if (sv_grid_active()) {
         let th = sv_trace_grid(ro, rd, 0.001, 1e6);
         if (th.hit) {
@@ -57,14 +62,23 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             best_tri = th.tri;
             best_u = th.u;
             best_v = th.v;
+            grid_used = true;
         }
-    } else {
-        // Brute-force: loop all triangles in indices3d
-        let tri_count: u32 = arrayLength(&indices3d.data) / 3u;
+    }
+
+    // Brute-force fallback
+    if (!hit_any) {
+        let tri_len: u32 = arrayLength(&indices3d.data);
+        let tri_count: u32 = tri_len / 3u;
+        // if (DEBUG_MODE == 1u && tri_count == 0u) {
+        //     debug_write(px, py, vec3<f32>(0.0, 1.0, 1.0)); // cyan => no triangles uploaded
+        //     return;
+        // }
         for (var tri: u32 = 0u; tri < tri_count; tri = tri + 1u) {
-            let i0 = indices3d.data[3u*tri + 0u];
-            let i1 = indices3d.data[3u*tri + 1u];
-            let i2 = indices3d.data[3u*tri + 2u];
+            let base = 3u * tri;
+            let i0 = indices3d.data[base + 0u];
+            let i1 = indices3d.data[base + 1u];
+            let i2 = indices3d.data[base + 2u];
             let a = verts3d.data[i0].pos;
             let b = verts3d.data[i1].pos;
             let c = verts3d.data[i2].pos;
@@ -80,22 +94,38 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (!hit_any) {
-        sv_write(px, py, U.background);
-        return;
+        // No hit in either path — show yellow in DEBUG_MODE 2 to signal grid miss
+        // if (DEBUG_MODE == 2u) {
+        //     debug_write(px, py, vec3<f32>(1.0, 1.0, 0.0));
+        // }
+        // return; // background already written
     }
 
-    // Interpolate UV & smooth normal
-    let i0 = indices3d.data[3u*best_tri + 0u];
-    let i1 = indices3d.data[3u*best_tri + 1u];
-    let i2 = indices3d.data[3u*best_tri + 2u];
+    // Clamp the winning triangle id against current buffers (defensive)
+    let tri_len_elems = arrayLength(&indices3d.data);
+    let tri_len = tri_len_elems / 3u;
+    let tri_safe = clamp_index_u(best_tri, tri_len);
+
+    let i0 = indices3d.data[3u*tri_safe + 0u];
+    let i1 = indices3d.data[3u*tri_safe + 1u];
+    let i2 = indices3d.data[3u*tri_safe + 2u];
 
     let uv0 = verts3d.data[i0].uv; let n0 = verts3d.data[i0].normal;
     let uv1 = verts3d.data[i1].uv; let n1 = verts3d.data[i1].normal;
     let uv2 = verts3d.data[i2].uv; let n2 = verts3d.data[i2].normal;
 
     let w0 = 1.0 - best_u - best_v;
-    let uv = uv0*w0 + uv1*best_u + uv2*best_v;
+    // Interpolate smooth normal
     var N = normalize(n0*w0 + n1*best_u + n2*best_v);
+
+    let P = ro + rd * best_t;
+
+    // Atlas UV from helpers (object UV → repeat → atlas mapping)
+    // Controls:
+    //   U.gp7.x = world units per texture repeat (e.g., 1.0 = repeat every 1 world unit)
+    //   U.gp7.z = 0 → use object-UV repeat, 1 → use planar/world-space repeat
+    // Sampler must be CLAMP? No: set to REPEAT at CPU, MIN/MAG filter = nearest for pixel art.
+    let uv_atlas = sv_tri_atlas_uv_obj(i0, i1, i2, best_u, best_v);
 
     // when filling Compute3DUniforms u:
     // self.gp8.x = 1.0; // bump strength (0 = off)
@@ -109,43 +139,55 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let b = verts3d.data[i1].pos;
         let c = verts3d.data[i2].pos;
 
-        // 1 texel steps in atlas UV space (provided by CPU)
+        // 1 texel steps in atlas UV space (provided by CPU in gp9)
         let du = vec2<f32>(U.gp9.x, 0.0);
         let dv = vec2<f32>(0.0, U.gp9.y);
 
-        // Sample height at uv and neighbors (use color as height proxy)
-        let h  = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0).xyz);
-        let hx = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv + du, 0.0).xyz);
-        let hy = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv + dv, 0.0).xyz);
+        // Sample height at uv and neighbors (use color luma as height proxy)
+        let h  = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv_atlas, 0.0).xyz);
+        let hx = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv_atlas + du, 0.0).xyz);
+        let hy = sv_luma(textureSampleLevel(atlas_tex, atlas_smp, uv_atlas + dv, 0.0).xyz);
 
-        // Finite differences
         let dhdu = (hx - h);
         let dhdv = (hy - h);
 
-        // Tangent frame of the triangle
         let TBN = sv_tri_tbn(a, b, c, uv0, uv1, uv2);
-
-        // Map height gradient into tangent space normal and to world space
         let n_ts = normalize(vec3<f32>(-dhdu * U.gp8.x, -dhdv * U.gp8.x, 1.0));
         let n_ws = normalize(TBN * n_ts);
-
-        // Blend with your smooth vertex normal for stability
         N = normalize(mix(N, n_ws, clamp(U.gp8.x, 0.0, 1.0)));
     }
 
-    let P = ro + rd * best_t;
-
-    let base_col = textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
+    // If texture/atlas is misbound, use bary-debug color so we still see something
+    var base_col = sv_tri_sample_albedo(i0, i1, i2, best_u, best_v);
+    if (all(base_col.xyz == vec3<f32>(0.0))) {
+        base_col = vec4<f32>(w0, best_u, best_v, 1.0);
+    }
     if (dot(N, rd) > 0.0) { N = -N; } // two-sided
 
     // Material lookup for the winning triangle
-    let m_idx = tri_mat.data[best_tri];
+    let tri_mat_len = arrayLength(&tri_mat.data);
+    var tri_mat_safe: u32 = 0u;
+    if (tri_mat_len > 0u) {
+        tri_mat_safe = tri_mat.data[clamp_index_u(tri_safe, tri_mat_len)];
+    }
+
+    let mats_len = arrayLength(&materials.data);
+    let m_idx = clamp_index_u(tri_mat_safe, mats_len);
     let M = materials.data[m_idx];
+
     let base_rgb = base_col.xyz * M.tint.xyz;
 
     let lit = lambert_pointlights(P, N, base_rgb);
     // Add simple emission, apply opacity (from material)
     let final_rgb = lit + M.rmoe.w * M.tint.xyz;
-    let final_a = base_col.a * M.rmoe.z;
+    let final_a = max(base_col.a * M.rmoe.z, 1.0); // keep visible while debugging
+
+    // Optional debug for grid-used visualization
+    // if (DEBUG_MODE == 2u) {
+    //     let gcol = mix(vec3<f32>(0.2,0.2,0.2), vec3<f32>(0.2,0.8,0.2), select(0.0, 1.0, grid_used));
+    //     sv_write(px, py, vec4<f32>(gcol, 1.0));
+    //     return;
+    // }
+
     sv_write(px, py, vec4<f32>(final_rgb, final_a));
 }

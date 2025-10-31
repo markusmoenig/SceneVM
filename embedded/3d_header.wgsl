@@ -40,8 +40,16 @@ struct LightWGSL {
 struct Lights { data: array<LightWGSL>, };
 @group(0) @binding(4) var<storage, read> lights: Lights;
 
-// Geometry
-struct Vert3D { pos: vec3<f32>, _pad0: f32, uv: vec2<f32>, _pad1: vec2<f32>, normal: vec3<f32>, _pad2: f32 };
+// Vert3D layout:
+// - uv       : OBJECT UVs (not atlas-mapped). These can be any scale; we wrap in shader.
+// - uv_os    : (offset.xy, scale.zw) in ATLAS UV space for this triangle's sub-rect.
+//              These are expected to be constant per-triangle; we read them from i0.
+struct Vert3D {
+  pos: vec3<f32>, _pad0: f32,
+  uv: vec2<f32>,
+  uv_os: vec4<f32>,     // offset.xy, scale.zw  (atlas space)
+  normal: vec3<f32>, _pad2: f32
+};
 struct Verts3D { data: array<Vert3D> };
 struct Indices { data: array<u32> };
 
@@ -105,6 +113,39 @@ fn sv_ray_tri_full(ro: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: 
   var Ng = normalize(cross(e1, e2));
   if (det > 0.0) { Ng = -Ng; }
   return Hit3DFull(true, t, u, v, Ng);
+}
+
+// --- Helpers: wrap UVs and clamp indices to valid SSBO ranges ---
+fn clamp_index_u(i: u32, len: u32) -> u32 {
+    return select(0u, min(i, max(len, 1u) - 1u), len > 0u);
+}
+
+// ---- UV wrapping helpers (GPU-side repeat inside atlas rect) ----
+// OBJECT-UV bary mapping into atlas
+fn sv_tri_atlas_uv_obj(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec2<f32> {
+  // Barycentric blend of per-vertex OBJECT uv
+  let uv0 = verts3d.data[i0].uv;
+  let uv1 = verts3d.data[i1].uv;
+  let uv2 = verts3d.data[i2].uv;
+  let w = 1.0 - bu - bv;
+  let uv_obj = uv0 * w + uv1 * bu + uv2 * bv;
+
+  // Per-triangle atlas mapping (assumed constant; read from vertex 0 of the tri)
+  // offset.xy and scale.zw are *atlas* UVs for the tile sub-rect
+  let os = verts3d.data[i0].uv_os;
+  let ofs = os.xy;
+  let scl = os.zw;
+
+  // Repeat OBJECT uv, then scale into sub-rect and add offset
+  let uv_wrapped = fract(uv_obj);          // [0,1) repeat in object space
+  let uv_atlas   = ofs + uv_wrapped * scl; // map into atlas sub-rect
+  return uv_atlas;
+}
+
+// Sample atlas texture using barycentrics on a triangle with GPU-side repeat (object-UV based)
+fn sv_tri_sample_albedo(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec4<f32> {
+  let uv = sv_tri_atlas_uv_obj(i0, i1, i2, bu, bv);
+  return sv_sample(uv);
 }
 
 fn sv_interp3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, u: f32, v: f32) -> vec3<f32> {
@@ -325,7 +366,8 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
 }
 // ===== end DDA =====  
 
-// TBN from triangle positions/uvs, using geometric normal for stability.
+// TBN from triangle positions and OBJECT-space UVs (no atlas mapping here),
+// using geometric normal for stability.
 fn sv_tri_tbn(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>,
               uv0: vec2<f32>, uv1: vec2<f32>, uv2: vec2<f32>) -> mat3x3<f32> {
   let e1 = b - a;

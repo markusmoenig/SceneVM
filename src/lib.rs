@@ -123,6 +123,27 @@ impl Default for SceneVM {
 }
 
 impl SceneVM {
+    /// Prints statistics about 2D and 3D polygons currently loaded in all chunks.
+    pub fn print_geometry_stats(&self) {
+        let mut total_2d = 0usize;
+        let mut total_3d = 0usize;
+        let mut total_lines = 0usize;
+
+        for (_cid, ch) in &self.vm.chunks_map {
+            total_2d += ch.polys_map.len();
+            total_3d += ch.polys3d_map.len();
+            total_lines += ch.lines2d_px.len();
+        }
+
+        println!(
+            "[SceneVM] Geometry Stats → 2D polys: {} | 3D polys: {} | 2D lines: {} | Total: {}",
+            total_2d,
+            total_3d,
+            total_lines,
+            total_2d + total_3d + total_lines
+        );
+    }
+
     /// Executes a single atom
     pub fn execute(&mut self, atom: Atom) {
         self.vm.execute(atom);

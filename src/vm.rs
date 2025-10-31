@@ -52,20 +52,14 @@ pub struct Vert2DPod {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vert3DPod {
-    // 0..12
     pub pos: [f32; 3],
-    // pad to 16 so next member is 16-aligned
-    pub _pad_pos: f32,
-    // 16..23
-    pub uv: [f32; 2],
-    // pad to 32 so next member starts at 32
-    pub _pad_uv: [f32; 2],
-    // 32..44
+    pub _pad_pos: f32,     // 16
+    pub uv: [f32; 2],      // +8  = 24
+    pub _pad_uv: [f32; 2], // +8  = 32  <-- NEW: force 16-byte alignment before next vec4
+    pub uv_os: [f32; 4],   // +16 = 48
     pub normal: [f32; 3],
-    // pad to 48 for 16B alignment of array stride
-    pub _pad_n: f32,
+    pub _pad_n: f32, // +16 = 64 total
 }
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightPod {
@@ -956,7 +950,17 @@ impl VM {
             cache: None,
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+        // let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+        let sampler: wgpu::Sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("vm-atlas-sampler-repeat-nearest"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vm-globals-buffer"),
@@ -2259,23 +2263,29 @@ impl VM {
                 }
 
                 let base = v3.len() as u32;
+
                 let atlas_w = self.atlas.width as f32;
                 let atlas_h = self.atlas.height as f32;
 
+                let ofs_x = rect.x as f32 / atlas_w;
+                let ofs_y = rect.y as f32 / atlas_h;
+                let scl_x = rect.w as f32 / atlas_w;
+                let scl_y = rect.h as f32 / atlas_h;
+
                 for (i, p) in poly_pos.iter().enumerate() {
-                    let uv0 = poly.uvs[i];
-                    let u = (rect.x as f32 + uv0[0] * rect.w as f32) / atlas_w;
-                    let v_uv = (rect.y as f32 + uv0[1] * rect.h as f32) / atlas_h;
+                    let uv0 = poly.uvs[i]; // object-uv per vertex (e.g. 0..1 for a face)
                     let n = poly_nrm[i];
                     v3.push(Vert3DPod {
                         pos: [p[0], p[1], p[2]],
                         _pad_pos: 0.0,
-                        uv: [u, v_uv],
+                        uv: [uv0[0], uv0[1]],
                         _pad_uv: [0.0, 0.0],
+                        uv_os: [ofs_x, ofs_y, scl_x, scl_y], // << IMPORTANT
                         normal: [n[0], n[1], n[2]],
                         _pad_n: 0.0,
                     });
                 }
+
                 let mat_slot = ensure_mat_index(poly.material_id);
                 for &(a, b, c) in &poly.indices {
                     i3.extend_from_slice(&[base + a as u32, base + b as u32, base + c as u32]);
@@ -2289,7 +2299,8 @@ impl VM {
                 pos: [0.0; 3],
                 _pad_pos: 0.0,
                 uv: [0.0; 2],
-                _pad_uv: [0.0; 2],
+                _pad_uv: [0.0, 0.0],
+                uv_os: [0.0, 0.0, 0.0, 0.0],
                 normal: [0.0, 0.0, 1.0],
                 _pad_n: 0.0,
             });

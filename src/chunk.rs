@@ -2,7 +2,7 @@ use crate::{BBox2D, GeoId, LineStrip2D, Poly2D, Poly3D};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
-use vek::{Mat3, Vec2};
+use vek::{Mat3, Vec2, Vec3};
 
 #[derive(Debug, Default, Clone)]
 pub struct Chunk {
@@ -229,5 +229,96 @@ impl Chunk {
                 material_id,
             },
         );
+    }
+
+    /// Add a 3D line as a camera-independent quad based on thickness and a reference normal.
+    pub fn add_line_3d(
+        &mut self,
+        id: GeoId,
+        tile_id: Uuid,
+        a: Vec3<f32>,
+        b: Vec3<f32>,
+        thickness: f32,
+        normal: Vec3<f32>,
+        layer: i32,
+        material_id: Option<Uuid>,
+    ) {
+        // Reject degenerate segments
+        let dir = b - a;
+        let dir_len = dir.magnitude();
+        if dir_len < 1e-6 || !dir_len.is_finite() {
+            return;
+        }
+        let dir_n = dir / dir_len;
+
+        // Pick a stable face normal `n`:
+        // - use provided `normal` if valid
+        // - if nearly parallel to dir, pick an axis least aligned with dir
+        let mut n = if normal.magnitude() < 1e-6 || !normal.magnitude().is_finite() {
+            Vec3::unit_y()
+        } else {
+            normal.normalized()
+        };
+        if dir_n.dot(n).abs() > 0.999 {
+            let ax = dir_n.x.abs();
+            let ay = dir_n.y.abs();
+            let az = dir_n.z.abs();
+            n = if ax <= ay && ax <= az {
+                Vec3::unit_x()
+            } else if ay <= az {
+                Vec3::unit_y()
+            } else {
+                Vec3::unit_z()
+            };
+        }
+
+        // Side vector perpendicular to both n and dir
+        let mut side = n.cross(dir_n);
+        if !side.x.is_finite()
+            || !side.y.is_finite()
+            || !side.z.is_finite()
+            || side.magnitude() < 1e-6
+        {
+            // Fallback if n ~ dir or numerical issue
+            side = dir_n.cross(Vec3::unit_y());
+            if side.magnitude() < 1e-6 {
+                side = dir_n.cross(Vec3::unit_x());
+            }
+        }
+        let side_n = side.normalized();
+
+        // Half thickness along the side; small caps so thick lines look nicer
+        let half = side_n * (thickness * 0.5);
+        let cap = dir_n * (thickness * 0.5);
+
+        let a_ext = a - cap;
+        let b_ext = b + cap;
+
+        let v0 = a_ext - half; // bottom-left
+        let v1 = a_ext + half; // top-left
+        let v2 = b_ext + half; // top-right
+        let v3 = b_ext - half; // bottom-right
+
+        // Pack into Poly3D (positions as [x,y,z,1], simple UVs, two triangles)
+        let vertices = vec![
+            [v0.x, v0.y, v0.z, 1.0],
+            [v1.x, v1.y, v1.z, 1.0],
+            [v2.x, v2.y, v2.z, 1.0],
+            [v3.x, v3.y, v3.z, 1.0],
+        ];
+        let uvs = vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+        let indices = vec![(0usize, 1usize, 2usize), (0usize, 2usize, 3usize)];
+
+        let poly = Poly3D {
+            id,
+            tile_id,
+            vertices,
+            uvs,
+            indices,
+            layer,
+            visible: true,
+            material_id,
+        };
+        self.polys3d_map.insert(id, poly);
     }
 }
