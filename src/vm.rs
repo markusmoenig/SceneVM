@@ -561,8 +561,10 @@ impl VM {
                     if let Some(p) = ch.polys_map.get_mut(&id) {
                         p.visible = visible;
                     }
-                    if let Some(p3) = ch.polys3d_map.get_mut(&id) {
-                        p3.visible = visible;
+                    if let Some(p3_vec) = ch.polys3d_map.get_mut(&id) {
+                        for p3 in p3_vec.iter_mut() {
+                            p3.visible = visible;
+                        }
                         self.accel_dirty = true;
                     }
                 }
@@ -845,8 +847,10 @@ impl VM {
                     if let Some(p) = ch.polys_map.get_mut(&id) {
                         p.material_id = material_id;
                     }
-                    if let Some(p3) = ch.polys3d_map.get_mut(&id) {
-                        p3.material_id = material_id;
+                    if let Some(p3_vec) = ch.polys3d_map.get_mut(&id) {
+                        for p3 in p3_vec.iter_mut() {
+                            p3.material_id = material_id;
+                        }
                     }
                 }
             }
@@ -2214,82 +2218,84 @@ impl VM {
         };
 
         for (_cid, ch) in &self.chunks_map {
-            for poly in ch.polys3d_map.values() {
-                if !poly.visible {
-                    continue;
-                }
-
-                let rect = match self.frame_rect(&poly.tile_id, self.animation_counter as u32) {
-                    Some(r) => r,
-                    None => continue,
-                };
-
-                let vcount = poly.vertices.len();
-                let mut poly_pos: Vec<[f32; 3]> = Vec::with_capacity(vcount);
-                let mut poly_nrm: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; vcount];
-
-                for v in &poly.vertices {
-                    let p = m * Vec4::new(v[0], v[1], v[2], v[3]);
-                    let w = if p.w != 0.0 { p.w } else { 1.0 };
-                    poly_pos.push([p.x / w, p.y / w, p.z / w]);
-                }
-
-                for &(a, b, c) in &poly.indices {
-                    let pa = poly_pos[a];
-                    let pb = poly_pos[b];
-                    let pc = poly_pos[c];
-                    let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
-                    let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-                    let nx = e1[1] * e2[2] - e1[2] * e2[1];
-                    let ny = e1[2] * e2[0] - e1[0] * e2[2];
-                    let nz = e1[0] * e2[1] - e1[1] * e2[0];
-                    poly_nrm[a][0] += nx;
-                    poly_nrm[a][1] += ny;
-                    poly_nrm[a][2] += nz;
-                    poly_nrm[b][0] += nx;
-                    poly_nrm[b][1] += ny;
-                    poly_nrm[b][2] += nz;
-                    poly_nrm[c][0] += nx;
-                    poly_nrm[c][1] += ny;
-                    poly_nrm[c][2] += nz;
-                }
-                for n in &mut poly_nrm {
-                    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                    if len > 1e-12 {
-                        n[0] /= len;
-                        n[1] /= len;
-                        n[2] /= len;
+            for poly_list in ch.polys3d_map.values() {
+                for poly in poly_list {
+                    if !poly.visible {
+                        continue;
                     }
-                }
 
-                let base = v3.len() as u32;
+                    let rect = match self.frame_rect(&poly.tile_id, self.animation_counter as u32) {
+                        Some(r) => r,
+                        None => continue,
+                    };
 
-                let atlas_w = self.atlas.width as f32;
-                let atlas_h = self.atlas.height as f32;
+                    let vcount = poly.vertices.len();
+                    let mut poly_pos: Vec<[f32; 3]> = Vec::with_capacity(vcount);
+                    let mut poly_nrm: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; vcount];
 
-                let ofs_x = rect.x as f32 / atlas_w;
-                let ofs_y = rect.y as f32 / atlas_h;
-                let scl_x = rect.w as f32 / atlas_w;
-                let scl_y = rect.h as f32 / atlas_h;
+                    for v in &poly.vertices {
+                        let p = m * Vec4::new(v[0], v[1], v[2], v[3]);
+                        let w = if p.w != 0.0 { p.w } else { 1.0 };
+                        poly_pos.push([p.x / w, p.y / w, p.z / w]);
+                    }
 
-                for (i, p) in poly_pos.iter().enumerate() {
-                    let uv0 = poly.uvs[i]; // object-uv per vertex (e.g. 0..1 for a face)
-                    let n = poly_nrm[i];
-                    v3.push(Vert3DPod {
-                        pos: [p[0], p[1], p[2]],
-                        _pad_pos: 0.0,
-                        uv: [uv0[0], uv0[1]],
-                        _pad_uv: [0.0, 0.0],
-                        uv_os: [ofs_x, ofs_y, scl_x, scl_y], // << IMPORTANT
-                        normal: [n[0], n[1], n[2]],
-                        _pad_n: 0.0,
-                    });
-                }
+                    for &(a, b, c) in &poly.indices {
+                        let pa = poly_pos[a];
+                        let pb = poly_pos[b];
+                        let pc = poly_pos[c];
+                        let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+                        let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+                        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+                        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+                        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+                        poly_nrm[a][0] += nx;
+                        poly_nrm[a][1] += ny;
+                        poly_nrm[a][2] += nz;
+                        poly_nrm[b][0] += nx;
+                        poly_nrm[b][1] += ny;
+                        poly_nrm[b][2] += nz;
+                        poly_nrm[c][0] += nx;
+                        poly_nrm[c][1] += ny;
+                        poly_nrm[c][2] += nz;
+                    }
+                    for n in &mut poly_nrm {
+                        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                        if len > 1e-12 {
+                            n[0] /= len;
+                            n[1] /= len;
+                            n[2] /= len;
+                        }
+                    }
 
-                let mat_slot = ensure_mat_index(poly.material_id);
-                for &(a, b, c) in &poly.indices {
-                    i3.extend_from_slice(&[base + a as u32, base + b as u32, base + c as u32]);
-                    tri_mat.push(mat_slot);
+                    let base = v3.len() as u32;
+
+                    let atlas_w = self.atlas.width as f32;
+                    let atlas_h = self.atlas.height as f32;
+
+                    let ofs_x = rect.x as f32 / atlas_w;
+                    let ofs_y = rect.y as f32 / atlas_h;
+                    let scl_x = rect.w as f32 / atlas_w;
+                    let scl_y = rect.h as f32 / atlas_h;
+
+                    for (i, p) in poly_pos.iter().enumerate() {
+                        let uv0 = poly.uvs[i]; // object-uv per vertex (e.g. 0..1 for a face)
+                        let n = poly_nrm[i];
+                        v3.push(Vert3DPod {
+                            pos: [p[0], p[1], p[2]],
+                            _pad_pos: 0.0,
+                            uv: [uv0[0], uv0[1]],
+                            _pad_uv: [0.0, 0.0],
+                            uv_os: [ofs_x, ofs_y, scl_x, scl_y],
+                            normal: [n[0], n[1], n[2]],
+                            _pad_n: 0.0,
+                        });
+                    }
+
+                    let mat_slot = ensure_mat_index(poly.material_id);
+                    for &(a, b, c) in &poly.indices {
+                        i3.extend_from_slice(&[base + a as u32, base + b as u32, base + c as u32]);
+                        tri_mat.push(mat_slot);
+                    }
                 }
             }
         }
@@ -2568,7 +2574,7 @@ impl VM {
 
         // --- 2) Pad scene AABB slightly ---
         let diag = (bmax - bmin).magnitude().max(1e-6);
-        let pad = 0.00001 * diag; // scene padding
+        let pad = 0.1 * diag; // scene padding
         bmin -= Vec3::broadcast(pad);
         bmax += Vec3::broadcast(pad);
 
@@ -2601,7 +2607,7 @@ impl VM {
         );
 
         // Precompute an epsilon in **world** based on cell size (robustness)
-        let cell_eps = cell_size.x.max(cell_size.y).max(cell_size.z) * 0.8;
+        let cell_eps = cell_size.x.max(cell_size.y).max(cell_size.z) * 1.0;
 
         // --- 4) Bin triangles into cells with **padded tri AABB** ---
 

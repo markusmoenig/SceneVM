@@ -131,7 +131,7 @@ impl SceneVM {
 
         for (_cid, ch) in &self.vm.chunks_map {
             total_2d += ch.polys_map.len();
-            total_3d += ch.polys3d_map.len();
+            total_3d += ch.polys3d_map.values().map(|v| v.len()).sum::<usize>();
             total_lines += ch.lines2d_px.len();
         }
 

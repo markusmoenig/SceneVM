@@ -17,7 +17,7 @@ pub struct Chunk {
     pub lines2d_px: FxHashMap<GeoId, LineStrip2D>,
 
     /// 3D Geometry,
-    pub polys3d_map: rustc_hash::FxHashMap<GeoId, Poly3D>,
+    pub polys3d_map: rustc_hash::FxHashMap<GeoId, Vec<Poly3D>>,
 
     /// The priority of the chunk.
     pub priority: i32,
@@ -39,7 +39,7 @@ impl Chunk {
     }
 
     pub fn add_3d(&mut self, poly: Poly3D) {
-        self.polys3d_map.insert(poly.id, poly);
+        self.polys3d_map.entry(poly.id).or_default().push(poly);
     }
 
     /// Add a 2D polygon with explicit vertices/uvs/indices. Indices are local to this chunk.
@@ -216,9 +216,10 @@ impl Chunk {
         visible: bool,
         material_id: Option<Uuid>,
     ) {
-        self.polys3d_map.insert(
-            id,
-            Poly3D {
+        self.polys3d_map
+            .entry(id)
+            .or_default()
+            .push(Poly3D {
                 id,
                 tile_id,
                 vertices,
@@ -227,8 +228,7 @@ impl Chunk {
                 layer,
                 visible,
                 material_id,
-            },
-        );
+            });
     }
 
     /// Add a 3D line as a camera-independent quad based on thickness and a reference normal.
@@ -319,6 +319,6 @@ impl Chunk {
             visible: true,
             material_id,
         };
-        self.polys3d_map.insert(id, poly);
+        self.polys3d_map.entry(id).or_default().push(poly);
     }
 }
