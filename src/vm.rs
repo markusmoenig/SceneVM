@@ -2574,7 +2574,7 @@ impl VM {
 
         // --- 2) Pad scene AABB slightly ---
         let diag = (bmax - bmin).magnitude().max(1e-6);
-        let pad = 0.1 * diag; // scene padding
+        let pad = 0.15 * diag; // scene padding
         bmin -= Vec3::broadcast(pad);
         bmax += Vec3::broadcast(pad);
 
