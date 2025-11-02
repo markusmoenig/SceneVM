@@ -33,6 +33,7 @@ impl TheTrait for Circle {
                 width: width,
                 height: height,
                 frames: vec![data],
+                material_frames: None,
             });
             self.vm.execute(Atom::BuildAtlas);
         }
@@ -68,7 +69,7 @@ impl TheTrait for Circle {
             material_id: None,
         });
 
-        self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
+        // self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
 
         self.vm.execute(Atom::AddPoly3D {
             poly: Poly3D::cube(GeoId::Unknown(0), tile_id, Vec3::zero(), 2.0),

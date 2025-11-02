@@ -39,16 +39,7 @@ struct LightWGSL {
 };
 struct Lights { data: array<LightWGSL>, };
 @group(0) @binding(9) var<storage, read> lights: Lights;
-
-@group(0) @binding(10) var<storage, read> tri_mat2d: U32s;
-
-struct MaterialWGSL {
-  tint:  vec4<f32>,
-  rmoe:  vec4<f32>,
-  model: vec4<f32>,
-};
-struct Materials { data: array<MaterialWGSL>, };
-@group(0) @binding(11) var<storage, read> materials: Materials;
+@group(0) @binding(10) var atlas_mat_tex: texture_2d<f32>;
 
 fn tiles_x() -> u32 { return (U.fb_size.x + 7u) / 8u; }
 fn tiles_y() -> u32 { return (U.fb_size.y + 7u) / 8u; }
@@ -67,7 +58,7 @@ fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
 }
 // ----- SceneVM 2D helpers -----
 struct BaryHit { hit: bool, w: vec3<f32> };
-struct ColorHit { hit: bool, color: vec4<f32>, tri: u32 };
+struct ColorHit { hit: bool, color: vec4<f32>, tri: u32, uv: vec2<f32> };
 
 fn sv_edge(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
   return (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
@@ -109,12 +100,12 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   let b = verts.data[i1].pos;
   let c = verts.data[i2].pos;
   let bh = sv_tri_bary(p, a, b, c);
-  if (!bh.hit) { return ColorHit(false, vec4<f32>(0.0), 0u); }
+  if (!bh.hit) { return ColorHit(false, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
 
   let w = bh.w;
   let uv = verts.data[i0].uv * w.x + verts.data[i1].uv * w.y + verts.data[i2].uv * w.z;
   var col = sv_sample(uv);
-  if (col.a < 0.01) { return ColorHit(false, vec4<f32>(0.0), 0u); }
+  if (col.a < 0.01) { return ColorHit(false, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
 
   // --- Analytic edge AA ---
   let feather = 1.0;
@@ -127,7 +118,7 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   }
 
   // tri id is not known here; sv_shade_tile_pixel wraps this and sets it
-  return ColorHit(true, col, 0u);
+  return ColorHit(true, col, 0u, uv);
 }
 
 fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
@@ -146,10 +137,10 @@ fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
     let i2 = indices.data[3u*t + 2u];
     let ch = sv_tri_color(p, i0, i1, i2);
     if (ch.hit) {
-      return ColorHit(true, ch.color, t);
+      return ColorHit(true, ch.color, t, ch.uv);
     }
   }
-  return ColorHit(false, vec4<f32>(0.0), 0u);
+  return ColorHit(false, vec4<f32>(0.0), 0u, vec2<f32>(0.0));
 }
 
 // RNG Helper

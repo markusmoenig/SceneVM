@@ -13,14 +13,13 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tid = tile_of_px(px, py);
     let ch = sv_shade_tile_pixel(p, px, py, tid);
     if (ch.hit) {
-        // Material look-up for winning triangle
-        let m_idx = tri_mat2d.data[ch.tri];
-        let M = materials.data[m_idx];
+        let mats = textureSampleLevel(atlas_mat_tex, atlas_smp, ch.uv, 0.0);
+        let opacity = mats.z;
+        let emission = mats.w;
 
-        // Base texture color → apply tint & opacity; add emission (simple)
         let base = ch.color;
-        let rgb = base.xyz * M.tint.xyz + M.rmoe.w * M.tint.xyz; // tint + emission
-        let a   = base.a * M.rmoe.z;                             // opacity
+        let rgb = base.xyz * (1.0 + emission);
+        let a   = base.a * opacity;
         sv_write(px, py, vec4<f32>(rgb, a));
     }
 }

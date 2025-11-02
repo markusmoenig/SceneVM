@@ -69,17 +69,7 @@ struct I32s { data: array<i32> };
 @group(0) @binding(8)  var<storage, read> grid_offsets: U32s;
 @group(0) @binding(9)  var<storage, read> grid_counts:  U32s;
 @group(0) @binding(10) var<storage, read> grid_tris:    U32s;
-// material index per triangle (aligned with indices3d triangles)
-@group(0) @binding(13) var<storage, read> tri_mat: U32s;
-
-// Materials array
-struct MaterialWGSL {
-  tint:  vec4<f32>,
-  rmoe:  vec4<f32>,
-  model: vec4<f32>,
-};
-struct Materials { data: array<MaterialWGSL>, };
-@group(0) @binding(14) var<storage, read> materials: Materials;
+@group(0) @binding(11) var atlas_mat_tex: texture_2d<f32>;
 
 fn sv_grid_active() -> bool { return U.gp9.w > 0.5; }
 
@@ -146,6 +136,11 @@ fn sv_tri_atlas_uv_obj(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec2<f32>
 fn sv_tri_sample_albedo(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec4<f32> {
   let uv = sv_tri_atlas_uv_obj(i0, i1, i2, bu, bv);
   return sv_sample(uv);
+}
+
+fn sv_tri_sample_rmoe(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec4<f32> {
+  let uv = sv_tri_atlas_uv_obj(i0, i1, i2, bu, bv);
+  return textureSampleLevel(atlas_mat_tex, atlas_smp, uv, 0.0);
 }
 
 fn sv_interp3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, u: f32, v: f32) -> vec3<f32> {

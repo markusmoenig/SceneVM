@@ -3,7 +3,6 @@ pub mod camera3d;
 pub mod chunk;
 pub mod intodata;
 pub mod light;
-pub mod material;
 pub mod poly2d;
 pub mod poly3d;
 pub mod texture;
@@ -22,7 +21,6 @@ pub use crate::{
     chunk::Chunk,
     intodata::IntoDataInput,
     light::{Light, LightType},
-    material::{Material, ShadingModel},
     poly2d::Poly2D,
     poly3d::Poly3D,
     texture::Texture,

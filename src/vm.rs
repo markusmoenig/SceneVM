@@ -2,7 +2,7 @@
 const DUMMY_U32_1: [u32; 1] = [0];
 const DUMMY_I32_1: [i32; 1] = [0];
 
-use crate::{Camera3D, CameraKind, Chunk, Light, LightType, Material, Poly2D, Poly3D, Texture};
+use crate::{Camera3D, CameraKind, Chunk, Light, LightType, Poly2D, Poly3D, Texture};
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
@@ -73,14 +73,6 @@ pub struct LightPod {
     pub params1: [f32; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct MaterialPod {
-    pub tint: [f32; 4],
-    pub rmoe: [f32; 4],
-    pub model: [f32; 4],
-}
-
 /// VM instruction set
 #[derive(Debug)]
 pub enum Atom {
@@ -90,6 +82,12 @@ pub enum Atom {
         width: u32,
         height: u32,
         frames: Vec<Vec<u8>>, // frames[f][row*width*4 .. (row+1)*width*4]
+        material_frames: Option<Vec<Vec<u8>>>,
+    },
+    /// Provide or replace per-frame material maps (RGBA = roughness/metallic/opacity/emission) for an existing tile.
+    SetTileMaterialFrames {
+        id: Uuid,
+        frames: Vec<Vec<u8>>,
     },
     /// Add a solid-color 1x1 tile with `id` and RGBA color.
     AddSolid {
@@ -194,22 +192,6 @@ pub enum Atom {
     },
     /// Remove all lights from the scene
     ClearLights,
-    /// Add/replace a material
-    AddMaterial {
-        id: Uuid,
-        material: Material,
-    },
-    /// Remove a material
-    RemoveMaterial {
-        id: Uuid,
-    },
-    /// Remove all materials
-    ClearMaterials,
-    /// Assign a material to a specific geometry id (2D or 3D)
-    SetGeoMaterial {
-        id: GeoId,
-        material_id: Option<Uuid>,
-    },
     /// Build/replace the global scene uniform grid over all current 3D geometry
     SetSceneGridCells {
         target_cells: u32,
@@ -235,6 +217,7 @@ struct Tile {
     w: u32,
     h: u32,
     frames: Vec<Vec<u8>>,
+    material_frames: Vec<Vec<u8>>,
 }
 
 /// Screen-space line strip description (width in pixels; rendered as quads built in screen space).
@@ -287,10 +270,6 @@ pub struct VMGpu {
     pub grid_tris: Option<wgpu::Buffer>,
     pub tri_tile: Option<wgpu::Buffer>,
     pub tri_layer: Option<wgpu::Buffer>,
-    // Materials
-    pub tri_mat2d: Option<wgpu::Buffer>,
-    pub tri_mat3d: Option<wgpu::Buffer>,
-    pub materials_ssbo: Option<wgpu::Buffer>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -457,8 +436,9 @@ pub enum RenderMode {
 /// Packing strategy: simple shelf packer (rows), stable order by insertion.
 pub struct VM {
     tiles_map: FxHashMap<Uuid, Tile>,
-    tiles_order: Vec<Uuid>, // insertion order for stable packing
-    pub atlas: Texture,     // CPU/GPU-capable atlas texture
+    tiles_order: Vec<Uuid>,      // insertion order for stable packing
+    pub atlas: Texture,          // CPU/GPU-capable atlas texture (albedo)
+    pub atlas_material: Texture, // Parallel atlas storing R/M/O/E channels
     pub atlas_map: FxHashMap<Uuid, Vec<AtlasEntry>>, // per-tile frame rects in atlas order
 
     // Scene content grouped into chunks (for streaming/load-save). Indices are local per-chunk.
@@ -489,7 +469,6 @@ pub struct VM {
     pub transform3d: Mat4<f32>,
 
     pub lights: FxHashMap<GeoId, Light>,
-    pub materials: FxHashMap<Uuid, Material>,
 
     pub current_layer: i32,
 
@@ -522,6 +501,7 @@ impl VM {
             tiles_map: FxHashMap::default(),
             tiles_order: Vec::new(),
             atlas: Texture::new(atlas_w, atlas_h),
+            atlas_material: Texture::new(atlas_w, atlas_h),
             atlas_map: FxHashMap::default(),
             chunks_map: FxHashMap::default(),
             current_chunk: None,
@@ -544,13 +524,28 @@ impl VM {
             transform2d: Mat3::identity(),
             transform3d: Mat4::identity(),
             lights: FxHashMap::default(),
-            materials: FxHashMap::default(),
             current_layer: 0,
             scene_accel: SceneAccel::default(),
             accel_dirty: true,
             scene_grid_cells: 5000,
             camera3d: Camera3D::default(),
         }
+    }
+
+    #[inline]
+    fn default_material_frame(bytes: usize) -> Vec<u8> {
+        if bytes == 0 {
+            return Vec::new();
+        }
+        let mut v = Vec::with_capacity(bytes);
+        let pixels = bytes / 4;
+        for _ in 0..pixels {
+            v.extend_from_slice(&[128u8, 0u8, 255u8, 0u8]);
+        }
+        if v.len() < bytes {
+            v.resize(bytes, 0);
+        }
+        v
     }
 
     /// Interpret one instruction.
@@ -574,6 +569,7 @@ impl VM {
                 width,
                 height,
                 frames,
+                material_frames,
             } => {
                 // Basic validation: ensure each frame has enough bytes; pad/trim as needed
                 let need = (width as usize) * (height as usize) * 4;
@@ -589,6 +585,30 @@ impl VM {
                         f
                     })
                     .collect();
+                let mut mat_frames = material_frames.unwrap_or_default();
+                if mat_frames.is_empty() {
+                    mat_frames = (0..frames.len())
+                        .map(|_| Self::default_material_frame(need))
+                        .collect();
+                }
+                if mat_frames.len() < frames.len() {
+                    let missing = frames.len() - mat_frames.len();
+                    mat_frames.extend((0..missing).map(|_| Self::default_material_frame(need)));
+                }
+                if mat_frames.len() > frames.len() {
+                    mat_frames.truncate(frames.len());
+                }
+                for mf in mat_frames.iter_mut() {
+                    if mf.len() < need {
+                        mf.resize(need, 0);
+                    }
+                    if mf.len() > need {
+                        mf.truncate(need);
+                    }
+                }
+                if mat_frames.is_empty() {
+                    mat_frames.push(Self::default_material_frame(need));
+                }
                 let is_new = !self.tiles_map.contains_key(&id);
                 self.tiles_map.insert(
                     id,
@@ -596,6 +616,7 @@ impl VM {
                         w: width,
                         h: height,
                         frames,
+                        material_frames: mat_frames,
                     },
                 );
                 if is_new {
@@ -605,6 +626,7 @@ impl VM {
             Atom::AddSolid { id, color } => {
                 // Create a 1x1 tile with a single frame of the given color
                 let frame = color.to_vec();
+                let mat_frame = Self::default_material_frame(4);
                 let is_new = !self.tiles_map.contains_key(&id);
                 self.tiles_map.insert(
                     id,
@@ -612,10 +634,36 @@ impl VM {
                         w: 1,
                         h: 1,
                         frames: vec![frame],
+                        material_frames: vec![mat_frame],
                     },
                 );
                 if is_new {
                     self.tiles_order.push(id);
+                }
+            }
+            Atom::SetTileMaterialFrames { id, frames } => {
+                if let Some(tile) = self.tiles_map.get_mut(&id) {
+                    let need = (tile.w as usize) * (tile.h as usize) * 4;
+                    let mut mats: Vec<Vec<u8>> = frames
+                        .into_iter()
+                        .map(|mut f| {
+                            if f.len() < need {
+                                f.resize(need, 0);
+                            }
+                            if f.len() > need {
+                                f.truncate(need);
+                            }
+                            f
+                        })
+                        .collect();
+                    if mats.len() < tile.frames.len() {
+                        let missing = tile.frames.len() - mats.len();
+                        mats.extend((0..missing).map(|_| Self::default_material_frame(need)));
+                    }
+                    if mats.len() > tile.frames.len() {
+                        mats.truncate(tile.frames.len());
+                    }
+                    tile.material_frames = mats;
                 }
             }
             Atom::BuildAtlas => {
@@ -766,6 +814,7 @@ impl VM {
                 self.tiles_map.clear();
                 self.tiles_order.clear();
                 self.atlas.data.fill(0);
+                self.atlas_material.data.fill(0);
                 self.chunks_map.clear();
                 self.current_chunk = None;
                 self.animation_counter = 0;
@@ -781,6 +830,7 @@ impl VM {
                 self.tiles_map.clear();
                 self.tiles_order.clear();
                 self.atlas.data.fill(0);
+                self.atlas_material.data.fill(0);
             }
             Atom::ClearGeometry => {
                 // Remove all chunks and unset current chunk; keep tiles/atlas/state
@@ -832,27 +882,6 @@ impl VM {
             }
             Atom::ClearLights => {
                 self.lights.clear();
-            }
-            Atom::AddMaterial { id, material } => {
-                self.materials.insert(id, material);
-            }
-            Atom::RemoveMaterial { id } => {
-                self.materials.remove(&id);
-            }
-            Atom::ClearMaterials => {
-                self.materials.clear();
-            }
-            Atom::SetGeoMaterial { id, material_id } => {
-                for ch in self.chunks_map.values_mut() {
-                    if let Some(p) = ch.polys_map.get_mut(&id) {
-                        p.material_id = material_id;
-                    }
-                    if let Some(p3_vec) = ch.polys3d_map.get_mut(&id) {
-                        for p3 in p3_vec.iter_mut() {
-                            p3.material_id = material_id;
-                        }
-                    }
-                }
             }
             Atom::SetSceneGridCells { target_cells } => {
                 self.scene_grid_cells = target_cells;
@@ -1006,15 +1035,17 @@ impl VM {
             grid_tris: None,
             tri_tile: None,
             tri_layer: None,
-            tri_mat3d: None,
-            materials_ssbo: None,
-            tri_mat2d: None,
         });
     }
 
-    /// Returns a read-only view of the current atlas pixels (RGBA8).
+    /// Returns a read-only view of the current color atlas pixels (RGBA8).
     pub fn atlas_pixels(&self) -> &[u8] {
         &self.atlas.data
+    }
+
+    /// Returns a read-only view of the material atlas pixels (RGBA8 storing R/M/O/E).
+    pub fn material_atlas_pixels(&self) -> &[u8] {
+        &self.atlas_material.data
     }
 
     /// Copies the atlas into a destination pixel slice of size (dst_w x dst_h) RGBA8.
@@ -1023,14 +1054,21 @@ impl VM {
         self.atlas.copy_to_slice(dst, dst_w, dst_h);
     }
 
+    /// Copies the material atlas into a destination pixel slice (RGBA8 R/M/O/E).
+    pub fn copy_material_atlas_to_slice(&self, dst: &mut [u8], dst_w: u32, dst_h: u32) {
+        self.atlas_material.copy_to_slice(dst, dst_w, dst_h);
+    }
+
     /// Upload the CPU atlas to GPU (creates GPU resources if needed).
     pub fn upload_atlas_to_gpu_with(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         self.atlas.upload_to_gpu_with(device, queue);
+        self.atlas_material.upload_to_gpu_with(device, queue);
     }
 
     /// Download the atlas from GPU into CPU memory; blocks on native, schedules on wasm.
     pub fn download_atlas_from_gpu_with(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         self.atlas.download_from_gpu_with(device, queue);
+        self.atlas_material.download_from_gpu_with(device, queue);
     }
 
     /// Get the atlas rect for a tile's animation frame. Returns None if the tile wasn't packed.
@@ -1046,6 +1084,7 @@ impl VM {
     /// Build the atlas using a simple shelf packer and pack all frames.
     fn build_atlas(&mut self) {
         self.atlas.data.fill(0);
+        self.atlas_material.data.fill(0);
         self.atlas_map.clear();
 
         let mut pen_x: u32 = 0;
@@ -1054,9 +1093,9 @@ impl VM {
 
         for id in &self.tiles_order {
             // Copy needed metadata in a short scope to avoid holding an immutable borrow
-            let (w, h, frames_len) = {
+            let (w, h, frames_len, mat_len) = {
                 match self.tiles_map.get(id) {
-                    Some(t) => (t.w, t.h, t.frames.len()),
+                    Some(t) => (t.w, t.h, t.frames.len(), t.material_frames.len()),
                     None => continue,
                 }
             };
@@ -1065,6 +1104,7 @@ impl VM {
             }
 
             let mut rects: Vec<AtlasEntry> = Vec::with_capacity(frames_len);
+            let need_bytes = (w as usize) * (h as usize) * 4;
 
             for f in 0..frames_len {
                 // New shelf if doesn't fit in current row
@@ -1081,12 +1121,25 @@ impl VM {
                 shelf_h = shelf_h.max(h);
 
                 // Short-lived borrow just to clone the frame bytes; drop before mutating self
-                let frame_owned: Vec<u8> =
-                    { self.tiles_map.get(id).expect("tile must exist").frames[f].clone() };
+                let (frame_owned, mat_owned) = {
+                    let tile = self.tiles_map.get(id).expect("tile must exist");
+                    let frame = tile.frames[f].clone();
+                    let mat = if f < mat_len {
+                        tile.material_frames[f].clone()
+                    } else {
+                        Self::default_material_frame(need_bytes)
+                    };
+                    (frame, mat)
+                };
                 {
                     let atlas_w = self.atlas.width;
                     let dst = &mut self.atlas.data;
                     VM::blit_rgba_into(dst, atlas_w, &frame_owned, w, h, pen_x, pen_y);
+                }
+                {
+                    let atlas_w = self.atlas_material.width;
+                    let dst = &mut self.atlas_material.data;
+                    VM::blit_rgba_into(dst, atlas_w, &mat_owned, w, h, pen_x, pen_y);
                 }
 
                 rects.push(AtlasEntry {
@@ -1269,22 +1322,13 @@ impl VM {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 10, // tri_mat2d
+                    // material atlas texture
+                    binding: 10,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 11, // materials
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -1332,6 +1376,17 @@ impl VM {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // material atlas texture (sampled)
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -1402,28 +1457,6 @@ impl VM {
                 // binding 10: grid tris (storage read)
                 wgpu::BindGroupLayoutEntry {
                     binding: 10,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // binding 13: tri_mat (storage read)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 13,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // binding 14: materials SSBO (storage read)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 14,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -1573,6 +1606,7 @@ impl VM {
         }
         // Ensure atlas is available for sampling on GPU
         self.atlas.ensure_gpu_with(device);
+        self.atlas_material.ensure_gpu_with(device);
         self.upload_atlas_to_gpu_with(device, queue);
 
         // Build transformed 2D geometry (screen-space) and upload to SSBOs
@@ -1585,7 +1619,6 @@ impl VM {
             layer: i32,
             prio: i32,
             ord: u32,
-            mat: Option<Uuid>,
         }
         let mut tri_meta: Vec<TriMeta> = Vec::new();
         let mut tri_ord: u32 = 0;
@@ -1628,7 +1661,6 @@ impl VM {
                         layer: poly.layer,
                         prio,
                         ord: tri_ord,
-                        mat: poly.material_id,
                     });
                     tri_ord = tri_ord.wrapping_add(1);
                 }
@@ -1719,14 +1751,12 @@ impl VM {
                             layer: ls.layer,
                             prio: 0,
                             ord: tri_ord,
-                            mat: ls.material_id,
                         });
                         tri_ord = tri_ord.wrapping_add(1);
                         tri_meta.push(TriMeta {
                             layer: ls.layer,
                             prio: 0,
                             ord: tri_ord,
-                            mat: ls.material_id,
                         });
                         tri_ord = tri_ord.wrapping_add(1);
                     }
@@ -1821,76 +1851,6 @@ impl VM {
         }
 
         use wgpu::util::DeviceExt;
-        // ---- Build materials table (slot 0 = default) ----
-        let mut mat_index: FxHashMap<Uuid, u32> = FxHashMap::default();
-        let mut materials_flat: Vec<MaterialPod> = Vec::new();
-        // default material at 0: white tint, 100% opacity, no emission
-        mat_index.insert(Uuid::nil(), 0);
-        materials_flat.push(MaterialPod {
-            tint: [1.0, 1.0, 1.0, 1.0],
-            rmoe: [0.5, 0.0, 1.0, 0.0], // roughness=0.5, metallic=0.0, opacity=1.0, emission=0.0
-            model: [0.0, 0.0, 0.0, 0.0],
-        });
-        // assign indices to all currently registered materials
-        for (mid, m) in &self.materials {
-            let idx = materials_flat.len() as u32;
-            mat_index.insert(*mid, idx);
-            materials_flat.push(MaterialPod {
-                tint: m.tint.into_array(),
-                rmoe: [m.roughness, m.metallic, m.opacity, m.emission],
-                model: [m.encode_model(), 0.0, 0.0, 0.0],
-            });
-        }
-
-        // ---- Map each triangle id (absolute in indices_flat/3 order) → material index ----
-        // IMPORTANT: tri_mat2d is indexed by *absolute* triangle id coming from tile_tris.
-        let tri_count_abs: usize = (indices_flat.len() / 3) as usize;
-        let mut tri_mat2d_vec: Vec<u32> = Vec::with_capacity(tri_count_abs);
-
-        for t in 0..tri_count_abs {
-            let m_id = tri_meta[t].mat.unwrap_or(Uuid::nil());
-            let idx = *mat_index.get(&m_id).unwrap_or(&0);
-            tri_mat2d_vec.push(idx);
-        }
-
-        // Keep buffer non-empty for wgpu validation (even if there are 0 triangles)
-        if tri_mat2d_vec.is_empty() {
-            tri_mat2d_vec.push(0);
-        }
-
-        // --- Create non-empty GPU buffers ---
-        let tri_mat2d_slice: &[u32] = if tri_mat2d_vec.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &tri_mat2d_vec
-        };
-        let materials_slice: &[MaterialPod] = if materials_flat.is_empty() {
-            // keep at least one material
-            &[MaterialPod {
-                tint: [1.0, 1.0, 1.0, 1.0],
-                rmoe: [0.5, 0.0, 1.0, 0.0],
-                model: [0.0, 0.0, 0.0, 0.0],
-            }]
-        } else {
-            &materials_flat
-        };
-
-        let tri_mat2d_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-tri-mat2d"),
-            contents: bytemuck::cast_slice(tri_mat2d_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let materials_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-materials-ssbo"),
-            contents: bytemuck::cast_slice(materials_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let g = self.gpu.as_mut().unwrap();
-        g.tri_mat2d = Some(tri_mat2d_buf);
-        g.materials_ssbo = Some(materials_buf);
-
         // Ensure non-zero-sized buffers for binding validation
         let vbytes: Vec<u8> = if verts_flat.is_empty() {
             // one dummy Vert2DPod (pos=0, uv=0) -> 16 bytes
@@ -1995,6 +1955,7 @@ impl VM {
         // Build bind group with surface view and atlas, plus 2D geometry SSBOs
         let view = &surface.gpu.as_ref().unwrap().view;
         let atlas_view = &self.atlas.gpu.as_ref().unwrap().view;
+        let atlas_mat_view = &self.atlas_material.gpu.as_ref().unwrap().view;
         g.u2d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vm-u2d-bg"),
             layout: g.u2d_bgl.as_ref().unwrap(),
@@ -2041,11 +2002,7 @@ impl VM {
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: g.tri_mat2d.as_ref().unwrap().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: g.materials_ssbo.as_ref().unwrap().as_entire_binding(),
+                    resource: wgpu::BindingResource::TextureView(atlas_mat_view),
                 },
             ],
         }));
@@ -2177,45 +2134,12 @@ impl VM {
 
         // Ensure atlas is available for sampling on GPU
         self.atlas.ensure_gpu_with(device);
+        self.atlas_material.ensure_gpu_with(device);
         self.upload_atlas_to_gpu_with(device, queue);
 
         // --- Build 3D geometry (world space) and upload to SSBOs ---
         let mut v3: Vec<Vert3DPod> = Vec::new();
         let mut i3: Vec<u32> = Vec::new();
-        let mut tri_mat: Vec<u32> = Vec::new();
-
-        use std::collections::HashMap;
-        let mut mat_index: HashMap<Uuid, u32> = HashMap::new();
-        let mut materials_vec: Vec<MaterialPod> = Vec::new();
-
-        // slot 0: default material
-        materials_vec.push(MaterialPod {
-            tint: Vec4::one().into_array(),
-            rmoe: [0.5, 0.0, 1.0, 0.0],
-            model: [0.0, 0.0, 0.0, 0.0],
-        });
-
-        let mut ensure_mat_index = |id_opt: Option<Uuid>| -> u32 {
-            match id_opt {
-                Some(id) => {
-                    if let Some(&idx) = mat_index.get(&id) {
-                        idx
-                    } else if let Some(m) = self.materials.get(&id) {
-                        let idx = materials_vec.len() as u32;
-                        mat_index.insert(id, idx);
-                        materials_vec.push(MaterialPod {
-                            tint: m.tint.into_array(),
-                            rmoe: [m.roughness, m.metallic, m.opacity, m.emission],
-                            model: [m.encode_model(), 0.0, 0.0, 0.0],
-                        });
-                        idx
-                    } else {
-                        0
-                    }
-                }
-                None => 0,
-            }
-        };
 
         for (_cid, ch) in &self.chunks_map {
             for poly_list in ch.polys3d_map.values() {
@@ -2291,10 +2215,8 @@ impl VM {
                         });
                     }
 
-                    let mat_slot = ensure_mat_index(poly.material_id);
                     for &(a, b, c) in &poly.indices {
                         i3.extend_from_slice(&[base + a as u32, base + b as u32, base + c as u32]);
-                        tri_mat.push(mat_slot);
                     }
                 }
             }
@@ -2411,32 +2333,6 @@ impl VM {
             contents: bytemuck::cast_slice(&i3),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-        let tri_mat_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-3d-tri-mat"),
-            contents: bytemuck::cast_slice(if tri_mat.is_empty() {
-                &[0u32][..]
-            } else {
-                &tri_mat[..]
-            }),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let materials_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-materials-ssbo"),
-            contents: bytemuck::cast_slice(if materials_vec.is_empty() {
-                &[MaterialPod {
-                    tint: [1.0, 1.0, 1.0, 1.0],
-                    rmoe: [0.5, 0.0, 1.0, 0.0],
-                    model: [0.0, 0.0, 0.0, 0.0],
-                }][..]
-            } else {
-                &materials_vec[..]
-            }),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let g = self.gpu.as_mut().unwrap();
-        g.tri_mat3d = Some(tri_mat_buf);
-        g.materials_ssbo = Some(materials_buf);
         {
             let g = self.gpu.as_mut().unwrap();
             g.v3d_ssbo = Some(v3_buf);
@@ -2446,6 +2342,7 @@ impl VM {
         // Avoid borrowing self immutably while we need &mut for bind group creation.
         let surface_view = surface.gpu.as_ref().unwrap().view.clone();
         let atlas_view = self.atlas.gpu.as_ref().unwrap().view.clone();
+        let atlas_mat_view = self.atlas_material.gpu.as_ref().unwrap().view.clone();
 
         // Build the bind group
         {
@@ -2469,6 +2366,10 @@ impl VM {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: wgpu::BindingResource::Sampler(&g.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: wgpu::BindingResource::TextureView(&atlas_mat_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -2497,14 +2398,6 @@ impl VM {
                     wgpu::BindGroupEntry {
                         binding: 10,
                         resource: g.grid_tris.as_ref().unwrap().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 13,
-                        resource: g.tri_mat3d.as_ref().unwrap().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 14,
-                        resource: g.materials_ssbo.as_ref().unwrap().as_entire_binding(),
                     },
                 ],
             }));
