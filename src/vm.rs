@@ -439,6 +439,7 @@ pub struct VM {
     tiles_order: Vec<Uuid>,      // insertion order for stable packing
     pub atlas: Texture,          // CPU/GPU-capable atlas texture (albedo)
     pub atlas_material: Texture, // Parallel atlas storing R/M/O/E channels
+    atlas_dirty: bool,
     pub atlas_map: FxHashMap<Uuid, Vec<AtlasEntry>>, // per-tile frame rects in atlas order
 
     // Scene content grouped into chunks (for streaming/load-save). Indices are local per-chunk.
@@ -503,6 +504,7 @@ impl VM {
             atlas: Texture::new(atlas_w, atlas_h),
             atlas_material: Texture::new(atlas_w, atlas_h),
             atlas_map: FxHashMap::default(),
+            atlas_dirty: true,
             chunks_map: FxHashMap::default(),
             current_chunk: None,
             animation_counter: 0,
@@ -622,6 +624,7 @@ impl VM {
                 if is_new {
                     self.tiles_order.push(id);
                 }
+                self.atlas_dirty = true;
             }
             Atom::AddSolid { id, color } => {
                 // Create a 1x1 tile with a single frame of the given color
@@ -640,6 +643,7 @@ impl VM {
                 if is_new {
                     self.tiles_order.push(id);
                 }
+                self.atlas_dirty = true;
             }
             Atom::SetTileMaterialFrames { id, frames } => {
                 if let Some(tile) = self.tiles_map.get_mut(&id) {
@@ -664,10 +668,12 @@ impl VM {
                         mats.truncate(tile.frames.len());
                     }
                     tile.material_frames = mats;
+                    self.atlas_dirty = true;
                 }
             }
             Atom::BuildAtlas => {
                 self.build_atlas();
+                self.atlas_dirty = true;
             }
             Atom::AddPoly { poly } => {
                 let chunk_id = match self.current_chunk {
@@ -1061,8 +1067,11 @@ impl VM {
 
     /// Upload the CPU atlas to GPU (creates GPU resources if needed).
     pub fn upload_atlas_to_gpu_with(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        self.atlas.upload_to_gpu_with(device, queue);
-        self.atlas_material.upload_to_gpu_with(device, queue);
+        if self.atlas_dirty {
+            self.atlas.upload_to_gpu_with(device, queue);
+            self.atlas_material.upload_to_gpu_with(device, queue);
+            self.atlas_dirty = false;
+        }
     }
 
     /// Download the atlas from GPU into CPU memory; blocks on native, schedules on wasm.
@@ -1604,10 +1613,11 @@ impl VM {
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u2d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
         }
-        // Ensure atlas is available for sampling on GPU
-        self.atlas.ensure_gpu_with(device);
-        self.atlas_material.ensure_gpu_with(device);
-        self.upload_atlas_to_gpu_with(device, queue);
+        if self.atlas_dirty || self.atlas.gpu.is_none() || self.atlas_material.gpu.is_none() {
+            self.atlas.ensure_gpu_with(device);
+            self.atlas_material.ensure_gpu_with(device);
+            self.upload_atlas_to_gpu_with(device, queue);
+        }
 
         // Build transformed 2D geometry (screen-space) and upload to SSBOs
         let mut verts_flat: Vec<Vert2DPod> = Vec::new();
@@ -2132,10 +2142,11 @@ impl VM {
             g.lights_ssbo = Some(lights_buf);
         }
 
-        // Ensure atlas is available for sampling on GPU
-        self.atlas.ensure_gpu_with(device);
-        self.atlas_material.ensure_gpu_with(device);
-        self.upload_atlas_to_gpu_with(device, queue);
+        if self.atlas_dirty || self.atlas.gpu.is_none() || self.atlas_material.gpu.is_none() {
+            self.atlas.ensure_gpu_with(device);
+            self.atlas_material.ensure_gpu_with(device);
+            self.upload_atlas_to_gpu_with(device, queue);
+        }
 
         // --- Build 3D geometry (world space) and upload to SSBOs ---
         let mut v3: Vec<Vert3DPod> = Vec::new();
@@ -2467,7 +2478,7 @@ impl VM {
 
         // --- 2) Pad scene AABB slightly ---
         let diag = (bmax - bmin).magnitude().max(1e-6);
-        let pad = 0.15 * diag; // scene padding
+        let pad = 0.1 * diag; // scene padding
         bmin -= Vec3::broadcast(pad);
         bmax += Vec3::broadcast(pad);
 
