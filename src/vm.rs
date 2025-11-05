@@ -47,6 +47,7 @@ pub enum GeoId {
 pub struct Vert2DPod {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
+    pub uv_os: [f32; 4],
 }
 
 #[repr(C)]
@@ -1641,23 +1642,27 @@ impl VM {
                 }
                 let rect_opt = self.frame_rect(&poly.tile_id, self.animation_counter as u32);
                 let rect = if let Some(r) = rect_opt { r } else { continue };
-                let base = verts_flat.len() as u32;
                 let atlas_w = self.atlas.width as f32;
                 let atlas_h = self.atlas.height as f32;
+                let ofs_x = rect.x as f32 / atlas_w;
+                let ofs_y = rect.y as f32 / atlas_h;
+                let scl_x = rect.w as f32 / atlas_w;
+                let scl_y = rect.h as f32 / atlas_h;
+
+                let base = verts_flat.len() as u32;
 
                 for (i, v) in poly.vertices.iter().enumerate() {
                     // Apply local and global transforms
                     let local_p = poly.transform * Vec3::new(v[0], v[1], 1.0);
                     let world_p = self.transform2d * local_p;
 
-                    // Remap UV into atlas space
+                    // Keep object UV for GPU-side wrapping
                     let base_uv = poly.uvs[i];
-                    let u = (rect.x as f32 + base_uv[0] * rect.w as f32) / atlas_w;
-                    let v = (rect.y as f32 + base_uv[1] * rect.h as f32) / atlas_h;
 
                     verts_flat.push(Vert2DPod {
                         pos: [world_p.x, world_p.y],
-                        uv: [u, v],
+                        uv: [base_uv[0], base_uv[1]],
+                        uv_os: [ofs_x, ofs_y, scl_x, scl_y],
                     });
                 }
 
@@ -1697,6 +1702,11 @@ impl VM {
                         Some(r) => r,
                         None => continue,
                     };
+                    let ofs_x = rect.x as f32 / atlas_w;
+                    let ofs_y = rect.y as f32 / atlas_h;
+                    let scl_x = rect.w as f32 / atlas_w;
+                    let scl_y = rect.h as f32 / atlas_h;
+
                     // Precompute full-rect UVs (we'll map along segment length 0..1)
                     let v0v1v2v3 = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
 
@@ -1733,11 +1743,10 @@ impl VM {
                         // Atlas UVs mapped to full rect; U stretched along segment
                         let base = verts_flat.len() as u32;
                         for uv01 in v0v1v2v3 {
-                            let u = (rect.x as f32 + uv01[0] * rect.w as f32) / atlas_w;
-                            let v = (rect.y as f32 + uv01[1] * rect.h as f32) / atlas_h;
                             verts_flat.push(Vert2DPod {
                                 pos: [0.0, 0.0],
-                                uv: [u, v],
+                                uv: [uv01[0], uv01[1]],
+                                uv_os: [ofs_x, ofs_y, scl_x, scl_y],
                             });
                         }
                         // Overwrite positions with the quad
@@ -1863,10 +1872,11 @@ impl VM {
         use wgpu::util::DeviceExt;
         // Ensure non-zero-sized buffers for binding validation
         let vbytes: Vec<u8> = if verts_flat.is_empty() {
-            // one dummy Vert2DPod (pos=0, uv=0) -> 16 bytes
+            // one dummy Vert2DPod (pos=0, uv=0) -> 32 bytes
             bytemuck::bytes_of(&Vert2DPod {
                 pos: [0.0, 0.0],
                 uv: [0.0, 0.0],
+                uv_os: [0.0, 0.0, 0.0, 0.0],
             })
             .to_vec()
         } else {

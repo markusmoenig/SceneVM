@@ -20,7 +20,11 @@ struct U2D {
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(3) var atlas_smp: sampler;
-struct Vert { pos: vec2<f32>, uv: vec2<f32> };
+struct Vert {
+  pos: vec2<f32>,
+  uv: vec2<f32>,
+  uv_os: vec4<f32>,
+};
 struct Verts { data: array<Vert> };
 struct Indices { data: array<u32> };
 @group(0) @binding(4) var<storage, read> verts: Verts;
@@ -95,6 +99,16 @@ fn sv_min_edge_distance_px(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32
   return min(e0, min(e1, e2));
 }
 
+fn sv_tri_atlas_uv(i0: u32, i1: u32, i2: u32, w: vec3<f32>) -> vec2<f32> {
+  let uv0 = verts.data[i0].uv;
+  let uv1 = verts.data[i1].uv;
+  let uv2 = verts.data[i2].uv;
+  let uv_obj = uv0 * w.x + uv1 * w.y + uv2 * w.z;
+  let os = verts.data[i0].uv_os;
+  let uv_wrapped = fract(uv_obj);
+  return os.xy + uv_wrapped * os.zw;
+}
+
 fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   let a = verts.data[i0].pos;
   let b = verts.data[i1].pos;
@@ -103,7 +117,7 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   if (!bh.hit) { return ColorHit(false, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
 
   let w = bh.w;
-  let uv = verts.data[i0].uv * w.x + verts.data[i1].uv * w.y + verts.data[i2].uv * w.z;
+  let uv = sv_tri_atlas_uv(i0, i1, i2, w);
   var col = sv_sample(uv);
   if (col.a < 0.01) { return ColorHit(false, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
 
