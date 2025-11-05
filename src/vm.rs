@@ -2443,6 +2443,64 @@ impl VM {
         queue.submit(Some(encoder.finish()));
     }
 
+    /// Cast a CPU-side ray through a normalized screen UV and return the hit GeoId (if any).
+    /// Uses the same camera model and 3D transforms as the GPU compute path.
+    pub fn pick_geo_id_at_uv(
+        &self,
+        fb_w: u32,
+        fb_h: u32,
+        screen_uv: [f32; 2],
+    ) -> Option<(GeoId, Vec3<f32>)> {
+        if fb_w == 0 || fb_h == 0 {
+            return None;
+        }
+
+        let (ray_origin, ray_dir) = camera_ray_from_uv(&self.camera3d, fb_w, fb_h, screen_uv);
+        let mut best_t = f32::INFINITY;
+        let mut best_geo: Option<GeoId> = None;
+        let mut best_pos = Vec3::new(0.0, 0.0, 0.0);
+
+        let m = self.transform3d;
+
+        for chunk in self.chunks_map.values() {
+            for poly_list in chunk.polys3d_map.values() {
+                for poly in poly_list {
+                    if !poly.visible || poly.indices.is_empty() || poly.vertices.is_empty() {
+                        continue;
+                    }
+
+                    let mut poly_pos: Vec<[f32; 3]> = Vec::with_capacity(poly.vertices.len());
+                    for v in &poly.vertices {
+                        let p = m * Vec4::new(v[0], v[1], v[2], v[3]);
+                        let w = if p.w != 0.0 { p.w } else { 1.0 };
+                        poly_pos.push([p.x / w, p.y / w, p.z / w]);
+                    }
+
+                    for &(ia, ib, ic) in &poly.indices {
+                        let a = poly_pos.get(ia).copied();
+                        let b = poly_pos.get(ib).copied();
+                        let c = poly_pos.get(ic).copied();
+                        let (a, b, c) = match (a, b, c) {
+                            (Some(a), Some(b), Some(c)) => (a, b, c),
+                            _ => continue,
+                        };
+                        if let Some((t, _, _)) =
+                            ray_triangle_intersect(ray_origin, ray_dir, a, b, c)
+                        {
+                            if t > 1e-5 && t < best_t {
+                                best_t = t;
+                                best_geo = Some(poly.id);
+                                best_pos = ray_origin + ray_dir * t;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        best_geo.map(|id| (id, best_pos))
+    }
+
     fn build_scene_grid_from(
         &mut self,
         verts: &[Vert3DPod],
@@ -2781,6 +2839,75 @@ fn mat3_inverse_f32(m: &Mat3<f32>) -> Option<Mat3<f32>> {
     out[(1, 2)] = m21;
     out[(2, 2)] = m22;
     Some(out)
+}
+
+fn camera_ray_from_uv(
+    camera: &Camera3D,
+    fb_w: u32,
+    fb_h: u32,
+    screen_uv: [f32; 2],
+) -> (Vec3<f32>, Vec3<f32>) {
+    let u = screen_uv[0].clamp(0.0, 1.0);
+    let v = screen_uv[1].clamp(0.0, 1.0);
+    let ndc_x = u * 2.0 - 1.0;
+    let ndc_y = (v * 2.0 - 1.0) * -1.0;
+
+    let fb_w_f = fb_w.max(1) as f32;
+    let fb_h_f = fb_h.max(1) as f32;
+
+    match camera.kind {
+        CameraKind::OrthoIso => {
+            let aspect = fb_w_f / fb_h_f;
+            let half_w = camera.ortho_half_h * aspect;
+            let origin = camera.pos
+                + camera.right * (ndc_x * half_w)
+                + camera.up * (ndc_y * camera.ortho_half_h);
+            (origin, camera.forward.normalized())
+        }
+        CameraKind::OrbitPersp | CameraKind::FirstPersonPersp => {
+            let tan_half = (camera.vfov_deg.to_radians() * 0.5).tan();
+            let aspect = fb_w_f / fb_h_f;
+            let dx = ndc_x * aspect * tan_half;
+            let dy = ndc_y * tan_half;
+            let dir = (camera.forward + camera.right * dx + camera.up * dy).normalized();
+            (camera.pos, dir)
+        }
+    }
+}
+
+fn ray_triangle_intersect(
+    ray_origin: Vec3<f32>,
+    ray_dir: Vec3<f32>,
+    a: [f32; 3],
+    b: [f32; 3],
+    c: [f32; 3],
+) -> Option<(f32, f32, f32)> {
+    let a = Vec3::new(a[0], a[1], a[2]);
+    let b = Vec3::new(b[0], b[1], b[2]);
+    let c = Vec3::new(c[0], c[1], c[2]);
+    let e1 = b - a;
+    let e2 = c - a;
+    let p = ray_dir.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-8 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let t_vec = ray_origin - a;
+    let u = t_vec.dot(p) * inv_det;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = t_vec.cross(e1);
+    let v = ray_dir.dot(q) * inv_det;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = e2.dot(q) * inv_det;
+    if t <= 0.0 {
+        return None;
+    }
+    Some((t, u, v))
 }
 
 /// Hash for light flickering
