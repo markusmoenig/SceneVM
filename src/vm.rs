@@ -469,12 +469,273 @@ pub struct VM {
     pub scene_grid_cells: u32,
     pub scene_accel: SceneAccel,
     pub accel_dirty: bool,
+    cached_v3: Vec<Vert3DPod>,
+    cached_i3: Vec<u32>,
+    geometry2d_dirty: bool,
+    cached_v2: Vec<Vert2DPod>,
+    cached_i2: Vec<u32>,
+    cached_tile_offsets: Vec<u32>,
+    cached_tile_counts: Vec<u32>,
+    cached_tile_tris: Vec<u32>,
+    cached_fb_size_2d: (u32, u32),
 
     // Camera
     pub camera3d: Camera3D,
 }
 
 impl VM {
+    #[inline]
+    fn mark_2d_dirty(&mut self) {
+        self.geometry2d_dirty = true;
+    }
+
+    fn build_2d_batches(
+        &self,
+        fb_w: u32,
+        fb_h: u32,
+    ) -> (Vec<Vert2DPod>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+        use vek::Vec3;
+
+        let mut verts_flat: Vec<Vert2DPod> = Vec::new();
+        let mut indices_flat: Vec<u32> = Vec::new();
+
+        #[derive(Clone, Copy)]
+        struct TriMeta {
+            layer: i32,
+            prio: i32,
+            ord: u32,
+        }
+        let mut tri_meta: Vec<TriMeta> = Vec::new();
+        let mut tri_ord: u32 = 0;
+
+        for (_cid, ch) in &self.chunks_map {
+            let prio = ch.priority;
+            for poly in ch.polys_map.values() {
+                if !poly.visible {
+                    continue;
+                }
+                let rect_opt = self.frame_rect(&poly.tile_id, self.animation_counter as u32);
+                let rect = if let Some(r) = rect_opt { r } else { continue };
+                let atlas_w = self.atlas.width as f32;
+                let atlas_h = self.atlas.height as f32;
+                let ofs_x = rect.x as f32 / atlas_w;
+                let ofs_y = rect.y as f32 / atlas_h;
+                let scl_x = rect.w as f32 / atlas_w;
+                let scl_y = rect.h as f32 / atlas_h;
+
+                let base = verts_flat.len() as u32;
+
+                for (i, v) in poly.vertices.iter().enumerate() {
+                    let local_p = poly.transform * Vec3::new(v[0], v[1], 1.0);
+                    let world_p = self.transform2d * local_p;
+
+                    let base_uv = poly.uvs[i];
+
+                    verts_flat.push(Vert2DPod {
+                        pos: [world_p.x, world_p.y],
+                        uv: [base_uv[0], base_uv[1]],
+                        uv_os: [ofs_x, ofs_y, scl_x, scl_y],
+                    });
+                }
+
+                for &(a, b, c) in &poly.indices {
+                    indices_flat.extend_from_slice(&[
+                        base + a as u32,
+                        base + b as u32,
+                        base + c as u32,
+                    ]);
+                    tri_meta.push(TriMeta {
+                        layer: poly.layer,
+                        prio,
+                        ord: tri_ord,
+                    });
+                    tri_ord = tri_ord.wrapping_add(1);
+                }
+            }
+        }
+
+        // Screen-space line strips rendered as quads
+        {
+            let atlas_w = self.atlas.width as f32;
+            let atlas_h = self.atlas.height as f32;
+
+            for (_cid, ch) in &self.chunks_map {
+                for ls in ch.lines2d_px.values() {
+                    if !ls.visible || ls.points.len() < 2 {
+                        continue;
+                    }
+                    let rect = match self.frame_rect(&ls.tile_id, self.animation_counter as u32) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let ofs_x = rect.x as f32 / atlas_w;
+                    let ofs_y = rect.y as f32 / atlas_h;
+                    let scl_x = rect.w as f32 / atlas_w;
+                    let scl_y = rect.h as f32 / atlas_h;
+                    let mut pts_scr: Vec<[f32; 2]> = Vec::with_capacity(ls.points.len());
+                    for p in &ls.points {
+                        let local = Vec3::new(p[0], p[1], 1.0);
+                        let world = self.transform2d * local;
+                        pts_scr.push([world.x, world.y]);
+                    }
+
+                    let half = 0.5 * ls.width_px.max(0.0);
+                    for seg in 0..(pts_scr.len().saturating_sub(1)) {
+                        let p0 = pts_scr[seg];
+                        let p1 = pts_scr[seg + 1];
+                        let dx = p1[0] - p0[0];
+                        let dy = p1[1] - p0[1];
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len < 1e-6 {
+                            continue;
+                        }
+                        let nx = -dy / len;
+                        let ny = dx / len;
+                        let ox = nx * half;
+                        let oy = ny * half;
+
+                        let q0 = [p0[0] - ox, p0[1] - oy];
+                        let q1 = [p0[0] + ox, p0[1] + oy];
+                        let q2 = [p1[0] + ox, p1[1] + oy];
+                        let q3 = [p1[0] - ox, p1[1] - oy];
+
+                        let base = verts_flat.len() as u32;
+                        let v0v1v2v3 = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+                        for uv01 in v0v1v2v3 {
+                            verts_flat.push(Vert2DPod {
+                                pos: [0.0, 0.0],
+                                uv: [uv01[0], uv01[1]],
+                                uv_os: [ofs_x, ofs_y, scl_x, scl_y],
+                            });
+                        }
+                        let n = verts_flat.len();
+                        verts_flat[n - 4].pos = q0;
+                        verts_flat[n - 3].pos = q1;
+                        verts_flat[n - 2].pos = q2;
+                        verts_flat[n - 1].pos = q3;
+
+                        indices_flat.extend_from_slice(&[
+                            base + 0,
+                            base + 1,
+                            base + 2,
+                            base + 0,
+                            base + 2,
+                            base + 3,
+                        ]);
+
+                        tri_meta.push(TriMeta {
+                            layer: ls.layer,
+                            prio: 0,
+                            ord: tri_ord,
+                        });
+                        tri_ord = tri_ord.wrapping_add(1);
+                        tri_meta.push(TriMeta {
+                            layer: ls.layer,
+                            prio: 0,
+                            ord: tri_ord,
+                        });
+                        tri_ord = tri_ord.wrapping_add(1);
+                    }
+                }
+            }
+        }
+
+        let tiles_x = ((fb_w + 7) / 8).max(1);
+        let tiles_y = ((fb_h + 7) / 8).max(1);
+        let tiles_n = (tiles_x * tiles_y) as usize;
+
+        #[derive(Clone, Copy)]
+        struct TriRef {
+            tri: u32,
+            layer: i32,
+            prio: i32,
+            ord: u32,
+        }
+        let mut bins: Vec<Vec<TriRef>> = vec![Vec::new(); tiles_n];
+
+        let tri_count = (indices_flat.len() / 3) as u32;
+        for t in 0..tri_count {
+            let i0 = indices_flat[(3 * t as usize) + 0] as usize;
+            let i1 = indices_flat[(3 * t as usize) + 1] as usize;
+            let i2 = indices_flat[(3 * t as usize) + 2] as usize;
+            let a = verts_flat[i0].pos;
+            let b = verts_flat[i1].pos;
+            let c = verts_flat[i2].pos;
+
+            let minx = f32::min(a[0], f32::min(b[0], c[0])).floor().max(0.0) as i32;
+            let maxx = f32::max(a[0], f32::max(b[0], c[0])).ceil().min(fb_w as f32) as i32;
+            let miny = f32::min(a[1], f32::min(b[1], c[1])).floor().max(0.0) as i32;
+            let maxy = f32::max(a[1], f32::max(b[1], c[1])).ceil().min(fb_h as f32) as i32;
+            if minx >= maxx || miny >= maxy {
+                continue;
+            }
+
+            let tx0 = (minx.max(0) as u32) / 8;
+            let ty0 = (miny.max(0) as u32) / 8;
+            let tx1 = ((maxx.max(0) as u32).saturating_sub(1)) / 8;
+            let ty1 = ((maxy.max(0) as u32).saturating_sub(1)) / 8;
+
+            for ty in ty0..=ty1 {
+                for tx in tx0..=tx1 {
+                    let idx = (ty * tiles_x + tx) as usize;
+                    let meta = tri_meta[t as usize];
+                    bins[idx].push(TriRef {
+                        tri: t as u32,
+                        layer: meta.layer,
+                        prio: meta.prio,
+                        ord: meta.ord,
+                    });
+                }
+            }
+        }
+
+        let mut tile_offsets: Vec<u32> = Vec::with_capacity(tiles_n);
+        let mut tile_counts: Vec<u32> = Vec::with_capacity(tiles_n);
+        let mut tile_tris: Vec<u32> = Vec::new();
+        let mut running: u32 = 0;
+        for v in &mut bins {
+            tile_offsets.push(running);
+            if !v.is_empty() {
+                v.sort_by(|a, b| {
+                    b.layer
+                        .cmp(&a.layer)
+                        .then_with(|| b.prio.cmp(&a.prio))
+                        .then_with(|| b.ord.cmp(&a.ord))
+                });
+                for r in v.iter() {
+                    tile_tris.push(r.tri);
+                }
+            }
+            let c = v.len() as u32;
+            tile_counts.push(c);
+            running += c;
+        }
+
+        if tile_offsets.is_empty() {
+            tile_offsets.push(0);
+        }
+        if tile_counts.is_empty() {
+            tile_counts.push(0);
+        }
+        if tile_tris.is_empty() {
+            tile_tris.push(0);
+        }
+
+        (
+            verts_flat,
+            indices_flat,
+            tile_offsets,
+            tile_counts,
+            tile_tris,
+        )
+    }
+
+    #[inline]
+    fn mark_all_geometry_dirty(&mut self) {
+        self.geometry2d_dirty = true;
+        self.accel_dirty = true;
+    }
+
     /// Create a VM with a fixed-size atlas (atlas_w x atlas_h).
     pub fn new(atlas_w: u32, atlas_h: u32) -> Self {
         let mut source2d = String::new();
@@ -522,6 +783,15 @@ impl VM {
             scene_accel: SceneAccel::default(),
             accel_dirty: true,
             scene_grid_cells: 5000,
+            cached_v3: Vec::new(),
+            cached_i3: Vec::new(),
+            geometry2d_dirty: true,
+            cached_v2: Vec::new(),
+            cached_i2: Vec::new(),
+            cached_tile_offsets: Vec::new(),
+            cached_tile_counts: Vec::new(),
+            cached_tile_tris: Vec::new(),
+            cached_fb_size_2d: (0, 0),
             camera3d: Camera3D::default(),
         }
     }
@@ -546,16 +816,25 @@ impl VM {
     pub fn execute(&mut self, atom: Atom) {
         match atom {
             Atom::SetGeoVisible { id, visible } => {
+                let mut dirty_2d = false;
+                let mut dirty_3d = false;
                 for ch in self.chunks_map.values_mut() {
                     if let Some(p) = ch.polys_map.get_mut(&id) {
                         p.visible = visible;
+                        dirty_2d = true;
                     }
                     if let Some(p3_vec) = ch.polys3d_map.get_mut(&id) {
                         for p3 in p3_vec.iter_mut() {
                             p3.visible = visible;
                         }
-                        self.accel_dirty = true;
+                        dirty_3d = true;
                     }
+                }
+                if dirty_2d {
+                    self.mark_2d_dirty();
+                }
+                if dirty_3d {
+                    self.accel_dirty = true;
                 }
             }
             Atom::AddTile {
@@ -617,6 +896,7 @@ impl VM {
                     self.tiles_order.push(id);
                 }
                 self.atlas_dirty = true;
+                self.mark_all_geometry_dirty();
             }
             Atom::AddSolid { id, color } => {
                 // Create a 1x1 tile with a single frame of the given color
@@ -636,6 +916,7 @@ impl VM {
                     self.tiles_order.push(id);
                 }
                 self.atlas_dirty = true;
+                self.mark_all_geometry_dirty();
             }
             Atom::SetTileMaterialFrames { id, frames } => {
                 if let Some(tile) = self.tiles_map.get_mut(&id) {
@@ -661,11 +942,13 @@ impl VM {
                     }
                     tile.material_frames = mats;
                     self.atlas_dirty = true;
+                    self.mark_all_geometry_dirty();
                 }
             }
             Atom::BuildAtlas => {
                 self.build_atlas();
                 self.atlas_dirty = true;
+                self.mark_all_geometry_dirty();
             }
             Atom::AddPoly { poly } => {
                 let chunk_id = match self.current_chunk {
@@ -678,6 +961,7 @@ impl VM {
                     }
                 };
                 self.chunks_map.entry(chunk_id).or_default().add(poly);
+                self.mark_2d_dirty();
             }
             Atom::AddPoly3D { poly } => {
                 let chunk_id = match self.current_chunk {
@@ -715,6 +999,7 @@ impl VM {
                     .or_default()
                     .add_line_strip_2d(id, tile_id, points, width, self.current_layer);
                 self.accel_dirty = true;
+                self.mark_2d_dirty();
             }
             Atom::AddLineStrip2Dpx {
                 id,
@@ -737,22 +1022,19 @@ impl VM {
                 self.chunks_map
                     .entry(chunk_id)
                     .or_default()
-                    .add_line_strip_2d_px(
-                        id,
-                        tile_id,
-                        points,
-                        width_px,
-                        self.current_layer,
-                    );
+                    .add_line_strip_2d_px(id, tile_id, points, width_px, self.current_layer);
+                self.mark_2d_dirty();
             }
             Atom::NewChunk { id } => {
                 self.chunks_map.entry(id).or_insert_with(Chunk::default);
                 self.accel_dirty = true;
+                self.mark_2d_dirty();
             }
             Atom::AddChunk { id, chunk } => {
                 // Insert or replace the chunk as-is; caller controls current_chunk separately
                 self.chunks_map.insert(id, chunk);
                 self.accel_dirty = true;
+                self.mark_2d_dirty();
             }
             Atom::RemoveChunk { id } => {
                 let was_current = self.current_chunk == Some(id);
@@ -761,6 +1043,7 @@ impl VM {
                     self.current_chunk = None;
                 }
                 self.accel_dirty = true;
+                self.mark_2d_dirty();
             }
             Atom::RemoveChunkAt { origin } => {
                 if let Some((id, _)) = self.chunks_map.iter().find(|(_, ch)| ch.origin == origin) {
@@ -772,6 +1055,7 @@ impl VM {
                     }
                 }
                 self.accel_dirty = true;
+                self.mark_2d_dirty();
             }
             Atom::SetCurrentChunk { id } => {
                 if !self.chunks_map.contains_key(&id) {
@@ -781,6 +1065,7 @@ impl VM {
             }
             Atom::SetAnimationCounter(n) => {
                 self.animation_counter = n;
+                self.mark_all_geometry_dirty();
             }
             Atom::SetSource2D(src) => {
                 self.source2d = src;
@@ -796,6 +1081,7 @@ impl VM {
             }
             Atom::SetTransform2D(m) => {
                 self.transform2d = m;
+                self.mark_2d_dirty();
             }
             Atom::SetTransform3D(m) => {
                 self.transform3d = m;
@@ -818,6 +1104,7 @@ impl VM {
                 self.gp1 = Vec4::new(0.0, 0.0, 0.0, 0.0);
                 self.gp2 = Vec4::new(0.0, 0.0, 0.0, 0.0);
                 self.render_mode = RenderMode::Compute2D;
+                self.mark_all_geometry_dirty();
             }
             Atom::ClearTiles => {
                 // Clear tile-related state and atlas pixels; keep scene/chunks
@@ -826,12 +1113,14 @@ impl VM {
                 self.tiles_order.clear();
                 self.atlas.data.fill(0);
                 self.atlas_material.data.fill(0);
+                self.mark_all_geometry_dirty();
             }
             Atom::ClearGeometry => {
                 // Remove all chunks and unset current chunk; keep tiles/atlas/state
                 self.chunks_map.clear();
                 self.current_chunk = None;
                 self.accel_dirty = true;
+                self.mark_2d_dirty();
             }
             Atom::SetBackground(v) => {
                 self.background = v;
@@ -1606,310 +1895,108 @@ impl VM {
             self.upload_atlas_to_gpu_with(device, queue);
         }
 
-        // Build transformed 2D geometry (screen-space) and upload to SSBOs
-        let mut verts_flat: Vec<Vert2DPod> = Vec::new();
-        let mut indices_flat: Vec<u32> = Vec::new();
-
-        // For layer sorting
-        #[derive(Clone, Copy)]
-        struct TriMeta {
-            layer: i32,
-            prio: i32,
-            ord: u32,
-        }
-        let mut tri_meta: Vec<TriMeta> = Vec::new();
-        let mut tri_ord: u32 = 0;
-
-        for (_cid, ch) in &self.chunks_map {
-            let prio = ch.priority;
-            for poly in ch.polys_map.values() {
-                if !poly.visible {
-                    continue;
-                }
-                let rect_opt = self.frame_rect(&poly.tile_id, self.animation_counter as u32);
-                let rect = if let Some(r) = rect_opt { r } else { continue };
-                let atlas_w = self.atlas.width as f32;
-                let atlas_h = self.atlas.height as f32;
-                let ofs_x = rect.x as f32 / atlas_w;
-                let ofs_y = rect.y as f32 / atlas_h;
-                let scl_x = rect.w as f32 / atlas_w;
-                let scl_y = rect.h as f32 / atlas_h;
-
-                let base = verts_flat.len() as u32;
-
-                for (i, v) in poly.vertices.iter().enumerate() {
-                    // Apply local and global transforms
-                    let local_p = poly.transform * Vec3::new(v[0], v[1], 1.0);
-                    let world_p = self.transform2d * local_p;
-
-                    // Keep object UV for GPU-side wrapping
-                    let base_uv = poly.uvs[i];
-
-                    verts_flat.push(Vert2DPod {
-                        pos: [world_p.x, world_p.y],
-                        uv: [base_uv[0], base_uv[1]],
-                        uv_os: [ofs_x, ofs_y, scl_x, scl_y],
-                    });
-                }
-
-                for &(a, b, c) in &poly.indices {
-                    indices_flat.extend_from_slice(&[
-                        base + a as u32,
-                        base + b as u32,
-                        base + c as u32,
-                    ]);
-                    tri_meta.push(TriMeta {
-                        layer: poly.layer,
-                        prio,
-                        ord: tri_ord,
-                    });
-                    tri_ord = tri_ord.wrapping_add(1);
-                }
-            }
-        }
-
-        // --- Screen-space constant-width lines from chunks (built as quads per segment) ---
-        // Transform each point with the same 2D transform used for polys, then expand to a quad
-        // using a pixel-space normal so the width is independent of world scale.
-        {
-            let atlas_w = self.atlas.width as f32;
-            let atlas_h = self.atlas.height as f32;
-
-            for (_cid, ch) in &self.chunks_map {
-                if ch.lines2d_px.is_empty() {
-                    continue;
-                }
-                for ls in ch.lines2d_px.values() {
-                    if !ls.visible {
-                        continue;
-                    }
-                    // Resolve the atlas frame for this tile
-                    let rect = match self.frame_rect(&ls.tile_id, self.animation_counter as u32) {
-                        Some(r) => r,
-                        None => continue,
-                    };
-                    let ofs_x = rect.x as f32 / atlas_w;
-                    let ofs_y = rect.y as f32 / atlas_h;
-                    let scl_x = rect.w as f32 / atlas_w;
-                    let scl_y = rect.h as f32 / atlas_h;
-
-                    // Precompute full-rect UVs (we'll map along segment length 0..1)
-                    let v0v1v2v3 = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-
-                    // Transform points to screen space first (same as polys)
-                    let mut pts_scr: Vec<[f32; 2]> = Vec::with_capacity(ls.points.len());
-                    for p in &ls.points {
-                        let local = Vec3::new(p[0], p[1], 1.0);
-                        let world = self.transform2d * local;
-                        pts_scr.push([world.x, world.y]);
-                    }
-
-                    // Emit quads per segment
-                    let half = 0.5 * ls.width_px.max(0.0);
-                    for seg in 0..(pts_scr.len().saturating_sub(1)) {
-                        let p0 = pts_scr[seg];
-                        let p1 = pts_scr[seg + 1];
-                        let dx = p1[0] - p0[0];
-                        let dy = p1[1] - p0[1];
-                        let len = (dx * dx + dy * dy).sqrt();
-                        if len < 1e-6 {
-                            continue;
-                        }
-                        let nx = -dy / len;
-                        let ny = dx / len;
-                        let ox = nx * half;
-                        let oy = ny * half;
-
-                        // Screen-space quad corners (consistent winding)
-                        let q0 = [p0[0] - ox, p0[1] - oy]; // bottom-left
-                        let q1 = [p0[0] + ox, p0[1] + oy]; // top-left
-                        let q2 = [p1[0] + ox, p1[1] + oy]; // top-right
-                        let q3 = [p1[0] - ox, p1[1] - oy]; // bottom-right
-
-                        // Atlas UVs mapped to full rect; U stretched along segment
-                        let base = verts_flat.len() as u32;
-                        for uv01 in v0v1v2v3 {
-                            verts_flat.push(Vert2DPod {
-                                pos: [0.0, 0.0],
-                                uv: [uv01[0], uv01[1]],
-                                uv_os: [ofs_x, ofs_y, scl_x, scl_y],
-                            });
-                        }
-                        // Overwrite positions with the quad
-                        let n = verts_flat.len();
-                        verts_flat[n - 4].pos = q0;
-                        verts_flat[n - 3].pos = q1;
-                        verts_flat[n - 2].pos = q2;
-                        verts_flat[n - 1].pos = q3;
-
-                        indices_flat.extend_from_slice(&[
-                            base + 0,
-                            base + 1,
-                            base + 2,
-                            base + 0,
-                            base + 2,
-                            base + 3,
-                        ]);
-
-                        // Track sorting info: layer from line, prio=0, ord increases
-                        tri_meta.push(TriMeta {
-                            layer: ls.layer,
-                            prio: 0,
-                            ord: tri_ord,
-                        });
-                        tri_ord = tri_ord.wrapping_add(1);
-                        tri_meta.push(TriMeta {
-                            layer: ls.layer,
-                            prio: 0,
-                            ord: tri_ord,
-                        });
-                        tri_ord = tri_ord.wrapping_add(1);
-                    }
-                }
-            }
-        }
-
-        // --- CPU tiling & binning (8x8 tiles) ---
-        let tiles_x = ((fb_w + 7) / 8).max(1);
-        let tiles_y = ((fb_h + 7) / 8).max(1);
-        let tiles_n = (tiles_x * tiles_y) as usize;
-
-        #[derive(Clone, Copy)]
-        struct TriRef {
-            tri: u32,
-            layer: i32,
-            prio: i32,
-            ord: u32,
-        }
-        let mut bins: Vec<Vec<TriRef>> = vec![Vec::new(); tiles_n];
-
-        let tri_count = (indices_flat.len() / 3) as u32;
-        for t in 0..tri_count {
-            let i0 = indices_flat[(3 * t as usize) + 0] as usize;
-            let i1 = indices_flat[(3 * t as usize) + 1] as usize;
-            let i2 = indices_flat[(3 * t as usize) + 2] as usize;
-            let a = verts_flat[i0].pos;
-            let b = verts_flat[i1].pos;
-            let c = verts_flat[i2].pos;
-
-            // pixel-space bbox, clamped to framebuffer
-            let minx = f32::min(a[0], f32::min(b[0], c[0])).floor().max(0.0) as i32;
-            let maxx = f32::max(a[0], f32::max(b[0], c[0])).ceil().min(fb_w as f32) as i32;
-            let miny = f32::min(a[1], f32::min(b[1], c[1])).floor().max(0.0) as i32;
-            let maxy = f32::max(a[1], f32::max(b[1], c[1])).ceil().min(fb_h as f32) as i32;
-            if minx >= maxx || miny >= maxy {
-                continue;
-            }
-
-            let tx0 = (minx.max(0) as u32) / 8;
-            let ty0 = (miny.max(0) as u32) / 8;
-            let tx1 = ((maxx.max(0) as u32).saturating_sub(1)) / 8;
-            let ty1 = ((maxy.max(0) as u32).saturating_sub(1)) / 8;
-
-            for ty in ty0..=ty1 {
-                for tx in tx0..=tx1 {
-                    let idx = (ty * tiles_x + tx) as usize;
-                    let meta = tri_meta[t as usize];
-                    bins[idx].push(TriRef {
-                        tri: t as u32,
-                        layer: meta.layer,
-                        prio: meta.prio,
-                        ord: meta.ord,
-                    });
-                }
-            }
-        }
-
-        // Flatten to offsets/counts/tris
-        let mut tile_offsets: Vec<u32> = Vec::with_capacity(tiles_n);
-        let mut tile_counts: Vec<u32> = Vec::with_capacity(tiles_n);
-        let mut tile_tris: Vec<u32> = Vec::new();
-        let mut running: u32 = 0;
-        for v in &mut bins {
-            tile_offsets.push(running);
-            if !v.is_empty() {
-                v.sort_by(|a, b| {
-                    b.layer
-                        .cmp(&a.layer)
-                        .then_with(|| b.prio.cmp(&a.prio))
-                        // Painter’s algorithm: later-added (higher ord) should be on top.
-                        .then_with(|| b.ord.cmp(&a.ord))
-                });
-                for r in v.iter() {
-                    tile_tris.push(r.tri);
-                }
-            }
-            let c = v.len() as u32;
-            tile_counts.push(c);
-            running += c;
-        }
-
-        // Ensure non-zero-sized buffers
-        if tile_offsets.is_empty() {
-            tile_offsets.push(0);
-        }
-        if tile_counts.is_empty() {
-            tile_counts.push(0);
-        }
-        if tile_tris.is_empty() {
-            tile_tris.push(0);
+        let fb_dims = (fb_w, fb_h);
+        let mut geometry_changed = false;
+        if self.geometry2d_dirty || self.cached_v2.is_empty() || self.cached_fb_size_2d != fb_dims {
+            let (verts_flat, indices_flat, tile_offsets, tile_counts, tile_tris) =
+                self.build_2d_batches(fb_w, fb_h);
+            self.cached_v2 = verts_flat;
+            self.cached_i2 = indices_flat;
+            self.cached_tile_offsets = tile_offsets;
+            self.cached_tile_counts = tile_counts;
+            self.cached_tile_tris = tile_tris;
+            self.cached_fb_size_2d = fb_dims;
+            self.geometry2d_dirty = false;
+            geometry_changed = true;
         }
 
         use wgpu::util::DeviceExt;
-        // Ensure non-zero-sized buffers for binding validation
-        let vbytes: Vec<u8> = if verts_flat.is_empty() {
-            // one dummy Vert2DPod (pos=0, uv=0) -> 32 bytes
-            bytemuck::bytes_of(&Vert2DPod {
-                pos: [0.0, 0.0],
-                uv: [0.0, 0.0],
-                uv_os: [0.0, 0.0, 0.0, 0.0],
-            })
-            .to_vec()
-        } else {
-            bytemuck::cast_slice(&verts_flat).to_vec()
-        };
-        let ibytes: Vec<u8> = if indices_flat.is_empty() {
-            // one dummy index
-            (0u32).to_ne_bytes().to_vec()
-        } else {
-            bytemuck::cast_slice(&indices_flat).to_vec()
-        };
-        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-2d-verts-ssbo"),
-            contents: &vbytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-2d-indices-ssbo"),
-            contents: &ibytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let g = self.gpu.as_mut().unwrap();
-        g.v2d_ssbo = Some(vbuf);
-        g.i2d_ssbo = Some(ibuf);
+        {
+            let g = self.gpu.as_mut().unwrap();
 
-        // 1) Upload CPU vectors -> GPU buffers
-        let tile_offsets_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-2d-tile-offsets"),
-            contents: bytemuck::cast_slice(&tile_offsets),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let tile_counts_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-2d-tile-counts"),
-            contents: bytemuck::cast_slice(&tile_counts),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let tile_tris_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-2d-tile-tris"),
-            contents: bytemuck::cast_slice(&tile_tris),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+            if geometry_changed || g.v2d_ssbo.is_none() || g.i2d_ssbo.is_none() {
+                let mut _v_dummy: Option<Vec<u8>> = None;
+                let verts_bytes: &[u8] = if self.cached_v2.is_empty() {
+                    _v_dummy = Some(
+                        bytemuck::bytes_of(&Vert2DPod {
+                            pos: [0.0, 0.0],
+                            uv: [0.0, 0.0],
+                            uv_os: [0.0, 0.0, 0.0, 0.0],
+                        })
+                        .to_vec(),
+                    );
+                    _v_dummy.as_ref().unwrap()
+                } else {
+                    bytemuck::cast_slice(&self.cached_v2)
+                };
+                let mut _i_dummy: Option<Vec<u8>> = None;
+                let indices_bytes: &[u8] = if self.cached_i2.is_empty() {
+                    _i_dummy = Some(0u32.to_ne_bytes().to_vec());
+                    _i_dummy.as_ref().unwrap()
+                } else {
+                    bytemuck::cast_slice(&self.cached_i2)
+                };
 
-        // 2) Keep them on the GPU state
-        let g = self.gpu.as_mut().unwrap();
-        g.tile_offsets = Some(tile_offsets_buf);
-        g.tile_counts = Some(tile_counts_buf);
-        g.tile_tris = Some(tile_tris_buf);
+                g.v2d_ssbo = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-2d-verts-ssbo"),
+                        contents: verts_bytes,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    }),
+                );
+                g.i2d_ssbo = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-2d-indices-ssbo"),
+                        contents: indices_bytes,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    }),
+                );
+            }
+
+            if geometry_changed
+                || g.tile_offsets.is_none()
+                || g.tile_counts.is_none()
+                || g.tile_tris.is_none()
+            {
+                let offsets_slice: &[u32] = if self.cached_tile_offsets.is_empty() {
+                    &DUMMY_U32_1
+                } else {
+                    &self.cached_tile_offsets
+                };
+                let counts_slice: &[u32] = if self.cached_tile_counts.is_empty() {
+                    &DUMMY_U32_1
+                } else {
+                    &self.cached_tile_counts
+                };
+                let tris_slice: &[u32] = if self.cached_tile_tris.is_empty() {
+                    &DUMMY_U32_1
+                } else {
+                    &self.cached_tile_tris
+                };
+
+                g.tile_offsets = Some(device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-2d-tile-offsets"),
+                        contents: bytemuck::cast_slice(offsets_slice),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+                g.tile_counts = Some(device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-2d-tile-counts"),
+                        contents: bytemuck::cast_slice(counts_slice),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+                g.tile_tris = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-2d-tile-tris"),
+                        contents: bytemuck::cast_slice(tris_slice),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    }),
+                );
+            }
+        }
 
         // Lights
         let mut lights_flat: Vec<LightPod> = Vec::with_capacity(self.lights.len().max(1));
@@ -2144,124 +2231,139 @@ impl VM {
             self.upload_atlas_to_gpu_with(device, queue);
         }
 
-        // --- Build 3D geometry (world space) and upload to SSBOs ---
-        let mut v3: Vec<Vert3DPod> = Vec::new();
-        let mut i3: Vec<u32> = Vec::new();
+        // --- Build 3D geometry only when accel_dirty says so ---
+        let mut geometry_changed = false;
+        if self.accel_dirty || self.cached_v3.is_empty() {
+            let mut v3: Vec<Vert3DPod> = Vec::new();
+            let mut i3: Vec<u32> = Vec::new();
 
-        for (_cid, ch) in &self.chunks_map {
-            for poly_list in ch.polys3d_map.values() {
-                for poly in poly_list {
-                    if !poly.visible {
-                        continue;
-                    }
-
-                    let rect = match self.frame_rect(&poly.tile_id, self.animation_counter as u32) {
-                        Some(r) => r,
-                        None => continue,
-                    };
-
-                    let vcount = poly.vertices.len();
-                    let mut poly_pos: Vec<[f32; 3]> = Vec::with_capacity(vcount);
-                    let mut poly_nrm: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; vcount];
-
-                    for v in &poly.vertices {
-                        let p = m * Vec4::new(v[0], v[1], v[2], v[3]);
-                        let w = if p.w != 0.0 { p.w } else { 1.0 };
-                        poly_pos.push([p.x / w, p.y / w, p.z / w]);
-                    }
-
-                    for &(a, b, c) in &poly.indices {
-                        let pa = poly_pos[a];
-                        let pb = poly_pos[b];
-                        let pc = poly_pos[c];
-                        let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
-                        let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-                        let nx = e1[1] * e2[2] - e1[2] * e2[1];
-                        let ny = e1[2] * e2[0] - e1[0] * e2[2];
-                        let nz = e1[0] * e2[1] - e1[1] * e2[0];
-                        poly_nrm[a][0] += nx;
-                        poly_nrm[a][1] += ny;
-                        poly_nrm[a][2] += nz;
-                        poly_nrm[b][0] += nx;
-                        poly_nrm[b][1] += ny;
-                        poly_nrm[b][2] += nz;
-                        poly_nrm[c][0] += nx;
-                        poly_nrm[c][1] += ny;
-                        poly_nrm[c][2] += nz;
-                    }
-                    for n in &mut poly_nrm {
-                        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                        if len > 1e-12 {
-                            n[0] /= len;
-                            n[1] /= len;
-                            n[2] /= len;
+            for (_cid, ch) in &self.chunks_map {
+                for poly_list in ch.polys3d_map.values() {
+                    for poly in poly_list {
+                        if !poly.visible {
+                            continue;
                         }
-                    }
 
-                    let base = v3.len() as u32;
+                        let rect =
+                            match self.frame_rect(&poly.tile_id, self.animation_counter as u32) {
+                                Some(r) => r,
+                                None => continue,
+                            };
 
-                    let atlas_w = self.atlas.width as f32;
-                    let atlas_h = self.atlas.height as f32;
+                        let vcount = poly.vertices.len();
+                        let mut poly_pos: Vec<[f32; 3]> = Vec::with_capacity(vcount);
+                        let mut poly_nrm: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; vcount];
 
-                    let ofs_x = rect.x as f32 / atlas_w;
-                    let ofs_y = rect.y as f32 / atlas_h;
-                    let scl_x = rect.w as f32 / atlas_w;
-                    let scl_y = rect.h as f32 / atlas_h;
+                        for v in &poly.vertices {
+                            let p = m * Vec4::new(v[0], v[1], v[2], v[3]);
+                            let w = if p.w != 0.0 { p.w } else { 1.0 };
+                            poly_pos.push([p.x / w, p.y / w, p.z / w]);
+                        }
 
-                    for (i, p) in poly_pos.iter().enumerate() {
-                        let uv0 = poly.uvs[i]; // object-uv per vertex (e.g. 0..1 for a face)
-                        let n = poly_nrm[i];
-                        v3.push(Vert3DPod {
-                            pos: [p[0], p[1], p[2]],
-                            _pad_pos: 0.0,
-                            uv: [uv0[0], uv0[1]],
-                            _pad_uv: [0.0, 0.0],
-                            uv_os: [ofs_x, ofs_y, scl_x, scl_y],
-                            normal: [n[0], n[1], n[2]],
-                            _pad_n: 0.0,
-                        });
-                    }
+                        for &(a, b, c) in &poly.indices {
+                            let pa = poly_pos[a];
+                            let pb = poly_pos[b];
+                            let pc = poly_pos[c];
+                            let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+                            let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+                            let nx = e1[1] * e2[2] - e1[2] * e2[1];
+                            let ny = e1[2] * e2[0] - e1[0] * e2[2];
+                            let nz = e1[0] * e2[1] - e1[1] * e2[0];
+                            poly_nrm[a][0] += nx;
+                            poly_nrm[a][1] += ny;
+                            poly_nrm[a][2] += nz;
+                            poly_nrm[b][0] += nx;
+                            poly_nrm[b][1] += ny;
+                            poly_nrm[b][2] += nz;
+                            poly_nrm[c][0] += nx;
+                            poly_nrm[c][1] += ny;
+                            poly_nrm[c][2] += nz;
+                        }
+                        for n in &mut poly_nrm {
+                            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                            if len > 1e-12 {
+                                n[0] /= len;
+                                n[1] /= len;
+                                n[2] /= len;
+                            }
+                        }
 
-                    for &(a, b, c) in &poly.indices {
-                        i3.extend_from_slice(&[base + a as u32, base + b as u32, base + c as u32]);
+                        let base = v3.len() as u32;
+
+                        let atlas_w = self.atlas.width as f32;
+                        let atlas_h = self.atlas.height as f32;
+
+                        let ofs_x = rect.x as f32 / atlas_w;
+                        let ofs_y = rect.y as f32 / atlas_h;
+                        let scl_x = rect.w as f32 / atlas_w;
+                        let scl_y = rect.h as f32 / atlas_h;
+
+                        for (i, p) in poly_pos.iter().enumerate() {
+                            let uv0 = poly.uvs[i];
+                            let n = poly_nrm[i];
+                            v3.push(Vert3DPod {
+                                pos: [p[0], p[1], p[2]],
+                                _pad_pos: 0.0,
+                                uv: [uv0[0], uv0[1]],
+                                _pad_uv: [0.0, 0.0],
+                                uv_os: [ofs_x, ofs_y, scl_x, scl_y],
+                                normal: [n[0], n[1], n[2]],
+                                _pad_n: 0.0,
+                            });
+                        }
+
+                        for &(a, b, c) in &poly.indices {
+                            i3.extend_from_slice(&[
+                                base + a as u32,
+                                base + b as u32,
+                                base + c as u32,
+                            ]);
+                        }
                     }
                 }
             }
+
+            if v3.is_empty() {
+                v3.push(Vert3DPod {
+                    pos: [0.0; 3],
+                    _pad_pos: 0.0,
+                    uv: [0.0; 2],
+                    _pad_uv: [0.0, 0.0],
+                    uv_os: [0.0, 0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    _pad_n: 0.0,
+                });
+            }
+            if i3.is_empty() {
+                i3.push(0);
+            }
+
+            self.cached_v3 = v3;
+            self.cached_i3 = i3;
+            geometry_changed = true;
         }
 
-        if v3.is_empty() {
-            v3.push(Vert3DPod {
-                pos: [0.0; 3],
-                _pad_pos: 0.0,
-                uv: [0.0; 2],
-                _pad_uv: [0.0, 0.0],
-                uv_os: [0.0, 0.0, 0.0, 0.0],
-                normal: [0.0, 0.0, 1.0],
-                _pad_n: 0.0,
-            });
-        }
-        if i3.is_empty() {
-            i3.push(0);
-        }
-
+        let mut grid_changed = false;
         if self.accel_dirty {
-            // Build a grid from the actual uploaded geometry so slices won't be empty.
-            self.build_scene_grid_from(&v3, &i3, 0.0, self.scene_grid_cells); //200_000);
+            self.scene_accel.grid = Self::build_scene_grid_from(
+                &self.cached_v3,
+                &self.cached_i3,
+                0.0,
+                self.scene_grid_cells,
+            );
+            grid_changed = true;
             self.accel_dirty = false;
         }
 
-        // --- Upload scene-wide grid to GPU (always present) ---
         use wgpu::util::DeviceExt;
         let gr = &self.scene_accel.grid;
 
-        // Make sure header dims are never 0 to avoid div-by-zero in WGSL.
-        let hdr = Grid3DHeader {
+        let grid_hdr_data = Grid3DHeader {
             origin: [gr.origin.x, gr.origin.y, gr.origin.z, 0.0],
             cell_size: [gr.cell_size.x, gr.cell_size.y, gr.cell_size.z, 0.0],
             dims: [gr.dims[0].max(1), gr.dims[1].max(1), gr.dims[2].max(1), 0],
         };
 
-        // wgpu forbids binding zero-sized STORAGE buffers. Use non-empty dummy slices if empty.
         let cell_offsets_slice: &[u32] = if gr.cell_offsets.is_empty() {
             &DUMMY_U32_1
         } else {
@@ -2277,50 +2379,62 @@ impl VM {
         } else {
             &gr.cell_tris
         };
-        let grid_hdr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-grid3d-hdr"),
-            contents: bytemuck::bytes_of(&hdr),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let grid_offsets = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-grid3d-offsets"),
-            contents: bytemuck::cast_slice(cell_offsets_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let grid_counts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-grid3d-counts"),
-            contents: bytemuck::cast_slice(cell_counts_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let grid_tris = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-grid3d-tris"),
-            contents: bytemuck::cast_slice(cell_tris_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
 
         {
-            // short mutable borrow of self.gpu
             let g = self.gpu.as_mut().unwrap();
-            g.grid_hdr = Some(grid_hdr);
-            g.grid_offsets = Some(grid_offsets);
-            g.grid_counts = Some(grid_counts);
-            g.grid_tris = Some(grid_tris);
-        }
+            let need_grid_upload = grid_changed
+                || g.grid_hdr.is_none()
+                || g.grid_offsets.is_none()
+                || g.grid_counts.is_none()
+                || g.grid_tris.is_none();
+            if need_grid_upload {
+                g.grid_hdr = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-grid3d-hdr"),
+                        contents: bytemuck::bytes_of(&grid_hdr_data),
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    }),
+                );
+                g.grid_offsets = Some(device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-grid3d-offsets"),
+                        contents: bytemuck::cast_slice(cell_offsets_slice),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+                g.grid_counts = Some(device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-grid3d-counts"),
+                        contents: bytemuck::cast_slice(cell_counts_slice),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+                g.grid_tris = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-grid3d-tris"),
+                        contents: bytemuck::cast_slice(cell_tris_slice),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    }),
+                );
+            }
 
-        let v3_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-3d-verts-ssbo"),
-            contents: bytemuck::cast_slice(&v3),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let i3_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-3d-indices-ssbo"),
-            contents: bytemuck::cast_slice(&i3),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        {
-            let g = self.gpu.as_mut().unwrap();
-            g.v3d_ssbo = Some(v3_buf);
-            g.i3d_ssbo = Some(i3_buf);
+            let need_geom_upload = geometry_changed || g.v3d_ssbo.is_none() || g.i3d_ssbo.is_none();
+            if need_geom_upload {
+                g.v3d_ssbo = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-3d-verts-ssbo"),
+                        contents: bytemuck::cast_slice(&self.cached_v3),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    }),
+                );
+                g.i3d_ssbo = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-3d-indices-ssbo"),
+                        contents: bytemuck::cast_slice(&self.cached_i3),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    }),
+                );
+            }
         }
 
         // Avoid borrowing self immutably while we need &mut for bind group creation.
@@ -2465,12 +2579,11 @@ impl VM {
     }
 
     fn build_scene_grid_from(
-        &mut self,
         verts: &[Vert3DPod],
         indices: &[u32],
         cell_world: f32,
         target_cells: u32,
-    ) {
+    ) -> SceneGridAccel {
         use vek::Vec3;
 
         #[inline(always)]
@@ -2494,7 +2607,7 @@ impl VM {
         // Empty scene guard
         if !bmin.x.is_finite() {
             // Make a 1x1x1 dummy grid so bindings are valid
-            self.scene_accel.grid = SceneGridAccel {
+            return SceneGridAccel {
                 origin: Vec3::zero(),
                 cell_size: Vec3::broadcast(1.0),
                 dims: [1, 1, 1],
@@ -2502,7 +2615,6 @@ impl VM {
                 cell_counts: vec![0],
                 cell_tris: vec![0],
             };
-            return;
         }
 
         // --- 2) Pad scene AABB slightly ---
@@ -2639,7 +2751,7 @@ impl VM {
             }
 
             // --- 6) Store on the VM ---
-            self.scene_accel.grid = SceneGridAccel {
+            return SceneGridAccel {
                 origin: bmin,
                 cell_size,
                 dims,
@@ -2647,7 +2759,6 @@ impl VM {
                 cell_counts: if counts.is_empty() { vec![0] } else { counts },
                 cell_tris: if tris.is_empty() { vec![0] } else { tris },
             };
-            return;
         }
 
         #[cfg(not(feature = "parallel"))]
@@ -2718,14 +2829,14 @@ impl VM {
             }
 
             // --- 6) Store on the VM ---
-            self.scene_accel.grid = SceneGridAccel {
+            SceneGridAccel {
                 origin: bmin,
                 cell_size,
                 dims,
                 cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
                 cell_counts: if counts.is_empty() { vec![0] } else { counts },
                 cell_tris: if tris.is_empty() { vec![0] } else { tris },
-            };
+            }
         }
     }
 
