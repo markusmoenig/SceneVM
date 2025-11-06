@@ -52,7 +52,6 @@ impl Chunk {
         indices: Vec<(usize, usize, usize)>,
         layer: i32,
         visible: bool,
-        material_id: Option<Uuid>,
     ) {
         let poly = Poly2D {
             id,
@@ -63,7 +62,6 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible,
-            material_id,
         };
         self.polys_map.insert(id, poly);
     }
@@ -77,7 +75,6 @@ impl Chunk {
         points: Vec<[f32; 2]>,
         width: f32,
         layer: i32,
-        material_id: Option<Uuid>,
     ) {
         if points.len() < 2 {
             return;
@@ -128,7 +125,6 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible: true,
-            material_id,
         };
         self.polys_map.insert(id, poly);
     }
@@ -142,7 +138,6 @@ impl Chunk {
         points: Vec<[f32; 2]>,
         width_px: f32,
         layer: i32,
-        material_id: Option<Uuid>,
     ) {
         if points.len() < 2 {
             return;
@@ -154,7 +149,6 @@ impl Chunk {
             width_px,
             layer,
             visible: true,
-            material_id,
         };
         self.lines2d_px.insert(id, line);
     }
@@ -169,7 +163,6 @@ impl Chunk {
         size: f32,
         layer: i32,
         visible: bool,
-        material_id: Option<Uuid>,
     ) {
         if size <= 0.0 {
             return;
@@ -199,7 +192,6 @@ impl Chunk {
             transform: Mat3::identity(),
             layer,
             visible,
-            material_id,
         };
         self.polys_map.insert(id, poly);
     }
@@ -214,21 +206,88 @@ impl Chunk {
         indices: Vec<(usize, usize, usize)>,
         layer: i32,
         visible: bool,
-        material_id: Option<Uuid>,
     ) {
-        self.polys3d_map
-            .entry(id)
-            .or_default()
-            .push(Poly3D {
-                id,
-                tile_id,
-                vertices,
-                uvs,
-                indices,
-                layer,
-                visible,
-                material_id,
-            });
+        self.polys3d_map.entry(id).or_default().push(Poly3D {
+            id,
+            tile_id,
+            vertices,
+            uvs,
+            indices,
+            layer,
+            visible,
+        });
+    }
+
+    /// Add a camera-facing quad billboard centered at `center` with side length `size`.
+    pub fn add_billboard_3d(
+        &mut self,
+        id: GeoId,
+        tile_id: Uuid,
+        center: Vec3<f32>,
+        view_right: Vec3<f32>,
+        view_up: Vec3<f32>,
+        size: f32,
+        visible: bool,
+    ) {
+        if !size.is_finite() || size <= 0.0 {
+            return;
+        }
+
+        let right_len = view_right.magnitude();
+        let right = if !right_len.is_finite() || right_len < 1e-6 {
+            Vec3::unit_x()
+        } else {
+            view_right / right_len
+        };
+
+        let up_len = view_up.magnitude();
+        let mut up = if !up_len.is_finite() || up_len < 1e-6 {
+            Vec3::unit_y()
+        } else {
+            view_up / up_len
+        };
+
+        // Ensure the basis is not degenerate; re-orthogonalize `up` if needed.
+        if right.cross(up).magnitude() < 1e-6 {
+            let mut fallback = if right.y.abs() < 0.9 {
+                Vec3::unit_y()
+            } else {
+                Vec3::unit_z()
+            };
+            fallback = fallback - right * fallback.dot(right);
+            let fb_len = fallback.magnitude();
+            up = if !fb_len.is_finite() || fb_len < 1e-6 {
+                Vec3::unit_z()
+            } else {
+                fallback / fb_len
+            };
+        }
+
+        let h = 0.5 * size;
+        let p0 = center - right * h - up * h;
+        let p1 = center + right * h - up * h;
+        let p2 = center + right * h + up * h;
+        let p3 = center - right * h + up * h;
+
+        let vertices = vec![
+            [p0.x, p0.y, p0.z, 1.0],
+            [p1.x, p1.y, p1.z, 1.0],
+            [p2.x, p2.y, p2.z, 1.0],
+            [p3.x, p3.y, p3.z, 1.0],
+        ];
+        let uvs = vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+        let indices = vec![(0usize, 1usize, 2usize), (0usize, 2usize, 3usize)];
+
+        let poly = Poly3D {
+            id,
+            tile_id,
+            vertices,
+            uvs,
+            indices,
+            layer: 0,
+            visible,
+        };
+        self.polys3d_map.entry(id).or_default().push(poly);
     }
 
     /// Add a 3D line as a camera-independent quad based on thickness and a reference normal.
@@ -241,7 +300,6 @@ impl Chunk {
         thickness: f32,
         normal: Vec3<f32>,
         layer: i32,
-        material_id: Option<Uuid>,
     ) {
         // Reject degenerate segments
         let dir = b - a;
@@ -317,7 +375,6 @@ impl Chunk {
             indices,
             layer,
             visible: true,
-            material_id,
         };
         self.polys3d_map.entry(id).or_default().push(poly);
     }

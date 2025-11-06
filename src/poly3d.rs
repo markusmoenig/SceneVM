@@ -11,7 +11,6 @@ pub struct Poly3D {
     pub indices: Vec<(usize, usize, usize)>,
     pub layer: i32, // for future (not used by ray depth)
     pub visible: bool,
-    pub material_id: Option<Uuid>,
 }
 
 impl Poly3D {
@@ -32,7 +31,6 @@ impl Poly3D {
             indices,
             layer: 0,
             visible: true,
-            material_id: None,
         }
     }
 
@@ -100,7 +98,6 @@ impl Poly3D {
             indices,
             layer: 0,
             visible: true,
-            material_id: None,
         }
     }
 
@@ -113,12 +110,6 @@ impl Poly3D {
     #[inline]
     pub fn with_visible(mut self, visible: bool) -> Self {
         self.visible = visible;
-        self
-    }
-
-    #[inline]
-    pub fn with_material(mut self, material_id: Option<Uuid>) -> Self {
-        self.material_id = material_id;
         self
     }
 

@@ -127,7 +127,8 @@ fn sv_tri_atlas_uv_obj(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec2<f32>
   let scl = os.zw;
 
   // Repeat OBJECT uv, then scale into sub-rect and add offset
-  let uv_wrapped = fract(uv_obj);          // [0,1) repeat in object space
+  var uv_wrapped = fract(uv_obj);          // [0,1) repeat in object space
+  uv_wrapped.y = fract(1.0 - uv_wrapped.y); // flip Y so tiles aren't upside down
   let uv_atlas   = ofs + uv_wrapped * scl; // map into atlas sub-rect
   return uv_atlas;
 }
@@ -271,7 +272,7 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
   // DDA setup
   var st = dda_setup(p, rd, cell, tEnter);
   var tNext = st.tMax;  // next boundary crossings
-  
+
   let dims = grid_dims();
 
   var best_t = 1e30;
@@ -359,7 +360,7 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
 
   return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
 }
-// ===== end DDA =====  
+// ===== end DDA =====
 
 // TBN from triangle positions and OBJECT-space UVs (no atlas mapping here),
 // using geometric normal for stability.

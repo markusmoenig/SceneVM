@@ -111,7 +111,7 @@ pub struct SceneVM {
     #[cfg(target_arch = "wasm32")]
     init_in_flight: bool,
 
-    vm: VM,
+    pub vm: VM,
 }
 
 impl Default for SceneVM {

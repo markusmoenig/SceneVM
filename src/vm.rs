@@ -1,6 +1,5 @@
 // Non-empty dummy buffers for wgpu STORAGE bindings when a scene grid is empty.
 const DUMMY_U32_1: [u32; 1] = [0];
-const DUMMY_I32_1: [i32; 1] = [0];
 
 use crate::{Camera3D, CameraKind, Chunk, Light, LightType, Poly2D, Poly3D, Texture};
 use bytemuck::{Pod, Zeroable};
@@ -18,9 +17,6 @@ pub struct SceneGridAccel {
     pub cell_offsets: Vec<u32>, // len = nx*ny*nz
     pub cell_counts: Vec<u32>,  // len = nx*ny*nz
     pub cell_tris: Vec<u32>,    // flattened triangle indices
-    // Per-triangle metadata (kept flat and aligned with scene's 3D tri order)
-    pub tri_tile: Vec<u32>,  // tri -> tile index (for sampling)
-    pub tri_layer: Vec<i32>, // tri -> layer (optional ordering/debug)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -112,7 +108,6 @@ pub enum Atom {
         tile_id: Uuid,
         points: Vec<[f32; 2]>,
         width: f32,
-        material_id: Option<Uuid>,
     },
     /// Add a 2D line strip rendered in screen space with a constant pixel width.
     /// Points are in world coordinates; width is in pixels.
@@ -121,7 +116,6 @@ pub enum Atom {
         tile_id: Uuid,
         points: Vec<[f32; 2]>,
         width_px: f32,
-        material_id: Option<Uuid>,
     },
     /// Create an empty chunk (no switch)
     NewChunk {
@@ -230,7 +224,6 @@ pub struct LineStrip2D {
     pub width_px: f32,         // line width in pixels (constant regardless of world scale)
     pub layer: i32,
     pub visible: bool,
-    pub material_id: Option<uuid::Uuid>,
 }
 
 // GPU rendering resources managed directly by VM
@@ -269,8 +262,6 @@ pub struct VMGpu {
     pub grid_offsets: Option<wgpu::Buffer>,
     pub grid_counts: Option<wgpu::Buffer>,
     pub grid_tris: Option<wgpu::Buffer>,
-    pub tri_tile: Option<wgpu::Buffer>,
-    pub tri_layer: Option<wgpu::Buffer>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -706,7 +697,6 @@ impl VM {
                 tile_id,
                 points,
                 width,
-                material_id,
             } => {
                 if points.len() < 2 {
                     return;
@@ -723,7 +713,7 @@ impl VM {
                 self.chunks_map
                     .entry(chunk_id)
                     .or_default()
-                    .add_line_strip_2d(id, tile_id, points, width, self.current_layer, material_id);
+                    .add_line_strip_2d(id, tile_id, points, width, self.current_layer);
                 self.accel_dirty = true;
             }
             Atom::AddLineStrip2Dpx {
@@ -731,7 +721,6 @@ impl VM {
                 tile_id,
                 points,
                 width_px,
-                material_id,
             } => {
                 if points.len() < 2 || width_px <= 0.0 {
                     return;
@@ -754,7 +743,6 @@ impl VM {
                         points,
                         width_px,
                         self.current_layer,
-                        material_id,
                     );
             }
             Atom::NewChunk { id } => {
@@ -1040,8 +1028,6 @@ impl VM {
             grid_offsets: None,
             grid_counts: None,
             grid_tris: None,
-            tri_tile: None,
-            tri_layer: None,
         });
     }
 
@@ -2291,17 +2277,6 @@ impl VM {
         } else {
             &gr.cell_tris
         };
-        let tri_tile_slice: &[u32] = if gr.tri_tile.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &gr.tri_tile
-        };
-        let tri_layer_slice: &[i32] = if gr.tri_layer.is_empty() {
-            &DUMMY_I32_1
-        } else {
-            &gr.tri_layer
-        };
-
         let grid_hdr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vm-grid3d-hdr"),
             contents: bytemuck::bytes_of(&hdr),
@@ -2322,16 +2297,6 @@ impl VM {
             contents: bytemuck::cast_slice(cell_tris_slice),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-        let tri_tile = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-tri-tile"),
-            contents: bytemuck::cast_slice(tri_tile_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        let tri_layer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-tri-layer"),
-            contents: bytemuck::cast_slice(tri_layer_slice),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
 
         {
             // short mutable borrow of self.gpu
@@ -2340,8 +2305,6 @@ impl VM {
             g.grid_offsets = Some(grid_offsets);
             g.grid_counts = Some(grid_counts);
             g.grid_tris = Some(grid_tris);
-            g.tri_tile = Some(tri_tile);
-            g.tri_layer = Some(tri_layer);
         }
 
         let v3_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2538,8 +2501,6 @@ impl VM {
                 cell_offsets: vec![0],
                 cell_counts: vec![0],
                 cell_tris: vec![0],
-                tri_tile: vec![0],
-                tri_layer: vec![0],
             };
             return;
         }
@@ -2677,11 +2638,7 @@ impl VM {
                 tris.extend_from_slice(&cell_tris);
             }
 
-            // --- 6) Per-triangle metadata (optional; keep aligned length) ---
-            let tri_tile = vec![0u32; tri_count.max(1)];
-            let tri_layer = vec![0i32; tri_count.max(1)];
-
-            // --- 7) Store on the VM ---
+            // --- 6) Store on the VM ---
             self.scene_accel.grid = SceneGridAccel {
                 origin: bmin,
                 cell_size,
@@ -2689,8 +2646,6 @@ impl VM {
                 cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
                 cell_counts: if counts.is_empty() { vec![0] } else { counts },
                 cell_tris: if tris.is_empty() { vec![0] } else { tris },
-                tri_tile,
-                tri_layer,
             };
             return;
         }
@@ -2762,11 +2717,7 @@ impl VM {
                 tris.extend(v.iter().copied());
             }
 
-            // --- 6) Per-triangle metadata (optional; keep aligned length) ---
-            let tri_tile = vec![0u32; tri_count.max(1)];
-            let tri_layer = vec![0i32; tri_count.max(1)];
-
-            // --- 7) Store on the VM ---
+            // --- 6) Store on the VM ---
             self.scene_accel.grid = SceneGridAccel {
                 origin: bmin,
                 cell_size,
@@ -2774,8 +2725,6 @@ impl VM {
                 cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
                 cell_counts: if counts.is_empty() { vec![0] } else { counts },
                 cell_tris: if tris.is_empty() { vec![0] } else { tris },
-                tri_tile,
-                tri_layer,
             };
         }
     }

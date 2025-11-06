@@ -66,7 +66,6 @@ impl TheTrait for Circle {
             tile_id: tile_id,
             points: vec![[400.0, 100.0], [500.0, 120.0], [560.0, 200.0]],
             width: 1.5,
-            material_id: None,
         });
 
         self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));

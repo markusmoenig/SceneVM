@@ -3166,7 +3166,6 @@ dependencies = [
  "web-sys",
  "web-time",
  "winit",
- "winit_input_helper",
  "zeno",
 ]
 
@@ -4329,16 +4328,6 @@ dependencies = [
  "x11-dl",
  "x11rb",
  "xkbcommon-dl",
-]
-
-[[package]]
-name = "winit_input_helper"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e3dcabe3fca8a9a6286b9883057feaf3aeed0a159ea27e0611e49458afb7f75"
-dependencies = [
- "web-time",
- "winit",
 ]
 
 [[package]]

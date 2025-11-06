@@ -12,7 +12,6 @@ pub struct Poly2D {
     pub transform: Mat3<f32>,                // per-poly local transform
     pub layer: i32,                          // visual layer; higher draws on top
     pub visible: bool,                       // if false, skipped during draw
-    pub material_id: Option<Uuid>,
 }
 
 impl Default for Poly2D {
@@ -26,7 +25,6 @@ impl Default for Poly2D {
             transform: Mat3::identity(),
             layer: 0,
             visible: true,
-            material_id: None,
         }
     }
 }
@@ -48,7 +46,6 @@ impl Poly2D {
             transform: Mat3::identity(),
             layer: 0,
             visible: true,
-            material_id: None,
         }
     }
 
@@ -61,7 +58,6 @@ impl Poly2D {
         points: Vec<[f32; 2]>,
         width: f32,
         layer: i32,
-        material_id: Option<Uuid>,
     ) -> Self {
         let half = 0.5 * width;
         let mut vertices: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
@@ -105,7 +101,6 @@ impl Poly2D {
             transform: Mat3::identity(),
             layer,
             visible: true,
-            material_id,
         }
     }
 
@@ -118,7 +113,6 @@ impl Poly2D {
         size: f32,
         layer: i32,
         visible: bool,
-        material_id: Option<Uuid>,
     ) -> Self {
         let half = 0.5 * size;
         let (cx, cy) = (center[0], center[1]);
@@ -145,7 +139,6 @@ impl Poly2D {
             transform: Mat3::identity(),
             layer,
             visible,
-            material_id,
         }
     }
 
@@ -179,10 +172,6 @@ impl Poly2D {
     }
     pub fn with_visible(mut self, visible: bool) -> Self {
         self.visible = visible;
-        self
-    }
-    pub fn with_material_id(mut self, material_id: Option<Uuid>) -> Self {
-        self.material_id = material_id;
         self
     }
 }
