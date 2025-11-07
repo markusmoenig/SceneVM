@@ -25,6 +25,7 @@ pub struct SharedAtlasInner {
     pub atlas: Texture,
     pub atlas_material: Texture,
     pub atlas_dirty: bool,
+    pub layout_dirty: bool,
     pub atlas_map: FxHashMap<Uuid, Vec<AtlasEntry>>,
 }
 
@@ -42,6 +43,7 @@ impl SharedAtlas {
                 atlas: Texture::new(width, height),
                 atlas_material: Texture::new(width, height),
                 atlas_dirty: true,
+                layout_dirty: true,
                 atlas_map: FxHashMap::default(),
             })),
         }
@@ -74,6 +76,7 @@ impl SharedAtlas {
             guard.tiles_order.push(id);
         }
         guard.atlas_dirty = true;
+        guard.layout_dirty = true;
     }
 
     pub fn remove_tile(&self, id: &Uuid) {
@@ -82,6 +85,7 @@ impl SharedAtlas {
         guard.tiles_order.retain(|tid| tid != id);
         guard.atlas_map.remove(id);
         guard.atlas_dirty = true;
+        guard.layout_dirty = true;
     }
 
     pub fn clear(&self) {
@@ -92,6 +96,7 @@ impl SharedAtlas {
         guard.atlas_material.data.fill(0);
         guard.atlas_map.clear();
         guard.atlas_dirty = true;
+        guard.layout_dirty = true;
     }
 
     pub fn with_tile_mut<R>(&self, id: &Uuid, f: impl FnOnce(&mut Tile) -> R) -> Option<R> {
@@ -99,6 +104,7 @@ impl SharedAtlas {
         let tile = guard.tiles_map.get_mut(id)?;
         let out = f(tile);
         guard.atlas_dirty = true;
+        guard.layout_dirty = true;
         Some(out)
     }
 
@@ -158,9 +164,14 @@ impl SharedAtlas {
         rects.get(idx).cloned()
     }
 
-    pub fn ensure_built(&self) {
+    pub fn ensure_built(&self) -> bool {
         let mut guard = self.inner.lock().unwrap();
+        if !guard.layout_dirty {
+            return false;
+        }
         build_atlas_inner(&mut guard);
+        guard.layout_dirty = false;
+        true
     }
 
     pub fn tiles_map_len(&self) -> usize {

@@ -117,6 +117,7 @@ pub struct SceneVM {
     pub vm: VM,
     overlay_vms: Vec<VM>,
     active_vm_index: usize,
+    log_layer_activity: bool,
 }
 
 impl Default for SceneVM {
@@ -126,6 +127,15 @@ impl Default for SceneVM {
 }
 
 impl SceneVM {
+    fn refresh_layer_metadata(&mut self) {
+        self.vm.set_layer_index(0);
+        self.vm.set_activity_logging(self.log_layer_activity);
+        for (i, vm) in self.overlay_vms.iter_mut().enumerate() {
+            vm.set_layer_index(i + 1);
+            vm.set_activity_logging(self.log_layer_activity);
+        }
+    }
+
     fn total_vm_count(&self) -> usize {
         1 + self.overlay_vms.len()
     }
@@ -171,6 +181,7 @@ impl SceneVM {
         let mut vm = VM::new_with_shared_atlas(self.atlas.clone());
         vm.set_skip_surface_clear(true);
         self.overlay_vms.push(vm);
+        self.refresh_layer_metadata();
         self.total_vm_count() - 1
     }
 
@@ -187,6 +198,7 @@ impl SceneVM {
         if self.active_vm_index >= self.total_vm_count() {
             self.active_vm_index = self.total_vm_count().saturating_sub(1);
         }
+        self.refresh_layer_metadata();
         Some(removed)
     }
 
@@ -203,6 +215,22 @@ impl SceneVM {
     /// Index of the currently active VM used by `execute`.
     pub fn active_vm_index(&self) -> usize {
         self.active_vm_index
+    }
+
+    /// Enable or disable drawing for a VM layer. Disabled layers still receive commands.
+    pub fn set_layer_enabled(&mut self, index: usize, enabled: bool) -> bool {
+        if let Some(vm) = self.vm_mut_by_index(index) {
+            vm.set_enabled(enabled);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Toggle verbose per-layer logging for uploads/atlas/grid events.
+    pub fn set_layer_activity_logging(&mut self, enabled: bool) {
+        self.log_layer_activity = enabled;
+        self.refresh_layer_metadata();
     }
 
     /// Borrow the currently active VM immutably.
@@ -293,7 +321,7 @@ impl SceneVM {
         #[cfg(target_arch = "wasm32")]
         {
             let atlas = SharedAtlas::new(4096, 4096);
-            Self {
+            let mut this = Self {
                 size: (initial_width, initial_height),
                 gpu: None,
                 needs_gpu_init: true,
@@ -302,7 +330,10 @@ impl SceneVM {
                 vm: VM::new_with_shared_atlas(atlas.clone()),
                 overlay_vms: Vec::new(),
                 active_vm_index: 0,
-            }
+                log_layer_activity: false,
+            };
+            this.refresh_layer_metadata();
+            this
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -339,14 +370,17 @@ impl SceneVM {
             };
 
             let atlas = SharedAtlas::new(4096, 4096);
-            Self {
+            let mut this = Self {
                 size: (initial_width, initial_height),
                 gpu: Some(gpu),
                 atlas: atlas.clone(),
                 vm: VM::new_with_shared_atlas(atlas.clone()),
                 overlay_vms: Vec::new(),
                 active_vm_index: 0,
-            }
+                log_layer_activity: false,
+            };
+            this.refresh_layer_metadata();
+            this
         }
     }
 

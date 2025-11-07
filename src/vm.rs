@@ -460,12 +460,38 @@ pub struct VM {
 
     // Camera
     pub camera3d: Camera3D,
+
+    pub enabled: bool,
+    layer_index: usize,
+    activity_logging: bool,
 }
 
 impl VM {
     #[inline]
     fn mark_2d_dirty(&mut self) {
         self.geometry2d_dirty = true;
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_layer_index(&mut self, index: usize) {
+        self.layer_index = index;
+    }
+
+    pub fn set_activity_logging(&mut self, enabled: bool) {
+        self.activity_logging = enabled;
+    }
+
+    fn log_layer<S: AsRef<str>>(&self, msg: S) {
+        if self.activity_logging {
+            println!("[SceneVM][Layer {}] {}", self.layer_index, msg.as_ref());
+        }
     }
 
     fn build_2d_batches(
@@ -794,6 +820,9 @@ impl VM {
             cached_tile_tris: Vec::new(),
             cached_fb_size_2d: (0, 0),
             camera3d: Camera3D::default(),
+            enabled: true,
+            layer_index: 0,
+            activity_logging: false,
         }
     }
 
@@ -1039,8 +1068,10 @@ impl VM {
                 }
             }
             Atom::SetTransform2D(m) => {
-                self.transform2d = m;
-                self.mark_2d_dirty();
+                if self.transform2d != m {
+                    self.transform2d = m;
+                    self.mark_2d_dirty();
+                }
             }
             Atom::SetTransform3D(m) => {
                 self.transform3d = m;
@@ -1310,7 +1341,9 @@ impl VM {
 
     /// Ensure the shared atlas is packed.
     fn build_atlas(&self) {
-        self.shared_atlas.ensure_built();
+        if self.shared_atlas.ensure_built() {
+            self.log_layer("Built shared atlas layout");
+        }
     }
 
     /// Iterate polygons ready for drawing: always yields all polygons in all chunks (ignores current_chunk).
@@ -1749,6 +1782,7 @@ impl VM {
         }
 
         use wgpu::util::DeviceExt;
+        let mut uploaded_geometry = false;
         {
             let g = self.gpu.as_mut().unwrap();
 
@@ -1789,6 +1823,9 @@ impl VM {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     }),
                 );
+                if geometry_changed {
+                    uploaded_geometry = true;
+                }
             }
 
             if geometry_changed
@@ -1834,6 +1871,14 @@ impl VM {
                     }),
                 );
             }
+        }
+        if uploaded_geometry {
+            self.log_layer(format!(
+                "Uploaded {} 2D verts, {} indices (tiles: {})",
+                self.cached_v2.len(),
+                self.cached_i2.len(),
+                self.cached_tile_offsets.len()
+            ));
         }
 
         // Lights
@@ -2217,6 +2262,8 @@ impl VM {
             &gr.cell_tris
         };
 
+        let mut uploaded_grid = false;
+        let mut uploaded_geom = false;
         {
             let g = self.gpu.as_mut().unwrap();
             let need_grid_upload = grid_changed
@@ -2253,6 +2300,7 @@ impl VM {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     }),
                 );
+                uploaded_grid = grid_changed;
             }
 
             let need_geom_upload = geometry_changed || g.v3d_ssbo.is_none() || g.i3d_ssbo.is_none();
@@ -2271,7 +2319,27 @@ impl VM {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     }),
                 );
+                if geometry_changed {
+                    uploaded_geom = true;
+                }
             }
+        }
+        if uploaded_geom {
+            self.log_layer(format!(
+                "Uploaded {} 3D verts, {} indices",
+                self.cached_v3.len(),
+                self.cached_i3.len()
+            ));
+        }
+        if uploaded_grid {
+            let gr = &self.scene_accel.grid;
+            self.log_layer(format!(
+                "Rebuilt 3D grid accel dims {}x{}x{}, cells {}",
+                gr.dims[0],
+                gr.dims[1],
+                gr.dims[2],
+                gr.cell_counts.len()
+            ));
         }
 
         // Avoid borrowing self immutably while we need &mut for bind group creation.
@@ -2688,6 +2756,9 @@ impl VM {
         fb_w: u32,
         fb_h: u32,
     ) {
+        if !self.enabled {
+            return;
+        }
         match self.render_mode {
             RenderMode::Compute2D => self.compute_draw_2d_into(device, queue, surface, fb_w, fb_h),
             RenderMode::Compute3D => self.compute_draw_3d_into(device, queue, surface, fb_w, fb_h),

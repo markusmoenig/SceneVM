@@ -39,6 +39,7 @@ impl TheTrait for Circle {
         //     self.vm.execute(Atom::BuildAtlas);
         // }
 
+        // self.vm.set_layer_activity_logging(true);
         self.vm.execute(Atom::SetBackground(Vec4::zero()));
         self.vm.execute(Atom::AddSolid {
             id: tile_id,
@@ -103,7 +104,6 @@ impl TheTrait for Circle {
         // });
     }
 
-    /// Draw a circle in the middle of the window
     fn draw(&mut self, pixels: &mut [u8], ctx: &mut TheContext) {
         // Rotate a bit every frame to see the cube spinning (angles in radians per frame)
         let rot = Mat4::<f32>::rotation_y(0.02) * Mat4::<f32>::rotation_x(0.01);
