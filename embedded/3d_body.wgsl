@@ -1,5 +1,7 @@
 // 3D Body. Can be replaced via Atom::SetSource3D
 
+const VM_FLAG_SKIP_CLEAR: u32 = 1u;
+
 // --- Test Lambert shading (kept in BODY so headers stay generic) ---
 fn lambert_pointlights(P: vec3<f32>, N: vec3<f32>, base_col: vec3<f32>) -> vec3<f32> {
     var diffuse = vec3<f32>(0.0);
@@ -35,8 +37,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.x; let py = gid.y;
     if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
 
-    let bg = U.background;
-    sv_write(px, py, bg);
+    let skip_clear = (U.vm_flags & VM_FLAG_SKIP_CLEAR) != 0u;
+    if (!skip_clear) {
+        let bg = U.background;
+        sv_write(px, py, bg);
+    }
 
     // Build pixel uv and get ray from the header-provided camera function
     let cam_uv = vec2<f32>( (f32(px) + 0.5) / f32(U.fb_size.x),
@@ -64,8 +69,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             best_v = th.v;
             grid_used = true;
         }
-    }
-
+    } else
     // Brute-force fallback
     if (!hit_any) {
         let tri_len: u32 = arrayLength(&indices3d.data);
@@ -94,11 +98,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (!hit_any) {
-        // No hit in either path — show yellow in DEBUG_MODE 2 to signal grid miss
-        // if (DEBUG_MODE == 2u) {
-        //     debug_write(px, py, vec3<f32>(1.0, 1.0, 0.0));
-        // }
-        // return; // background already written
+        // No hit in either path. Base layer already wrote the background; overlays leave pixel unchanged.
+        return;
     }
 
     // Clamp the winning triangle id against current buffers (defensive)

@@ -1,3 +1,4 @@
+pub mod atlas;
 pub mod bbox2d;
 pub mod camera3d;
 pub mod chunk;
@@ -16,6 +17,7 @@ use rust_embed::RustEmbed;
 pub struct Embedded;
 
 pub use crate::{
+    atlas::{AtlasEntry, SharedAtlas},
     bbox2d::BBox2D,
     camera3d::{Camera3D, CameraKind},
     chunk::Chunk,
@@ -111,7 +113,10 @@ pub struct SceneVM {
     #[cfg(target_arch = "wasm32")]
     init_in_flight: bool,
 
+    atlas: SharedAtlas,
     pub vm: VM,
+    overlay_vms: Vec<VM>,
+    active_vm_index: usize,
 }
 
 impl Default for SceneVM {
@@ -121,16 +126,109 @@ impl Default for SceneVM {
 }
 
 impl SceneVM {
+    fn total_vm_count(&self) -> usize {
+        1 + self.overlay_vms.len()
+    }
+
+    fn vm_ref_by_index(&self, index: usize) -> Option<&VM> {
+        if index == 0 {
+            Some(&self.vm)
+        } else {
+            self.overlay_vms.get(index.saturating_sub(1))
+        }
+    }
+
+    fn vm_mut_by_index(&mut self, index: usize) -> Option<&mut VM> {
+        if index == 0 {
+            Some(&mut self.vm)
+        } else {
+            self.overlay_vms.get_mut(index.saturating_sub(1))
+        }
+    }
+
+    fn draw_all_vms(
+        base_vm: &mut VM,
+        overlays: &mut [VM],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: &mut Texture,
+        w: u32,
+        h: u32,
+    ) {
+        base_vm.draw_into(device, queue, surface, w, h);
+        for vm in overlays {
+            vm.draw_into(device, queue, surface, w, h);
+        }
+    }
+
+    /// Total number of VM layers (base + overlays).
+    pub fn vm_layer_count(&self) -> usize {
+        self.total_vm_count()
+    }
+
+    /// Append a new VM layer that will render on top of the existing ones. Returns its layer index.
+    pub fn add_vm_layer(&mut self) -> usize {
+        let mut vm = VM::new_with_shared_atlas(self.atlas.clone());
+        vm.set_skip_surface_clear(true);
+        self.overlay_vms.push(vm);
+        self.total_vm_count() - 1
+    }
+
+    /// Remove a VM layer by index (cannot remove the base layer at index 0).
+    pub fn remove_vm_layer(&mut self, index: usize) -> Option<VM> {
+        if index == 0 {
+            return None;
+        }
+        let idx = index - 1;
+        if idx >= self.overlay_vms.len() {
+            return None;
+        }
+        let removed = self.overlay_vms.remove(idx);
+        if self.active_vm_index >= self.total_vm_count() {
+            self.active_vm_index = self.total_vm_count().saturating_sub(1);
+        }
+        Some(removed)
+    }
+
+    /// Switch the VM layer targeted by `execute`. Returns `true` if the index existed.
+    pub fn set_active_vm(&mut self, index: usize) -> bool {
+        if index < self.total_vm_count() {
+            self.active_vm_index = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Index of the currently active VM used by `execute`.
+    pub fn active_vm_index(&self) -> usize {
+        self.active_vm_index
+    }
+
+    /// Borrow the currently active VM immutably.
+    pub fn active_vm(&self) -> &VM {
+        self.vm_ref_by_index(self.active_vm_index)
+            .expect("active VM index out of range")
+    }
+
+    /// Borrow the currently active VM mutably.
+    pub fn active_vm_mut(&mut self) -> &mut VM {
+        self.vm_mut_by_index(self.active_vm_index)
+            .expect("active VM index out of range")
+    }
+
     /// Prints statistics about 2D and 3D polygons currently loaded in all chunks.
     pub fn print_geometry_stats(&self) {
         let mut total_2d = 0usize;
         let mut total_3d = 0usize;
         let mut total_lines = 0usize;
 
-        for (_cid, ch) in &self.vm.chunks_map {
-            total_2d += ch.polys_map.len();
-            total_3d += ch.polys3d_map.values().map(|v| v.len()).sum::<usize>();
-            total_lines += ch.lines2d_px.len();
+        for vm in std::iter::once(&self.vm).chain(self.overlay_vms.iter()) {
+            for (_cid, ch) in &vm.chunks_map {
+                total_2d += ch.polys_map.len();
+                total_3d += ch.polys3d_map.values().map(|v| v.len()).sum::<usize>();
+                total_lines += ch.lines2d_px.len();
+            }
         }
 
         println!(
@@ -142,9 +240,18 @@ impl SceneVM {
         );
     }
 
-    /// Executes a single atom
+    /// Executes a single atom on the currently active VM layer.
     pub fn execute(&mut self, atom: Atom) {
-        self.vm.execute(atom);
+        let affects_atlas = SceneVM::atom_touches_atlas(&atom);
+        let active = self.active_vm_index;
+        if active == 0 {
+            self.vm.execute(atom);
+        } else if let Some(vm) = self.vm_mut_by_index(active) {
+            vm.execute(atom);
+        }
+        if affects_atlas {
+            self.for_each_vm_mut(|vm| vm.mark_all_geometry_dirty());
+        }
     }
 
     /// Is the GPU initialized and ready?
@@ -185,12 +292,16 @@ impl SceneVM {
     pub fn new(initial_width: u32, initial_height: u32) -> Self {
         #[cfg(target_arch = "wasm32")]
         {
+            let atlas = SharedAtlas::new(4096, 4096);
             Self {
                 size: (initial_width, initial_height),
                 gpu: None,
                 needs_gpu_init: true,
                 init_in_flight: false,
-                vm: VM::new(4096, 4096),
+                atlas: atlas.clone(),
+                vm: VM::new_with_shared_atlas(atlas.clone()),
+                overlay_vms: Vec::new(),
+                active_vm_index: 0,
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -227,10 +338,14 @@ impl SceneVM {
                 surface,
             };
 
+            let atlas = SharedAtlas::new(4096, 4096);
             Self {
                 size: (initial_width, initial_height),
                 gpu: Some(gpu),
-                vm: VM::new(4096, 4096),
+                atlas: atlas.clone(),
+                vm: VM::new_with_shared_atlas(atlas.clone()),
+                overlay_vms: Vec::new(),
+                active_vm_index: 0,
             }
         }
     }
@@ -327,7 +442,8 @@ impl SceneVM {
     #[cfg(not(target_arch = "wasm32"))]
     fn draw(&mut self, out_pixels: &mut [u8], out_w: u32, out_h: u32) {
         // GPU-only: do nothing if GPU is not ready (e.g., WASM before init)
-        let Some(gpu) = self.gpu.as_mut() else {
+        let (gpu_slot, base_vm, overlays) = (&mut self.gpu, &mut self.vm, &mut self.overlay_vms);
+        let Some(gpu) = gpu_slot.as_mut() else {
             return;
         };
 
@@ -344,9 +460,16 @@ impl SceneVM {
 
         let (w, h) = self.size;
 
-        // Delegate rendering to the VM (compute 2D/3D chosen by VM::render_mode)
-        self.vm
-            .draw_into(&gpu.device, &gpu.queue, &mut gpu.surface, w, h);
+        // Delegate rendering to all VM layers in order (each overlays the previous result)
+        SceneVM::draw_all_vms(
+            base_vm,
+            overlays,
+            &gpu.device,
+            &gpu.queue,
+            &mut gpu.surface,
+            w,
+            h,
+        );
 
         // Readback into the surface's CPU memory (blocking on native, non-blocking noop on wasm)
         let device = gpu.device.clone();
@@ -361,7 +484,8 @@ impl SceneVM {
     /// Cross-platform async render: same call on native & WASM.
     #[cfg(target_arch = "wasm32")]
     pub async fn render_frame_async(&mut self, out_pixels: &mut [u8], out_w: u32, out_h: u32) {
-        let Some(gpu) = self.gpu.as_mut() else {
+        let (gpu_slot, base_vm, overlays) = (&mut self.gpu, &mut self.vm, &mut self.overlay_vms);
+        let Some(gpu) = gpu_slot.as_mut() else {
             return;
         };
         let buffer_width = out_w;
@@ -375,8 +499,15 @@ impl SceneVM {
         }
 
         let (w, h) = self.size;
-        self.vm
-            .draw_into(&gpu.device, &gpu.queue, &mut gpu.surface, w, h);
+        SceneVM::draw_all_vms(
+            base_vm,
+            overlays,
+            &gpu.device,
+            &gpu.queue,
+            &mut gpu.surface,
+            w,
+            h,
+        );
 
         // Start readback and await readiness
         let device = gpu.device.clone();
@@ -432,7 +563,9 @@ impl SceneVM {
                 // Nothing to render until init finishes; return quietly.
                 return RenderResult::InitPending;
             }
-            let gpu = self.gpu.as_mut().unwrap();
+            let (gpu_slot, base_vm, overlays) =
+                (&mut self.gpu, &mut self.vm, &mut self.overlay_vms);
+            let gpu = gpu_slot.as_mut().unwrap();
 
             // Ensure surface size (bind group managed internally by VM)
             if self.size != (out_w, out_h) {
@@ -482,8 +615,15 @@ impl SceneVM {
             if !inflight {
                 // Delegate rendering to the VM (compute 2D/3D chosen by VM::render_mode)
                 let (w, h) = self.size;
-                self.vm
-                    .draw_into(&gpu.device, &gpu.queue, &mut gpu.surface, w, h);
+                SceneVM::draw_all_vms(
+                    base_vm,
+                    overlays,
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut gpu.surface,
+                    w,
+                    h,
+                );
 
                 // Start non-blocking readback into the surface texture (map_async sets the flag)
                 let device = gpu.device.clone();
@@ -550,4 +690,24 @@ async fn global_gpu_init_async() {
         queue,
     };
     GLOBAL_GPU_WASM.with(|c| *c.borrow_mut() = Some(gg));
+}
+impl SceneVM {
+    fn for_each_vm_mut(&mut self, mut f: impl FnMut(&mut VM)) {
+        f(&mut self.vm);
+        for vm in &mut self.overlay_vms {
+            f(vm);
+        }
+    }
+
+    fn atom_touches_atlas(atom: &Atom) -> bool {
+        matches!(
+            atom,
+            Atom::AddTile { .. }
+                | Atom::AddSolid { .. }
+                | Atom::SetTileMaterialFrames { .. }
+                | Atom::BuildAtlas
+                | Atom::Clear
+                | Atom::ClearTiles
+        )
+    }
 }

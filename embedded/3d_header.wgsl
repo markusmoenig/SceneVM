@@ -11,7 +11,8 @@ struct U3D {
   mat3d_c2: vec4<f32>,
   mat3d_c3: vec4<f32>,
   lights_count: u32,
-  _pad_lights: vec3<u32>,
+  vm_flags: u32,
+  _pad_lights: vec2<u32>,
 
   // --- Camera (matches Compute3DUniforms on the CPU) ---
   cam_pos:   vec4<f32>,  // xyz, pad

@@ -52,13 +52,7 @@ impl Poly2D {
     /// Construct a 2D line strip tessellated into thick quads (no caps/joins) as one poly.
     /// `points` are in world coords; `width` is in world units.
     /// Returns `None` if there are fewer than 2 valid points or all segments are degenerate.
-    pub fn line(
-        id: GeoId,
-        tile_id: Uuid,
-        points: Vec<[f32; 2]>,
-        width: f32,
-        layer: i32,
-    ) -> Self {
+    pub fn line(id: GeoId, tile_id: Uuid, points: Vec<[f32; 2]>, width: f32, layer: i32) -> Self {
         let half = 0.5 * width;
         let mut vertices: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
         let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);

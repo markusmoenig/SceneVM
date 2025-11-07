@@ -13,7 +13,8 @@ struct U2D {
   mat2d_inv_c1: vec4<f32>,
   mat2d_inv_c2: vec4<f32>,
   lights_count: u32,
-  _pad_lights: vec3<u32>,
+  vm_flags: u32,
+  _pad_lights: vec2<u32>,
 };
 
 @group(0) @binding(0) var<uniform> U: U2D;

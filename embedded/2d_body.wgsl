@@ -1,13 +1,18 @@
 // 2D Body. Can be replaced via Atom::SetSource2D
 
+const VM_FLAG_SKIP_CLEAR: u32 = 1u;
+
 @compute @workgroup_size(8,8,1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.x;
     let py = gid.y;
     if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
 
-    // Clear to background first
-    sv_write(px, py, U.background);
+    let skip_clear = (U.vm_flags & VM_FLAG_SKIP_CLEAR) != 0u;
+    if (!skip_clear) {
+        // Clear to background if we're the base layer.
+        sv_write(px, py, U.background);
+    }
 
     let p = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
     let tid = tile_of_px(px, py);

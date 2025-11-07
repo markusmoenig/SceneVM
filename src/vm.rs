@@ -1,7 +1,11 @@
 // Non-empty dummy buffers for wgpu STORAGE bindings when a scene grid is empty.
 const DUMMY_U32_1: [u32; 1] = [0];
+const VM_FLAG_SKIP_CLEAR: u32 = 0x1;
 
-use crate::{Camera3D, CameraKind, Chunk, Light, LightType, Poly2D, Poly3D, Texture};
+use crate::{
+    Camera3D, CameraKind, Chunk, Light, LightType, Poly2D, Poly3D, Texture,
+    atlas::{AtlasEntry, SharedAtlas, default_material_frame},
+};
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
@@ -199,22 +203,6 @@ pub enum Atom {
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct AtlasEntry {
-    pub x: u32,
-    pub y: u32,
-    pub w: u32,
-    pub h: u32,
-}
-
-#[derive(Debug)]
-struct Tile {
-    w: u32,
-    h: u32,
-    frames: Vec<Vec<u8>>,
-    material_frames: Vec<Vec<u8>>,
-}
-
 /// Screen-space line strip description (width in pixels; rendered as quads built in screen space).
 #[derive(Debug, Clone)]
 pub struct LineStrip2D {
@@ -332,9 +320,8 @@ pub struct Compute2DUniforms {
     pub mat2d_inv_c2: [f32; 4],
 
     pub lights_count: u32,
-    // WGSL: a vec3<u32> after a u32 costs 12B pad + 16B vec3 slot = 28B total.
-    _pad_lights_align: [u32; 3],
-    _pad_lights_vec3: [u32; 4],
+    pub vm_flags: u32,
+    pub _pad_lights: [u32; 2],
 }
 
 #[repr(C)]
@@ -361,8 +348,8 @@ pub struct Compute3DUniforms {
 
     // Lights
     pub lights_count: u32,
-    _pad_lights_align: [u32; 3],
-    _pad_lights_vec3: [u32; 4],
+    pub vm_flags: u32,
+    pub _pad_lights: [u32; 2],
 
     // Camera3D
     pub cam_pos: [f32; 4], // xyz, pad
@@ -424,17 +411,8 @@ pub enum RenderMode {
     Compute3D,
 }
 
-/// A tiny, CPU-side VM that collects tiles and builds a texture atlas.
-/// Packing strategy: simple shelf packer (rows), stable order by insertion.
 pub struct VM {
-    tiles_map: FxHashMap<Uuid, Tile>,
-    tiles_order: Vec<Uuid>,      // insertion order for stable packing
-    pub atlas: Texture,          // CPU/GPU-capable atlas texture (albedo)
-    pub atlas_material: Texture, // Parallel atlas storing R/M/O/E channels
-    atlas_dirty: bool,
-    pub atlas_map: FxHashMap<Uuid, Vec<AtlasEntry>>, // per-tile frame rects in atlas order
-
-    // Scene content grouped into chunks (for streaming/load-save). Indices are local per-chunk.
+    shared_atlas: SharedAtlas,
     pub chunks_map: FxHashMap<Uuid, Chunk>,
     pub current_chunk: Option<Uuid>,
 
@@ -472,6 +450,7 @@ pub struct VM {
     cached_v3: Vec<Vert3DPod>,
     cached_i3: Vec<u32>,
     geometry2d_dirty: bool,
+    skip_surface_clear: bool,
     cached_v2: Vec<Vert2DPod>,
     cached_i2: Vec<u32>,
     cached_tile_offsets: Vec<u32>,
@@ -498,6 +477,9 @@ impl VM {
 
         let mut verts_flat: Vec<Vert2DPod> = Vec::new();
         let mut indices_flat: Vec<u32> = Vec::new();
+        let (atlas_width_px, atlas_height_px) = self.atlas_dims();
+        let atlas_w = atlas_width_px as f32;
+        let atlas_h = atlas_height_px as f32;
 
         #[derive(Clone, Copy)]
         struct TriMeta {
@@ -514,10 +496,11 @@ impl VM {
                 if !poly.visible {
                     continue;
                 }
-                let rect_opt = self.frame_rect(&poly.tile_id, self.animation_counter as u32);
-                let rect = if let Some(r) = rect_opt { r } else { continue };
-                let atlas_w = self.atlas.width as f32;
-                let atlas_h = self.atlas.height as f32;
+                let rect = match self.frame_rect_owned(&poly.tile_id, self.animation_counter as u32)
+                {
+                    Some(r) => r,
+                    None => continue,
+                };
                 let ofs_x = rect.x as f32 / atlas_w;
                 let ofs_y = rect.y as f32 / atlas_h;
                 let scl_x = rect.w as f32 / atlas_w;
@@ -556,18 +539,16 @@ impl VM {
 
         // Screen-space line strips rendered as quads
         {
-            let atlas_w = self.atlas.width as f32;
-            let atlas_h = self.atlas.height as f32;
-
             for (_cid, ch) in &self.chunks_map {
                 for ls in ch.lines2d_px.values() {
                     if !ls.visible || ls.points.len() < 2 {
                         continue;
                     }
-                    let rect = match self.frame_rect(&ls.tile_id, self.animation_counter as u32) {
-                        Some(r) => r,
-                        None => continue,
-                    };
+                    let rect =
+                        match self.frame_rect_owned(&ls.tile_id, self.animation_counter as u32) {
+                            Some(r) => r,
+                            None => continue,
+                        };
                     let ofs_x = rect.x as f32 / atlas_w;
                     let ofs_y = rect.y as f32 / atlas_h;
                     let scl_x = rect.w as f32 / atlas_w;
@@ -731,13 +712,37 @@ impl VM {
     }
 
     #[inline]
-    fn mark_all_geometry_dirty(&mut self) {
+    pub fn mark_all_geometry_dirty(&mut self) {
         self.geometry2d_dirty = true;
         self.accel_dirty = true;
     }
 
+    pub fn set_skip_surface_clear(&mut self, skip: bool) {
+        self.skip_surface_clear = skip;
+    }
+
+    fn vm_flags(&self) -> u32 {
+        let mut flags = 0;
+        if self.skip_surface_clear {
+            flags |= VM_FLAG_SKIP_CLEAR;
+        }
+        flags
+    }
+
+    fn atlas_dims(&self) -> (u32, u32) {
+        self.shared_atlas.dims()
+    }
+
+    fn frame_rect_owned(&self, id: &Uuid, anim_frame: u32) -> Option<AtlasEntry> {
+        self.shared_atlas.frame_rect(id, anim_frame)
+    }
+
     /// Create a VM with a fixed-size atlas (atlas_w x atlas_h).
     pub fn new(atlas_w: u32, atlas_h: u32) -> Self {
+        Self::new_with_shared_atlas(SharedAtlas::new(atlas_w, atlas_h))
+    }
+
+    pub fn new_with_shared_atlas(shared_atlas: SharedAtlas) -> Self {
         let mut source2d = String::new();
         if let Some(bytes) = crate::Embedded::get("2d_body.wgsl") {
             if let Ok(source) = std::str::from_utf8(bytes.data.as_ref()) {
@@ -752,12 +757,7 @@ impl VM {
             }
         }
         Self {
-            tiles_map: FxHashMap::default(),
-            tiles_order: Vec::new(),
-            atlas: Texture::new(atlas_w, atlas_h),
-            atlas_material: Texture::new(atlas_w, atlas_h),
-            atlas_map: FxHashMap::default(),
-            atlas_dirty: true,
+            shared_atlas,
             chunks_map: FxHashMap::default(),
             current_chunk: None,
             animation_counter: 0,
@@ -786,6 +786,7 @@ impl VM {
             cached_v3: Vec::new(),
             cached_i3: Vec::new(),
             geometry2d_dirty: true,
+            skip_surface_clear: false,
             cached_v2: Vec::new(),
             cached_i2: Vec::new(),
             cached_tile_offsets: Vec::new(),
@@ -794,22 +795,6 @@ impl VM {
             cached_fb_size_2d: (0, 0),
             camera3d: Camera3D::default(),
         }
-    }
-
-    #[inline]
-    fn default_material_frame(bytes: usize) -> Vec<u8> {
-        if bytes == 0 {
-            return Vec::new();
-        }
-        let mut v = Vec::with_capacity(bytes);
-        let pixels = bytes / 4;
-        for _ in 0..pixels {
-            v.extend_from_slice(&[128u8, 0u8, 255u8, 0u8]);
-        }
-        if v.len() < bytes {
-            v.resize(bytes, 0);
-        }
-        v
     }
 
     /// Interpret one instruction.
@@ -861,12 +846,12 @@ impl VM {
                 let mut mat_frames = material_frames.unwrap_or_default();
                 if mat_frames.is_empty() {
                     mat_frames = (0..frames.len())
-                        .map(|_| Self::default_material_frame(need))
+                        .map(|_| default_material_frame(need))
                         .collect();
                 }
                 if mat_frames.len() < frames.len() {
                     let missing = frames.len() - mat_frames.len();
-                    mat_frames.extend((0..missing).map(|_| Self::default_material_frame(need)));
+                    mat_frames.extend((0..missing).map(|_| default_material_frame(need)));
                 }
                 if mat_frames.len() > frames.len() {
                     mat_frames.truncate(frames.len());
@@ -880,46 +865,22 @@ impl VM {
                     }
                 }
                 if mat_frames.is_empty() {
-                    mat_frames.push(Self::default_material_frame(need));
+                    mat_frames.push(default_material_frame(need));
                 }
-                let is_new = !self.tiles_map.contains_key(&id);
-                self.tiles_map.insert(
-                    id,
-                    Tile {
-                        w: width,
-                        h: height,
-                        frames,
-                        material_frames: mat_frames,
-                    },
-                );
-                if is_new {
-                    self.tiles_order.push(id);
-                }
-                self.atlas_dirty = true;
+                self.shared_atlas
+                    .add_tile(id, width, height, frames, mat_frames);
                 self.mark_all_geometry_dirty();
             }
             Atom::AddSolid { id, color } => {
                 // Create a 1x1 tile with a single frame of the given color
                 let frame = color.to_vec();
-                let mat_frame = Self::default_material_frame(4);
-                let is_new = !self.tiles_map.contains_key(&id);
-                self.tiles_map.insert(
-                    id,
-                    Tile {
-                        w: 1,
-                        h: 1,
-                        frames: vec![frame],
-                        material_frames: vec![mat_frame],
-                    },
-                );
-                if is_new {
-                    self.tiles_order.push(id);
-                }
-                self.atlas_dirty = true;
+                let mat_frame = default_material_frame(4);
+                self.shared_atlas
+                    .add_tile(id, 1, 1, vec![frame], vec![mat_frame]);
                 self.mark_all_geometry_dirty();
             }
             Atom::SetTileMaterialFrames { id, frames } => {
-                if let Some(tile) = self.tiles_map.get_mut(&id) {
+                self.shared_atlas.with_tile_mut(&id, move |tile| {
                     let need = (tile.w as usize) * (tile.h as usize) * 4;
                     let mut mats: Vec<Vec<u8>> = frames
                         .into_iter()
@@ -935,19 +896,17 @@ impl VM {
                         .collect();
                     if mats.len() < tile.frames.len() {
                         let missing = tile.frames.len() - mats.len();
-                        mats.extend((0..missing).map(|_| Self::default_material_frame(need)));
+                        mats.extend((0..missing).map(|_| default_material_frame(need)));
                     }
                     if mats.len() > tile.frames.len() {
                         mats.truncate(tile.frames.len());
                     }
                     tile.material_frames = mats;
-                    self.atlas_dirty = true;
-                    self.mark_all_geometry_dirty();
-                }
+                });
+                self.mark_all_geometry_dirty();
             }
             Atom::BuildAtlas => {
                 self.build_atlas();
-                self.atlas_dirty = true;
                 self.mark_all_geometry_dirty();
             }
             Atom::AddPoly { poly } => {
@@ -1091,11 +1050,7 @@ impl VM {
                 self.current_layer = l;
             }
             Atom::Clear => {
-                self.atlas_map.clear();
-                self.tiles_map.clear();
-                self.tiles_order.clear();
-                self.atlas.data.fill(0);
-                self.atlas_material.data.fill(0);
+                self.shared_atlas.clear();
                 self.chunks_map.clear();
                 self.current_chunk = None;
                 self.animation_counter = 0;
@@ -1108,11 +1063,7 @@ impl VM {
             }
             Atom::ClearTiles => {
                 // Clear tile-related state and atlas pixels; keep scene/chunks
-                self.atlas_map.clear();
-                self.tiles_map.clear();
-                self.tiles_order.clear();
-                self.atlas.data.fill(0);
-                self.atlas_material.data.fill(0);
+                self.shared_atlas.clear();
                 self.mark_all_geometry_dirty();
             }
             Atom::ClearGeometry => {
@@ -1320,163 +1271,50 @@ impl VM {
         });
     }
 
-    /// Returns a read-only view of the current color atlas pixels (RGBA8).
-    pub fn atlas_pixels(&self) -> &[u8] {
-        &self.atlas.data
+    /// Returns a copy of the current color atlas pixels (RGBA8).
+    pub fn atlas_pixels(&self) -> Vec<u8> {
+        self.shared_atlas.atlas_pixels()
     }
 
-    /// Returns a read-only view of the material atlas pixels (RGBA8 storing R/M/O/E).
-    pub fn material_atlas_pixels(&self) -> &[u8] {
-        &self.atlas_material.data
+    /// Returns a copy of the material atlas pixels (RGBA8 storing R/M/O/E).
+    pub fn material_atlas_pixels(&self) -> Vec<u8> {
+        self.shared_atlas.material_atlas_pixels()
     }
 
     /// Copies the atlas into a destination pixel slice of size (dst_w x dst_h) RGBA8.
-    /// Does not resize the destination; only overlaps are copied line-by-line.
     pub fn copy_atlas_to_slice(&self, dst: &mut [u8], dst_w: u32, dst_h: u32) {
-        self.atlas.copy_to_slice(dst, dst_w, dst_h);
+        self.shared_atlas.copy_atlas_to_slice(dst, dst_w, dst_h);
     }
 
     /// Copies the material atlas into a destination pixel slice (RGBA8 R/M/O/E).
     pub fn copy_material_atlas_to_slice(&self, dst: &mut [u8], dst_w: u32, dst_h: u32) {
-        self.atlas_material.copy_to_slice(dst, dst_w, dst_h);
+        self.shared_atlas
+            .copy_material_atlas_to_slice(dst, dst_w, dst_h);
     }
 
     /// Upload the CPU atlas to GPU (creates GPU resources if needed).
-    pub fn upload_atlas_to_gpu_with(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        if self.atlas_dirty {
-            self.atlas.upload_to_gpu_with(device, queue);
-            self.atlas_material.upload_to_gpu_with(device, queue);
-            self.atlas_dirty = false;
-        }
+    pub fn upload_atlas_to_gpu_with(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.build_atlas();
+        self.shared_atlas.upload_to_gpu_with(device, queue);
     }
 
     /// Download the atlas from GPU into CPU memory; blocks on native, schedules on wasm.
-    pub fn download_atlas_from_gpu_with(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        self.atlas.download_from_gpu_with(device, queue);
-        self.atlas_material.download_from_gpu_with(device, queue);
+    pub fn download_atlas_from_gpu_with(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.shared_atlas.download_from_gpu_with(device, queue);
     }
 
     /// Get the atlas rect for a tile's animation frame. Returns None if the tile wasn't packed.
-    pub fn frame_rect(&self, id: &Uuid, anim_frame: u32) -> Option<&AtlasEntry> {
-        let rects = self.atlas_map.get(id)?;
-        if rects.is_empty() {
-            return None;
-        }
-        let idx = (anim_frame as usize) % rects.len();
-        rects.get(idx)
+    pub fn frame_rect(&self, id: &Uuid, anim_frame: u32) -> Option<AtlasEntry> {
+        self.frame_rect_owned(id, anim_frame)
     }
 
-    /// Build the atlas using a simple shelf packer and pack all frames.
-    fn build_atlas(&mut self) {
-        self.atlas.data.fill(0);
-        self.atlas_material.data.fill(0);
-        self.atlas_map.clear();
-
-        let mut pen_x: u32 = 0;
-        let mut pen_y: u32 = 0;
-        let mut shelf_h: u32 = 0;
-
-        for id in &self.tiles_order {
-            // Copy needed metadata in a short scope to avoid holding an immutable borrow
-            let (w, h, frames_len, mat_len) = {
-                match self.tiles_map.get(id) {
-                    Some(t) => (t.w, t.h, t.frames.len(), t.material_frames.len()),
-                    None => continue,
-                }
-            };
-            if w == 0 || h == 0 {
-                continue;
-            }
-
-            let mut rects: Vec<AtlasEntry> = Vec::with_capacity(frames_len);
-            let need_bytes = (w as usize) * (h as usize) * 4;
-
-            for f in 0..frames_len {
-                // New shelf if doesn't fit in current row
-                if pen_x + w > self.atlas.width {
-                    pen_x = 0;
-                    pen_y = pen_y.saturating_add(shelf_h);
-                    shelf_h = 0;
-                }
-                // If still doesn't fit vertically, stop packing further frames
-                if pen_y + h > self.atlas.height {
-                    break;
-                }
-
-                shelf_h = shelf_h.max(h);
-
-                // Short-lived borrow just to clone the frame bytes; drop before mutating self
-                let (frame_owned, mat_owned) = {
-                    let tile = self.tiles_map.get(id).expect("tile must exist");
-                    let frame = tile.frames[f].clone();
-                    let mat = if f < mat_len {
-                        tile.material_frames[f].clone()
-                    } else {
-                        Self::default_material_frame(need_bytes)
-                    };
-                    (frame, mat)
-                };
-                {
-                    let atlas_w = self.atlas.width;
-                    let dst = &mut self.atlas.data;
-                    VM::blit_rgba_into(dst, atlas_w, &frame_owned, w, h, pen_x, pen_y);
-                }
-                {
-                    let atlas_w = self.atlas_material.width;
-                    let dst = &mut self.atlas_material.data;
-                    VM::blit_rgba_into(dst, atlas_w, &mat_owned, w, h, pen_x, pen_y);
-                }
-
-                rects.push(AtlasEntry {
-                    x: pen_x,
-                    y: pen_y,
-                    w,
-                    h,
-                });
-                pen_x = pen_x.saturating_add(w);
-            }
-
-            if !rects.is_empty() {
-                self.atlas_map.insert(*id, rects);
-            }
-        }
-    }
-
-    /// CPU blit of a tightly-packed RGBA8 tile into the atlas at (dst_x, dst_y)
-    /// Writes into `dst` (atlas pixel buffer) directly to avoid borrowing `self` mutably.
-    fn blit_rgba_into(
-        dst: &mut [u8],
-        atlas_w: u32,
-        src: &[u8],
-        src_w: u32,
-        src_h: u32,
-        dst_x: u32,
-        dst_y: u32,
-    ) {
-        if src.is_empty() {
-            return;
-        }
-        let atlas_w_usize = atlas_w as usize;
-        let src_stride = (src_w * 4) as usize;
-        let dst_stride = (atlas_w * 4) as usize;
-        let row_bytes = (src_w * 4) as usize;
-        for row in 0..(src_h as usize) {
-            let s_off = row * src_stride;
-            let d_row = (dst_y as usize + row) * dst_stride;
-            let d_off = d_row + (dst_x as usize) * 4;
-            let s_end = s_off + row_bytes;
-            let d_end = d_off + row_bytes;
-            if s_end <= src.len() && d_end <= dst.len() {
-                dst[d_off..d_end].copy_from_slice(&src[s_off..s_end]);
-            } else {
-                break; // OOB guard
-            }
-            let _ = atlas_w_usize; // suppress unused warning if optimized differently later
-        }
+    /// Ensure the shared atlas is packed.
+    fn build_atlas(&self) {
+        self.shared_atlas.ensure_built();
     }
 
     /// Iterate polygons ready for drawing: always yields all polygons in all chunks (ignores current_chunk).
-    pub fn polys_2d(&self) -> impl Iterator<Item = (&Poly2D, Option<&AtlasEntry>)> {
+    pub fn polys_2d(&self) -> impl Iterator<Item = (&Poly2D, Option<AtlasEntry>)> {
         let anim = self.animation_counter as u32;
         self.chunks_map
             .values()
@@ -1883,17 +1721,17 @@ impl VM {
             mat2d_inv_c1: [m_inv[(0, 1)], m_inv[(1, 1)], m_inv[(2, 1)], 0.0],
             mat2d_inv_c2: [m_inv[(0, 2)], m_inv[(1, 2)], m_inv[(2, 2)], 0.0],
             lights_count: self.lights.len() as u32,
-            _pad_lights_align: [0, 0, 0],
-            _pad_lights_vec3: [0, 0, 0, 0],
+            vm_flags: self.vm_flags(),
+            _pad_lights: [0, 0],
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u2d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
         }
-        if self.atlas_dirty || self.atlas.gpu.is_none() || self.atlas_material.gpu.is_none() {
-            self.atlas.ensure_gpu_with(device);
-            self.atlas_material.ensure_gpu_with(device);
-            self.upload_atlas_to_gpu_with(device, queue);
-        }
+        self.upload_atlas_to_gpu_with(device, queue);
+        let (atlas_tex_view, atlas_mat_tex_view) = self
+            .shared_atlas
+            .texture_views()
+            .expect("atlas GPU resources missing");
 
         let fb_dims = (fb_w, fb_h);
         let mut geometry_changed = false;
@@ -2047,8 +1885,6 @@ impl VM {
 
         // Build bind group with surface view and atlas, plus 2D geometry SSBOs
         let view = &surface.gpu.as_ref().unwrap().view;
-        let atlas_view = &self.atlas.gpu.as_ref().unwrap().view;
-        let atlas_mat_view = &self.atlas_material.gpu.as_ref().unwrap().view;
         g.u2d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vm-u2d-bg"),
             layout: g.u2d_bgl.as_ref().unwrap(),
@@ -2063,7 +1899,7 @@ impl VM {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(atlas_view),
+                    resource: wgpu::BindingResource::TextureView(&atlas_tex_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -2095,7 +1931,7 @@ impl VM {
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: wgpu::BindingResource::TextureView(atlas_mat_view),
+                    resource: wgpu::BindingResource::TextureView(&atlas_mat_tex_view),
                 },
             ],
         }));
@@ -2154,8 +1990,8 @@ impl VM {
             mat3d_c2: [m[(0, 2)], m[(1, 2)], m[(2, 2)], m[(3, 2)]],
             mat3d_c3: [m[(0, 3)], m[(1, 3)], m[(2, 3)], m[(3, 3)]],
             lights_count: self.lights.len() as u32,
-            _pad_lights_align: [0, 0, 0],
-            _pad_lights_vec3: [0, 0, 0, 0],
+            vm_flags: self.vm_flags(),
+            _pad_lights: [0, 0],
             cam_pos: [c.pos.x, c.pos.y, c.pos.z, 0.0],
             cam_fwd: [c.forward.x, c.forward.y, c.forward.z, 0.0],
             cam_right: [c.right.x, c.right.y, c.right.z, 0.0],
@@ -2225,11 +2061,11 @@ impl VM {
             g.lights_ssbo = Some(lights_buf);
         }
 
-        if self.atlas_dirty || self.atlas.gpu.is_none() || self.atlas_material.gpu.is_none() {
-            self.atlas.ensure_gpu_with(device);
-            self.atlas_material.ensure_gpu_with(device);
-            self.upload_atlas_to_gpu_with(device, queue);
-        }
+        self.upload_atlas_to_gpu_with(device, queue);
+        let (_atlas_tex_view, _atlas_mat_tex_view) = self
+            .shared_atlas
+            .texture_views()
+            .expect("atlas GPU resources missing");
 
         // --- Build 3D geometry only when accel_dirty says so ---
         let mut geometry_changed = false;
@@ -2290,8 +2126,9 @@ impl VM {
 
                         let base = v3.len() as u32;
 
-                        let atlas_w = self.atlas.width as f32;
-                        let atlas_h = self.atlas.height as f32;
+                        let (atlas_w_px, atlas_h_px) = self.atlas_dims();
+                        let atlas_w = atlas_w_px as f32;
+                        let atlas_h = atlas_h_px as f32;
 
                         let ofs_x = rect.x as f32 / atlas_w;
                         let ofs_y = rect.y as f32 / atlas_h;
@@ -2439,8 +2276,10 @@ impl VM {
 
         // Avoid borrowing self immutably while we need &mut for bind group creation.
         let surface_view = surface.gpu.as_ref().unwrap().view.clone();
-        let atlas_view = self.atlas.gpu.as_ref().unwrap().view.clone();
-        let atlas_mat_view = self.atlas_material.gpu.as_ref().unwrap().view.clone();
+        let (atlas_view, atlas_mat_view) = self
+            .shared_atlas
+            .texture_views()
+            .expect("atlas GPU resources missing");
 
         // Build the bind group
         {

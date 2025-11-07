@@ -23,52 +23,32 @@ impl TheTrait for Circle {
     // #[cfg(not(target_arch = "wasm32"))]
     fn init(&mut self, _ctx: &mut TheContext) {
         let tile_id = Uuid::new_v4();
+        let overlay_tile = Uuid::new_v4();
 
-        if let Some((data, width, height)) = self
-            .vm
-            .load_image_rgba(std::path::Path::new("images/logo.png"))
-        {
-            self.vm.execute(Atom::AddTile {
-                id: tile_id,
-                width: width,
-                height: height,
-                frames: vec![data],
-                material_frames: None,
-            });
-            self.vm.execute(Atom::BuildAtlas);
-        }
+        // if let Some((data, width, height)) = self
+        //     .vm
+        //     .load_image_rgba(std::path::Path::new("images/logo.png"))
+        // {
+        //     self.vm.execute(Atom::AddTile {
+        //         id: tile_id,
+        //         width: width,
+        //         height: height,
+        //         frames: vec![data],
+        //         material_frames: None,
+        //     });
+        //     self.vm.execute(Atom::BuildAtlas);
+        // }
 
         self.vm.execute(Atom::SetBackground(Vec4::zero()));
-        // self.vm.execute(Atom::AddSolid {
-        //     id: tile_id,
-        //     color: [255, 0, 0, 255],
-        // });
+        self.vm.execute(Atom::AddSolid {
+            id: tile_id,
+            color: [255, 0, 0, 255],
+        });
+        self.vm.execute(Atom::AddSolid {
+            id: overlay_tile,
+            color: [255, 80, 80, 160],
+        });
         self.vm.execute(Atom::BuildAtlas);
-
-        self.vm.execute(Atom::AddPoly {
-            poly: Poly2D::poly(
-                GeoId::Unknown(0),
-                tile_id,
-                vec![
-                    [100.0, 100.0],
-                    [300.0, 100.0],
-                    [300.0, 300.0],
-                    [100.0, 300.0],
-                ],
-                vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-                vec![(0, 1, 2), (0, 2, 3)],
-            ),
-        });
-
-        // Add a line strip
-        self.vm.execute(Atom::AddLineStrip2D {
-            id: GeoId::Linedef(1),
-            tile_id: tile_id,
-            points: vec![[400.0, 100.0], [500.0, 120.0], [560.0, 200.0]],
-            width: 1.5,
-        });
-
-        self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
 
         self.vm.execute(Atom::AddPoly3D {
             poly: Poly3D::cube(GeoId::Unknown(0), tile_id, Vec3::zero(), 2.0),
@@ -90,6 +70,33 @@ impl TheTrait for Circle {
             0.0,
             1.0,
         )));
+
+        self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
+
+        // VM1: 2D overlay gets its own layer so it can draw on top without clearing.
+        let overlay_index = self.vm.add_vm_layer();
+        self.vm.set_active_vm(overlay_index);
+
+        self.vm.execute(Atom::AddPoly {
+            poly: Poly2D::poly(
+                GeoId::Unknown(0),
+                overlay_tile,
+                vec![[40.0, 40.0], [160.0, 40.0], [160.0, 160.0], [40.0, 160.0]],
+                vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                vec![(0, 1, 2), (0, 2, 3)],
+            ),
+        });
+
+        // Add a line strip
+        self.vm.execute(Atom::AddLineStrip2D {
+            id: GeoId::Linedef(1),
+            tile_id: overlay_tile,
+            points: vec![[200.0, 60.0], [240.0, 120.0], [280.0, 180.0]],
+            width: 2.0,
+        });
+
+        // Switch back so subsequent commands keep targeting the primary 3D VM.
+        self.vm.set_active_vm(0);
 
         // self.vm.execute(Atom::SetCamera3D {
         //     camera: Camera3D::iso(),
