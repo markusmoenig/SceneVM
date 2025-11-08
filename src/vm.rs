@@ -2568,12 +2568,13 @@ impl VM {
 
     /// Cast a CPU-side ray through a normalized screen UV and return the hit GeoId (if any).
     /// Uses the same camera model and 3D transforms as the GPU compute path.
+    /// Returns the GeoId, world-space hit position, and the distance along the ray.
     pub fn pick_geo_id_at_uv(
         &self,
         fb_w: u32,
         fb_h: u32,
         screen_uv: [f32; 2],
-    ) -> Option<(GeoId, Vec3<f32>)> {
+    ) -> Option<(GeoId, Vec3<f32>, f32)> {
         if fb_w == 0 || fb_h == 0 {
             return None;
         }
@@ -2621,7 +2622,7 @@ impl VM {
             }
         }
 
-        best_geo.map(|id| (id, best_pos))
+        best_geo.map(|id| (id, best_pos, best_t))
     }
 
     fn build_scene_grid_from(

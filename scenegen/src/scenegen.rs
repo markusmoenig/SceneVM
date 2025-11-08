@@ -126,6 +126,6 @@ impl TheTrait for Circle {
 
     /// Query if the widget needs a redraw
     fn update(&mut self, _ctx: &mut TheContext) -> bool {
-        false
+        true
     }
 }

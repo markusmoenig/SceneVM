@@ -245,6 +245,17 @@ impl SceneVM {
             .expect("active VM index out of range")
     }
 
+    /// Ray-pick against the active VM layer using normalized screen UVs.
+    pub fn pick_geo_id_at_uv(
+        &self,
+        fb_w: u32,
+        fb_h: u32,
+        screen_uv: [f32; 2],
+    ) -> Option<(GeoId, vek::Vec3<f32>, f32)> {
+        self.active_vm()
+            .pick_geo_id_at_uv(fb_w, fb_h, screen_uv)
+    }
+
     /// Prints statistics about 2D and 3D polygons currently loaded in all chunks.
     pub fn print_geometry_stats(&self) {
         let mut total_2d = 0usize;
