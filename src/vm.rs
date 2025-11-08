@@ -5,6 +5,7 @@ const VM_FLAG_SKIP_CLEAR: u32 = 0x1;
 use crate::{
     Camera3D, CameraKind, Chunk, Light, LightType, Poly2D, Poly3D, Texture,
     atlas::{AtlasEntry, AtlasGpuTables, SharedAtlas, default_material_frame},
+    dynamic::{DynamicKind, DynamicObject},
 };
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
@@ -126,6 +127,19 @@ struct SceneDataHeaderPod {
 const SCENE_LIGHT_WORDS: u32 =
     (std::mem::size_of::<LightPod>() / std::mem::size_of::<u32>()) as u32;
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DynamicBillboardPod {
+    pub center_size: [f32; 4],
+    pub axis_right: [f32; 4],
+    pub axis_up: [f32; 4],
+    pub params: [u32; 4],
+}
+
+#[allow(dead_code)]
+const SCENE_BILLBOARD_CMD_WORDS: u32 =
+    (std::mem::size_of::<DynamicBillboardPod>() / std::mem::size_of::<u32>()) as u32;
+
 /// VM instruction set
 #[derive(Debug)]
 pub enum Atom {
@@ -243,6 +257,12 @@ pub enum Atom {
     },
     /// Remove all lights from the scene
     ClearLights,
+    /// Remove all dynamic billboards for this VM layer.
+    ClearDynamics,
+    /// Add a dynamic object (billboard, particles, etc.) that is evaluated this frame.
+    AddDynamic {
+        object: DynamicObject,
+    },
     /// Build/replace the global scene uniform grid over all current 3D geometry
     SetSceneGridCells {
         target_cells: u32,
@@ -494,6 +514,7 @@ pub struct VM {
     pub transform3d: Mat4<f32>,
 
     pub lights: FxHashMap<GeoId, Light>,
+    dynamic_objects: Vec<DynamicObject>,
 
     pub current_layer: i32,
 
@@ -549,6 +570,56 @@ impl VM {
         if self.activity_logging {
             println!("[SceneVM][Layer {}] {}", self.layer_index, msg.as_ref());
         }
+    }
+
+    fn sanitize_billboard_axes(
+        view_right: Vec3<f32>,
+        view_up: Vec3<f32>,
+    ) -> (Vec3<f32>, Vec3<f32>) {
+        let right = if view_right.magnitude() < 1e-5 || !view_right.magnitude().is_finite() {
+            Vec3::unit_x()
+        } else {
+            view_right / view_right.magnitude()
+        };
+
+        let mut up = if view_up.magnitude() < 1e-5 || !view_up.magnitude().is_finite() {
+            Vec3::unit_y()
+        } else {
+            view_up / view_up.magnitude()
+        };
+
+        // Remove any component along right to keep basis orthogonal
+        up = up - right * right.dot(up);
+        let up_len = up.magnitude();
+        if up_len < 1e-5 || !up_len.is_finite() {
+            let mut fallback = if right.y.abs() < 0.9 {
+                Vec3::unit_y()
+            } else {
+                Vec3::unit_z()
+            };
+            fallback = fallback - right * right.dot(fallback);
+            let fb_len = fallback.magnitude();
+            up = if fb_len < 1e-5 || !fb_len.is_finite() {
+                Vec3::unit_z()
+            } else {
+                fallback / fb_len
+            };
+        } else {
+            up /= up_len;
+        }
+
+        (right, up)
+    }
+
+    fn push_dynamic_object(&mut self, mut object: DynamicObject) {
+        if object.size <= 0.0 || !object.size.is_finite() {
+            return;
+        }
+
+        let (axis_r, axis_u) = VM::sanitize_billboard_axes(object.view_right, object.view_up);
+        object.view_right = axis_r;
+        object.view_up = axis_u;
+        self.dynamic_objects.push(object);
     }
 
     fn build_2d_batches(
@@ -827,6 +898,44 @@ impl VM {
         if !lights_flat.is_empty() {
             data_words.extend_from_slice(bytemuck::cast_slice(&lights_flat));
         }
+
+        let mut billboard_cmds: Vec<DynamicBillboardPod> = Vec::new();
+        for obj in &self.dynamic_objects {
+            match obj.kind {
+                DynamicKind::BillboardTile => {
+                    let tile_id = match obj.tile_id {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    let tile_index = match self.shared_atlas.tile_index(&tile_id) {
+                        Some(idx) => idx,
+                        None => continue,
+                    };
+                    let half = (obj.size * 0.5).max(0.0);
+                    if !half.is_finite() || half <= 0.0 {
+                        continue;
+                    }
+                    let axis_right = obj.view_right * half;
+                    let axis_up = obj.view_up * half;
+                    billboard_cmds.push(DynamicBillboardPod {
+                        center_size: [obj.center.x, obj.center.y, obj.center.z, obj.size],
+                        axis_right: [axis_right.x, axis_right.y, axis_right.z, 0.0],
+                        axis_up: [axis_up.x, axis_up.y, axis_up.z, 0.0],
+                        params: [tile_index, DynamicKind::BillboardTile as u32, 0, 0],
+                    });
+                }
+            }
+        }
+
+        let billboard_cmd_offset_words = if billboard_cmds.is_empty() {
+            0
+        } else {
+            data_words.len() as u32
+        };
+        if !billboard_cmds.is_empty() {
+            data_words.extend_from_slice(bytemuck::cast_slice(&billboard_cmds));
+        }
+
         let logical_word_count = data_words.len() as u32;
         if data_words.is_empty() {
             // wgpu validation requires at least one word for runtime-sized arrays
@@ -836,8 +945,8 @@ impl VM {
         let header = SceneDataHeaderPod {
             lights_offset_words,
             lights_count: lights_flat.len() as u32,
-            billboard_cmd_offset_words: 0,
-            billboard_cmd_count: 0,
+            billboard_cmd_offset_words,
+            billboard_cmd_count: billboard_cmds.len() as u32,
             billboard_poly_offset_words: 0,
             billboard_poly_count: 0,
             data_word_count: logical_word_count,
@@ -1018,6 +1127,7 @@ impl VM {
             transform2d: Mat3::identity(),
             transform3d: Mat4::identity(),
             lights: FxHashMap::default(),
+            dynamic_objects: Vec::new(),
             current_layer: 0,
             scene_accel: SceneAccel::default(),
             accel_dirty: true,
@@ -1306,11 +1416,13 @@ impl VM {
                 self.gp2 = Vec4::new(0.0, 0.0, 0.0, 0.0);
                 self.render_mode = RenderMode::Compute2D;
                 self.mark_all_geometry_dirty();
+                self.dynamic_objects.clear();
             }
             Atom::ClearTiles => {
                 // Clear tile-related state and atlas pixels; keep scene/chunks
                 self.shared_atlas.clear();
                 self.mark_all_geometry_dirty();
+                self.dynamic_objects.clear();
             }
             Atom::ClearGeometry => {
                 // Remove all chunks and unset current chunk; keep tiles/atlas/state
@@ -1318,6 +1430,7 @@ impl VM {
                 self.current_chunk = None;
                 self.accel_dirty = true;
                 self.mark_2d_dirty();
+                self.dynamic_objects.clear();
             }
             Atom::SetBackground(v) => {
                 self.background = v;
@@ -1363,6 +1476,12 @@ impl VM {
             }
             Atom::ClearLights => {
                 self.lights.clear();
+            }
+            Atom::ClearDynamics => {
+                self.dynamic_objects.clear();
+            }
+            Atom::AddDynamic { object } => {
+                self.push_dynamic_object(object);
             }
             Atom::SetSceneGridCells { target_cells } => {
                 self.scene_grid_cells = target_cells;

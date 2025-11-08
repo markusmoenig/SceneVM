@@ -98,6 +98,33 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
+    var dyn_hit = false;
+    var dyn_t = 1e30;
+    var dyn_color = vec4<f32>(0.0);
+
+    let dyn_count = scene_data.header.billboard_cmd_count;
+    if (dyn_count > 0u) {
+        for (var bi: u32 = 0u; bi < dyn_count; bi = bi + 1u) {
+            let cmd = sd_billboard_cmd(bi);
+            let bh = sd_ray_billboard(ro, rd, cmd);
+            if (!bh.hit) { continue; }
+            let frame = sv_tile_frame(bh.tile_index);
+            let uv = frame.ofs + bh.uv * frame.scale;
+            var col = textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
+            if (col.a < 0.01) { continue; }
+            if (bh.t < dyn_t) {
+                dyn_t = bh.t;
+                dyn_color = col;
+                dyn_hit = true;
+            }
+        }
+    }
+
+    if (dyn_hit && (!hit_any || dyn_t < best_t)) {
+        sv_write(px, py, dyn_color);
+        return;
+    }
+
     if (!hit_any) {
         // No hit in either path. Base layer already wrote the background; overlays leave pixel unchanged.
         return;

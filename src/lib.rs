@@ -2,6 +2,7 @@ pub mod atlas;
 pub mod bbox2d;
 pub mod camera3d;
 pub mod chunk;
+pub mod dynamic;
 pub mod intodata;
 pub mod light;
 pub mod poly2d;
@@ -21,6 +22,7 @@ pub use crate::{
     bbox2d::BBox2D,
     camera3d::{Camera3D, CameraKind},
     chunk::Chunk,
+    dynamic::{DynamicKind, DynamicObject},
     intodata::IntoDataInput,
     light::{Light, LightType},
     poly2d::Poly2D,

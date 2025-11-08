@@ -53,6 +53,8 @@ struct SceneData { header: SceneDataHeader, data: array<u32> };
 @group(0) @binding(4) var<storage, read> scene_data: SceneData;
 
 const SCENE_LIGHT_WORDS: u32 = 20u;
+const SCENE_BILLBOARD_CMD_WORDS: u32 = 16u;
+const DYNAMIC_KIND_BILLBOARD_TILE: u32 = 0u;
 
 fn sd_data_word(idx: u32) -> u32 {
   if (idx >= scene_data.header.data_word_count) {
@@ -83,6 +85,77 @@ fn sd_light(li: u32) -> LightWGSL {
   light.params0 = sd_vec4f(base + 12u);
   light.params1 = sd_vec4f(base + 16u);
   return light;
+}
+
+struct DynBillboardCmd {
+  center_size: vec4<f32>,
+  axis_right: vec4<f32>,
+  axis_up: vec4<f32>,
+  params: vec4<u32>,
+};
+
+struct DynBillboardHit {
+  hit: bool,
+  t: f32,
+  uv: vec2<f32>,
+  tile_index: u32,
+};
+
+fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
+  var cmd = DynBillboardCmd(
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    vec4<u32>(0u, 0u, 0u, 0u)
+  );
+  if (scene_data.header.billboard_cmd_count == 0u) {
+    return cmd;
+  }
+  let base = scene_data.header.billboard_cmd_offset_words + idx * SCENE_BILLBOARD_CMD_WORDS;
+  if (base + SCENE_BILLBOARD_CMD_WORDS > scene_data.header.data_word_count) {
+    return cmd;
+  }
+  cmd.center_size = sd_vec4f(base + 0u);
+  cmd.axis_right = sd_vec4f(base + 4u);
+  cmd.axis_up = sd_vec4f(base + 8u);
+  cmd.params = sd_vec4u(base + 12u);
+  return cmd;
+}
+
+fn sd_ray_billboard(ro: vec3<f32>, rd: vec3<f32>, cmd: DynBillboardCmd) -> DynBillboardHit {
+  var hit = DynBillboardHit(false, 0.0, vec2<f32>(0.0, 0.0), 0u);
+  if (cmd.params.y != DYNAMIC_KIND_BILLBOARD_TILE) {
+    return hit;
+  }
+  let axis_u = cmd.axis_right.xyz;
+  let axis_v = cmd.axis_up.xyz;
+  if (all(axis_u == vec3<f32>(0.0)) || all(axis_v == vec3<f32>(0.0))) {
+    return hit;
+  }
+  let normal = normalize(cross(axis_u, axis_v));
+  let denom = dot(normal, rd);
+  if (abs(denom) < 1e-5) {
+    return hit;
+  }
+  let center = cmd.center_size.xyz;
+  let t = dot(center - ro, normal) / denom;
+  if (t <= 0.0) {
+    return hit;
+  }
+  let pos = ro + rd * t;
+  let rel = pos - center;
+  let len_u2 = max(dot(axis_u, axis_u), 1e-6);
+  let len_v2 = max(dot(axis_v, axis_v), 1e-6);
+  let u = dot(rel, axis_u) / len_u2;
+  let v = dot(rel, axis_v) / len_v2;
+  if (abs(u) > 1.0 || abs(v) > 1.0) {
+    return hit;
+  }
+  hit.hit = true;
+  hit.t = t;
+  hit.uv = vec2<f32>(0.5 * (u + 1.0), 0.5 * (1.0 - v));
+  hit.tile_index = cmd.params.x;
+  return hit;
 }
 
 // Vert3D layout:

@@ -65,6 +65,8 @@ struct SceneData { header: SceneDataHeader, data: array<u32> };
 @group(0) @binding(9) var<storage, read> scene_data: SceneData;
 
 const SCENE_LIGHT_WORDS: u32 = 20u;
+const SCENE_BILLBOARD_CMD_WORDS: u32 = 16u;
+const DYNAMIC_KIND_BILLBOARD_TILE: u32 = 0u;
 
 fn sd_data_word(idx: u32) -> u32 {
   if (idx >= scene_data.header.data_word_count) {
@@ -95,6 +97,72 @@ fn sd_light(li: u32) -> LightWGSL {
   light.params0 = sd_vec4f(base + 12u);
   light.params1 = sd_vec4f(base + 16u);
   return light;
+}
+
+struct DynBillboardCmd {
+  center_size: vec4<f32>,
+  axis_right: vec4<f32>,
+  axis_up: vec4<f32>,
+  params: vec4<u32>,
+};
+
+struct DynBillboardHit2D {
+  hit: bool,
+  uv: vec2<f32>,
+  tile_index: u32,
+};
+
+fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
+  var cmd = DynBillboardCmd(
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    vec4<u32>(0u, 0u, 0u, 0u)
+  );
+  if (scene_data.header.billboard_cmd_count == 0u) {
+    return cmd;
+  }
+  let base = scene_data.header.billboard_cmd_offset_words + idx * SCENE_BILLBOARD_CMD_WORDS;
+  if (base + SCENE_BILLBOARD_CMD_WORDS > scene_data.header.data_word_count) {
+    return cmd;
+  }
+  cmd.center_size = sd_vec4f(base + 0u);
+  cmd.axis_right = sd_vec4f(base + 4u);
+  cmd.axis_up = sd_vec4f(base + 8u);
+  cmd.params = sd_vec4u(base + 12u);
+  return cmd;
+}
+
+fn sv_screen_from_world(world: vec2<f32>) -> vec2<f32> {
+  let M = mat3x3<f32>(U.mat2d_c0.xyz, U.mat2d_c1.xyz, U.mat2d_c2.xyz);
+  let v = M * vec3<f32>(world, 1.0);
+  return v.xy;
+}
+
+fn sd_billboard_hit_screen(pix: vec2<f32>, cmd: DynBillboardCmd) -> DynBillboardHit2D {
+  var hit = DynBillboardHit2D(false, vec2<f32>(0.0), 0u);
+  if (cmd.params.y != DYNAMIC_KIND_BILLBOARD_TILE) {
+    return hit;
+  }
+  let center_world = cmd.center_size.xyz;
+  let center_scr = sv_screen_from_world(center_world.xy);
+  let right_scr = sv_screen_from_world((center_world + cmd.axis_right.xyz).xy) - center_scr;
+  let up_scr = sv_screen_from_world((center_world + cmd.axis_up.xyz).xy) - center_scr;
+  let det = right_scr.x * up_scr.y - right_scr.y * up_scr.x;
+  if (abs(det) < 1e-5) {
+    return hit;
+  }
+  let rel = pix - center_scr;
+  let inv = 1.0 / det;
+  let u = ( rel.x * up_scr.y - rel.y * up_scr.x) * inv;
+  let v = (-rel.x * right_scr.y + rel.y * right_scr.x) * inv;
+  if (abs(u) > 1.0 || abs(v) > 1.0) {
+    return hit;
+  }
+  hit.hit = true;
+  hit.uv = vec2<f32>(0.5 * (u + 1.0), 0.5 * (1.0 - v));
+  hit.tile_index = cmd.params.x;
+  return hit;
 }
 struct TileAnimMeta {
   first_frame: u32,
