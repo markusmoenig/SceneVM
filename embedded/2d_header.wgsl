@@ -50,8 +50,52 @@ struct LightWGSL {
   params0:  vec4<f32>,
   params1:  vec4<f32>,
 };
-struct Lights { data: array<LightWGSL> };
-@group(0) @binding(9) var<storage, read> lights: Lights;
+
+struct SceneDataHeader {
+  lights_offset_words: u32,
+  lights_count: u32,
+  billboard_cmd_offset_words: u32,
+  billboard_cmd_count: u32,
+  billboard_poly_offset_words: u32,
+  billboard_poly_count: u32,
+  data_word_count: u32,
+  _reserved: u32,
+};
+struct SceneData { header: SceneDataHeader, data: array<u32> };
+@group(0) @binding(9) var<storage, read> scene_data: SceneData;
+
+const SCENE_LIGHT_WORDS: u32 = 20u;
+
+fn sd_data_word(idx: u32) -> u32 {
+  if (idx >= scene_data.header.data_word_count) {
+    return 0u;
+  }
+  return scene_data.data[idx];
+}
+
+fn sd_vec4u(base_word: u32) -> vec4<u32> {
+  return vec4<u32>(
+    sd_data_word(base_word + 0u),
+    sd_data_word(base_word + 1u),
+    sd_data_word(base_word + 2u),
+    sd_data_word(base_word + 3u)
+  );
+}
+
+fn sd_vec4f(base_word: u32) -> vec4<f32> {
+  return bitcast<vec4<f32>>(sd_vec4u(base_word));
+}
+
+fn sd_light(li: u32) -> LightWGSL {
+  let base = scene_data.header.lights_offset_words + li * SCENE_LIGHT_WORDS;
+  var light: LightWGSL;
+  light.header = sd_vec4u(base + 0u);
+  light.position = sd_vec4f(base + 4u);
+  light.color = sd_vec4f(base + 8u);
+  light.params0 = sd_vec4f(base + 12u);
+  light.params1 = sd_vec4f(base + 16u);
+  return light;
+}
 struct TileAnimMeta {
   first_frame: u32,
   frame_count: u32,

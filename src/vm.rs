@@ -109,6 +109,23 @@ pub struct LightPod {
     pub params1: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct SceneDataHeaderPod {
+    pub lights_offset_words: u32,
+    pub lights_count: u32,
+    pub billboard_cmd_offset_words: u32,
+    pub billboard_cmd_count: u32,
+    pub billboard_poly_offset_words: u32,
+    pub billboard_poly_count: u32,
+    pub data_word_count: u32,
+    pub _reserved: u32,
+}
+
+#[allow(dead_code)]
+const SCENE_LIGHT_WORDS: u32 =
+    (std::mem::size_of::<LightPod>() / std::mem::size_of::<u32>()) as u32;
+
 /// VM instruction set
 #[derive(Debug)]
 pub enum Atom {
@@ -279,8 +296,8 @@ pub struct VMGpu {
     pub tile_tris: Option<wgpu::Buffer>,
     pub tile_meta_ssbo: Option<wgpu::Buffer>,
     pub tile_frames_ssbo: Option<wgpu::Buffer>,
-    // Lights
-    pub lights_ssbo: Option<wgpu::Buffer>,
+    // Scene-wide data (lights, billboards, ...)
+    pub scene_data_ssbo: Option<wgpu::Buffer>,
     // --- Scene-wide uniform grid buffers (3D)
     pub grid_hdr: Option<wgpu::Buffer>,
     pub grid_data: Option<wgpu::Buffer>,
@@ -773,6 +790,66 @@ impl VM {
         }
 
         (verts_flat, indices_flat, tile_bins, tile_tris)
+    }
+
+    fn build_scene_data_blob(&self) -> Vec<u8> {
+        let mut lights_flat: Vec<LightPod> = Vec::with_capacity(self.lights.len());
+        for (_id, l) in &self.lights {
+            let flicker: f32 = if l.flicker > 0.0 {
+                let hash = hash_u32(self.animation_counter as u32);
+                let combined_hash = hash.wrapping_add(
+                    (l.position.x as u32 + l.position.y as u32 + l.position.z as u32) * 100,
+                );
+                let flicker_value = (combined_hash as f32 / u32::MAX as f32).clamp(0.0, 1.0);
+                1.0 - flicker_value * l.flicker
+            } else {
+                1.0
+            };
+
+            lights_flat.push(LightPod {
+                header: [
+                    match l.light_type {
+                        LightType::Point => 0,
+                    },
+                    if l.emitting { 1 } else { 0 },
+                    0,
+                    0,
+                ],
+                position: [l.position.x, l.position.y, l.position.z, 0.0],
+                color: [l.color.x, l.color.y, l.color.z, 0.0],
+                params0: [l.intensity, l.radius, l.start_distance, l.end_distance],
+                params1: [flicker, 0.0, 0.0, 0.0],
+            });
+        }
+
+        let mut data_words: Vec<u32> = Vec::new();
+        let lights_offset_words = data_words.len() as u32;
+        if !lights_flat.is_empty() {
+            data_words.extend_from_slice(bytemuck::cast_slice(&lights_flat));
+        }
+        let logical_word_count = data_words.len() as u32;
+        if data_words.is_empty() {
+            // wgpu validation requires at least one word for runtime-sized arrays
+            data_words.push(0);
+        }
+
+        let header = SceneDataHeaderPod {
+            lights_offset_words,
+            lights_count: lights_flat.len() as u32,
+            billboard_cmd_offset_words: 0,
+            billboard_cmd_count: 0,
+            billboard_poly_offset_words: 0,
+            billboard_poly_count: 0,
+            data_word_count: logical_word_count,
+            _reserved: 0,
+        };
+
+        let header_bytes = bytemuck::bytes_of(&header);
+        let data_bytes: &[u8] = bytemuck::cast_slice(&data_words);
+        let mut blob = Vec::with_capacity(header_bytes.len() + data_bytes.len());
+        blob.extend_from_slice(header_bytes);
+        blob.extend_from_slice(data_bytes);
+        blob
     }
 
     #[inline]
@@ -1433,7 +1510,7 @@ impl VM {
             tile_tris: None,
             tile_meta_ssbo: None,
             tile_frames_ssbo: None,
-            lights_ssbo: None,
+            scene_data_ssbo: None,
             grid_hdr: None,
             grid_data: None,
         });
@@ -1627,7 +1704,7 @@ impl VM {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    // lights
+                    // scene data (lights, billboards, ...)
                     binding: 9,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
@@ -1695,6 +1772,7 @@ impl VM {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    // scene data (lights, billboards, ...)
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
@@ -1930,6 +2008,19 @@ impl VM {
         }
 
         use wgpu::util::DeviceExt;
+
+        let scene_data_blob = self.build_scene_data_blob();
+        {
+            let g = self.gpu.as_mut().unwrap();
+            g.scene_data_ssbo = Some(device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("vm-scene-data-ssbo"),
+                    contents: &scene_data_blob,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                },
+            ));
+        }
+
         let mut uploaded_geometry = false;
         {
             let g = self.gpu.as_mut().unwrap();
@@ -2021,53 +2112,8 @@ impl VM {
             ));
         }
 
-        let mut lights_flat: Vec<LightPod> = Vec::with_capacity(self.lights.len().max(1));
-        if self.lights.is_empty() {
-            lights_flat.push(LightPod {
-                header: [0, 0, 0, 0],
-                position: [0.0, 0.0, 0.0, 0.0],
-                color: [0.0, 0.0, 0.0, 0.0],
-                params0: [0.0, 0.0, 0.0, 0.0],
-                params1: [0.0, 0.0, 0.0, 0.0],
-            });
-        } else {
-            for (_id, l) in &self.lights {
-                let flicker: f32 = if l.flicker > 0.0 {
-                    let hash = hash_u32(self.animation_counter as u32);
-                    let combined_hash = hash.wrapping_add(
-                        (l.position.x as u32 + l.position.y as u32 + l.position.z as u32) * 100,
-                    );
-                    let flicker_value = (combined_hash as f32 / u32::MAX as f32).clamp(0.0, 1.0);
-                    1.0 - flicker_value * l.flicker
-                } else {
-                    1.0
-                };
-
-                lights_flat.push(LightPod {
-                    header: [
-                        match l.light_type {
-                            LightType::Point => 0,
-                        },
-                        if l.emitting { 1 } else { 0 },
-                        0,
-                        0,
-                    ],
-                    position: [l.position.x, l.position.y, l.position.z, 0.0],
-                    color: [l.color.x, l.color.y, l.color.z, 0.0],
-                    params0: [l.intensity, l.radius, l.start_distance, l.end_distance],
-                    params1: [flicker, 0.0, 0.0, 0.0],
-                });
-            }
-        }
-        let lights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-lights-ssbo"),
-            contents: bytemuck::cast_slice(&lights_flat),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let g = self.gpu.as_mut().unwrap();
-        g.lights_ssbo = Some(lights_buf);
         // Build bind group with surface view and atlas, plus 2D geometry SSBOs
+        let g = self.gpu.as_mut().unwrap();
         let view = &surface.gpu.as_ref().unwrap().view;
         g.u2d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vm-u2d-bg"),
@@ -2111,7 +2157,7 @@ impl VM {
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
-                    resource: g.lights_ssbo.as_ref().unwrap().as_entire_binding(),
+                    resource: g.scene_data_ssbo.as_ref().unwrap().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
@@ -2202,60 +2248,24 @@ impl VM {
             queue.write_buffer(g.u3d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
         }
 
-        // --- Lights ---
-        let mut lights_flat: Vec<LightPod> = Vec::with_capacity(self.lights.len().max(1));
-        if self.lights.is_empty() {
-            lights_flat.push(LightPod {
-                header: [0, 0, 0, 0],
-                position: [0.0, 0.0, 0.0, 0.0],
-                color: [0.0, 0.0, 0.0, 0.0],
-                params0: [0.0, 0.0, 0.0, 0.0],
-                params1: [0.0, 0.0, 0.0, 0.0],
-            });
-        } else {
-            for (_id, l) in &self.lights {
-                let flicker: f32 = if l.flicker > 0.0 {
-                    let hash = hash_u32(self.animation_counter as u32);
-                    let combined_hash = hash.wrapping_add(
-                        (l.position.x as u32 + l.position.y as u32 + l.position.z as u32) * 100,
-                    );
-                    let flicker_value = (combined_hash as f32 / u32::MAX as f32).clamp(0.0, 1.0);
-                    1.0 - flicker_value * l.flicker
-                } else {
-                    1.0
-                };
-
-                lights_flat.push(LightPod {
-                    header: [
-                        match l.light_type {
-                            LightType::Point => 0,
-                        },
-                        if l.emitting { 1 } else { 0 },
-                        0,
-                        0,
-                    ],
-                    position: [l.position.x, l.position.y, l.position.z, 0.0],
-                    color: [l.color.x, l.color.y, l.color.z, 0.0],
-                    params0: [l.intensity, l.radius, l.start_distance, l.end_distance],
-                    params1: [flicker, 0.0, 0.0, 0.0],
-                });
-            }
-        }
-        let lights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vm-lights-ssbo"),
-            contents: bytemuck::cast_slice(&lights_flat),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-        {
-            let g = self.gpu.as_mut().unwrap();
-            g.lights_ssbo = Some(lights_buf);
-        }
-
         self.upload_atlas_to_gpu_with(device, queue);
         let (_atlas_tex_view, _atlas_mat_tex_view) = self
             .shared_atlas
             .texture_views()
             .expect("atlas GPU resources missing");
+
+        use wgpu::util::DeviceExt;
+        let scene_data_blob = self.build_scene_data_blob();
+        {
+            let g = self.gpu.as_mut().unwrap();
+            g.scene_data_ssbo = Some(device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("vm-scene-data-ssbo"),
+                    contents: &scene_data_blob,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                },
+            ));
+        }
 
         // --- Build 3D geometry only when accel_dirty says so ---
         let mut geometry_changed = false;
@@ -2375,8 +2385,6 @@ impl VM {
             grid_changed = true;
             self.accel_dirty = false;
         }
-
-        use wgpu::util::DeviceExt;
         let gr = &self.scene_accel.grid;
 
         let mut uploaded_grid = false;
@@ -2509,7 +2517,7 @@ impl VM {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: g.lights_ssbo.as_ref().unwrap().as_entire_binding(),
+                        resource: g.scene_data_ssbo.as_ref().unwrap().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
