@@ -14,7 +14,8 @@ struct U2D {
   mat2d_inv_c2: vec4<f32>,
   lights_count: u32,
   vm_flags: u32,
-  _pad_lights: vec2<u32>,
+  anim_counter: u32,
+  _pad_lights: u32,
 };
 
 @group(0) @binding(0) var<uniform> U: U2D;
@@ -24,27 +25,50 @@ struct U2D {
 struct Vert {
   pos: vec2<f32>,
   uv: vec2<f32>,
-  uv_os: vec4<f32>,
+  tile_index: u32,
+  _pad_tile: u32,
 };
 struct Verts { data: array<Vert> };
 struct Indices { data: array<u32> };
 @group(0) @binding(4) var<storage, read> verts: Verts;
 @group(0) @binding(5) var<storage, read> indices: Indices;
 struct U32s { data: array<u32> };
-@group(0) @binding(6) var<storage, read> tile_offsets: U32s;
-@group(0) @binding(7) var<storage, read> tile_counts:  U32s;
-@group(0) @binding(8) var<storage, read> tile_tris:    U32s;
-
-struct LightWGSL {
-  header:   vec4<u32>,  // [light_type, emitting, _, _]
-  position: vec4<f32>,  // xyz, _
-  color:    vec4<f32>,  // rgb, _
-  params0:  vec4<f32>,  // [intensity, radius, startD, endD]
-  params1:  vec4<f32>,  // [flicker, _, _, _]
+struct TileBin {
+  offset: u32,
+  count: u32,
 };
-struct Lights { data: array<LightWGSL>, };
+struct TileBins {
+  data: array<TileBin>,
+};
+@group(0) @binding(6) var<storage, read> tile_bins: TileBins;
+@group(0) @binding(7) var<storage, read> tile_tris: U32s;
+@group(0) @binding(8) var atlas_mat_tex: texture_2d<f32>;
+struct LightWGSL {
+  header:   vec4<u32>,
+  position: vec4<f32>,
+  color:    vec4<f32>,
+  params0:  vec4<f32>,
+  params1:  vec4<f32>,
+};
+struct Lights { data: array<LightWGSL> };
 @group(0) @binding(9) var<storage, read> lights: Lights;
-@group(0) @binding(10) var atlas_mat_tex: texture_2d<f32>;
+struct TileAnimMeta {
+  first_frame: u32,
+  frame_count: u32,
+  _pad: vec2<u32>,
+};
+struct TileAnims {
+  data: array<TileAnimMeta>,
+};
+struct TileFrame {
+  ofs: vec2<f32>,
+  scale: vec2<f32>,
+};
+struct TileFrames {
+  data: array<TileFrame>,
+};
+@group(0) @binding(10) var<storage, read> tile_anims: TileAnims;
+@group(0) @binding(11) var<storage, read> tile_frames: TileFrames;
 
 fn tiles_x() -> u32 { return (U.fb_size.x + 7u) / 8u; }
 fn tiles_y() -> u32 { return (U.fb_size.y + 7u) / 8u; }
@@ -100,14 +124,31 @@ fn sv_min_edge_distance_px(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32
   return min(e0, min(e1, e2));
 }
 
+fn sv_tile_frame(tile_index: u32) -> TileFrame {
+  let meta_len = arrayLength(&tile_anims.data);
+  if (meta_len == 0u) {
+    return TileFrame(vec2<f32>(0.0), vec2<f32>(0.0));
+  }
+  let idx = min(tile_index, meta_len - 1u);
+  let anim = tile_anims.data[idx];
+  let count = max(anim.frame_count, 1u);
+  let frames_len = arrayLength(&tile_frames.data);
+  if (frames_len == 0u) {
+    return TileFrame(vec2<f32>(0.0), vec2<f32>(0.0));
+  }
+  let frame_offset = anim.first_frame + (U.anim_counter % count);
+  let frame_idx = min(frame_offset, frames_len - 1u);
+  return tile_frames.data[frame_idx];
+}
+
 fn sv_tri_atlas_uv(i0: u32, i1: u32, i2: u32, w: vec3<f32>) -> vec2<f32> {
   let uv0 = verts.data[i0].uv;
   let uv1 = verts.data[i1].uv;
   let uv2 = verts.data[i2].uv;
   let uv_obj = uv0 * w.x + uv1 * w.y + uv2 * w.z;
-  let os = verts.data[i0].uv_os;
+  let frame = sv_tile_frame(verts.data[i0].tile_index);
   let uv_wrapped = fract(uv_obj);
-  return os.xy + uv_wrapped * os.zw;
+  return frame.ofs + uv_wrapped * frame.scale;
 }
 
 fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
@@ -143,8 +184,9 @@ fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
 }
 
 fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
-  let off = tile_offsets.data[tid];
-  let cnt = tile_counts.data[tid];
+  let bin = tile_bins.data[tid];
+  let off = bin.offset;
+  let cnt = bin.count;
   for (var k: u32 = 0u; k < cnt; k = k + 1u) {
     let t  = tile_tris.data[off + k];
     let i0 = indices.data[3u*t + 0u];

@@ -4,7 +4,7 @@ const VM_FLAG_SKIP_CLEAR: u32 = 0x1;
 
 use crate::{
     Camera3D, CameraKind, Chunk, Light, LightType, Poly2D, Poly3D, Texture,
-    atlas::{AtlasEntry, SharedAtlas, default_material_frame},
+    atlas::{AtlasEntry, AtlasGpuTables, SharedAtlas, default_material_frame},
 };
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
@@ -47,7 +47,15 @@ pub enum GeoId {
 pub struct Vert2DPod {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
-    pub uv_os: [f32; 4],
+    pub tile_index: u32,
+    pub _pad_tile: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TileBinPod {
+    pub offset: u32,
+    pub count: u32,
 }
 
 #[repr(C)]
@@ -57,10 +65,37 @@ pub struct Vert3DPod {
     pub _pad_pos: f32,     // 16
     pub uv: [f32; 2],      // +8  = 24
     pub _pad_uv: [f32; 2], // +8  = 32  <-- NEW: force 16-byte alignment before next vec4
-    pub uv_os: [f32; 4],   // +16 = 48
+    pub tile_index: u32,
+    pub _pad_tile: u32,
+    pub _pad_tile2: [f32; 2],
     pub normal: [f32; 3],
     pub _pad_n: f32, // +16 = 64 total
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TileAnimMetaPod {
+    pub first_frame: u32,
+    pub frame_count: u32,
+    _pad: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TileFramePod {
+    pub ofs: [f32; 2],
+    pub scale: [f32; 2],
+}
+
+const DUMMY_TILE_META: TileAnimMetaPod = TileAnimMetaPod {
+    first_frame: 0,
+    frame_count: 0,
+    _pad: [0, 0],
+};
+const DUMMY_TILE_FRAME: TileFramePod = TileFramePod {
+    ofs: [0.0, 0.0],
+    scale: [0.0, 0.0],
+};
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightPod {
@@ -240,16 +275,15 @@ pub struct VMGpu {
     pub v3d_ssbo: Option<wgpu::Buffer>,
     pub i3d_ssbo: Option<wgpu::Buffer>,
     // --- Tiling
-    pub tile_offsets: Option<wgpu::Buffer>,
-    pub tile_counts: Option<wgpu::Buffer>,
+    pub tile_bins: Option<wgpu::Buffer>,
     pub tile_tris: Option<wgpu::Buffer>,
+    pub tile_meta_ssbo: Option<wgpu::Buffer>,
+    pub tile_frames_ssbo: Option<wgpu::Buffer>,
     // Lights
     pub lights_ssbo: Option<wgpu::Buffer>,
     // --- Scene-wide uniform grid buffers (3D)
     pub grid_hdr: Option<wgpu::Buffer>,
-    pub grid_offsets: Option<wgpu::Buffer>,
-    pub grid_counts: Option<wgpu::Buffer>,
-    pub grid_tris: Option<wgpu::Buffer>,
+    pub grid_data: Option<wgpu::Buffer>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -321,7 +355,8 @@ pub struct Compute2DUniforms {
 
     pub lights_count: u32,
     pub vm_flags: u32,
-    pub _pad_lights: [u32; 2],
+    pub anim_counter: u32,
+    pub _pad_lights: u32,
 }
 
 #[repr(C)]
@@ -349,7 +384,8 @@ pub struct Compute3DUniforms {
     // Lights
     pub lights_count: u32,
     pub vm_flags: u32,
-    pub _pad_lights: [u32; 2],
+    pub anim_counter: u32,
+    pub _pad_lights: u32,
 
     // Camera3D
     pub cam_pos: [f32; 4], // xyz, pad
@@ -372,6 +408,7 @@ pub struct Grid3DHeader {
     pub origin: [f32; 4],    // xyz, pad
     pub cell_size: [f32; 4], // xyz, pad
     pub dims: [u32; 4],      // nx, ny, nz, pad
+    pub ranges: [u32; 4],
 }
 
 pub const SCENEVM_2D_CS_WGSL: &str = r#"
@@ -453,10 +490,13 @@ pub struct VM {
     skip_surface_clear: bool,
     cached_v2: Vec<Vert2DPod>,
     cached_i2: Vec<u32>,
-    cached_tile_offsets: Vec<u32>,
-    cached_tile_counts: Vec<u32>,
+    cached_tile_bins: Vec<TileBinPod>,
     cached_tile_tris: Vec<u32>,
     cached_fb_size_2d: (u32, u32),
+    cached_tile_anim_meta: Vec<TileAnimMetaPod>,
+    cached_tile_frame_data: Vec<TileFramePod>,
+    cached_atlas_layout_version: u64,
+    tile_gpu_dirty: bool,
 
     // Camera
     pub camera3d: Camera3D,
@@ -498,14 +538,11 @@ impl VM {
         &self,
         fb_w: u32,
         fb_h: u32,
-    ) -> (Vec<Vert2DPod>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+    ) -> (Vec<Vert2DPod>, Vec<u32>, Vec<TileBinPod>, Vec<u32>) {
         use vek::Vec3;
 
         let mut verts_flat: Vec<Vert2DPod> = Vec::new();
         let mut indices_flat: Vec<u32> = Vec::new();
-        let (atlas_width_px, atlas_height_px) = self.atlas_dims();
-        let atlas_w = atlas_width_px as f32;
-        let atlas_h = atlas_height_px as f32;
 
         #[derive(Clone, Copy)]
         struct TriMeta {
@@ -522,15 +559,10 @@ impl VM {
                 if !poly.visible {
                     continue;
                 }
-                let rect = match self.frame_rect_owned(&poly.tile_id, self.animation_counter as u32)
-                {
-                    Some(r) => r,
+                let tile_index = match self.shared_atlas.tile_index(&poly.tile_id) {
+                    Some(idx) => idx,
                     None => continue,
                 };
-                let ofs_x = rect.x as f32 / atlas_w;
-                let ofs_y = rect.y as f32 / atlas_h;
-                let scl_x = rect.w as f32 / atlas_w;
-                let scl_y = rect.h as f32 / atlas_h;
 
                 let base = verts_flat.len() as u32;
 
@@ -543,7 +575,8 @@ impl VM {
                     verts_flat.push(Vert2DPod {
                         pos: [world_p.x, world_p.y],
                         uv: [base_uv[0], base_uv[1]],
-                        uv_os: [ofs_x, ofs_y, scl_x, scl_y],
+                        tile_index,
+                        _pad_tile: 0,
                     });
                 }
 
@@ -570,15 +603,10 @@ impl VM {
                     if !ls.visible || ls.points.len() < 2 {
                         continue;
                     }
-                    let rect =
-                        match self.frame_rect_owned(&ls.tile_id, self.animation_counter as u32) {
-                            Some(r) => r,
-                            None => continue,
-                        };
-                    let ofs_x = rect.x as f32 / atlas_w;
-                    let ofs_y = rect.y as f32 / atlas_h;
-                    let scl_x = rect.w as f32 / atlas_w;
-                    let scl_y = rect.h as f32 / atlas_h;
+                    let tile_index = match self.shared_atlas.tile_index(&ls.tile_id) {
+                        Some(idx) => idx,
+                        None => continue,
+                    };
                     let mut pts_scr: Vec<[f32; 2]> = Vec::with_capacity(ls.points.len());
                     for p in &ls.points {
                         let local = Vec3::new(p[0], p[1], 1.0);
@@ -612,7 +640,8 @@ impl VM {
                             verts_flat.push(Vert2DPod {
                                 pos: [0.0, 0.0],
                                 uv: [uv01[0], uv01[1]],
-                                uv_os: [ofs_x, ofs_y, scl_x, scl_y],
+                                tile_index,
+                                _pad_tile: 0,
                             });
                         }
                         let n = verts_flat.len();
@@ -728,13 +757,22 @@ impl VM {
             tile_tris.push(0);
         }
 
-        (
-            verts_flat,
-            indices_flat,
-            tile_offsets,
-            tile_counts,
-            tile_tris,
-        )
+        let mut tile_bins: Vec<TileBinPod> = Vec::with_capacity(tile_offsets.len());
+        for (offset, count) in tile_offsets.iter().zip(tile_counts.iter()) {
+            tile_bins.push(TileBinPod {
+                offset: *offset,
+                count: *count,
+            });
+        }
+
+        if tile_bins.is_empty() {
+            tile_bins.push(TileBinPod {
+                offset: 0,
+                count: 0,
+            });
+        }
+
+        (verts_flat, indices_flat, tile_bins, tile_tris)
     }
 
     #[inline]
@@ -761,6 +799,104 @@ impl VM {
 
     fn frame_rect_owned(&self, id: &Uuid, anim_frame: u32) -> Option<AtlasEntry> {
         self.shared_atlas.frame_rect(id, anim_frame)
+    }
+
+    fn ensure_tile_metadata(&mut self) {
+        let layout_version = self.shared_atlas.layout_version();
+        if layout_version != self.cached_atlas_layout_version {
+            self.rebuild_tile_metadata(layout_version);
+        }
+    }
+
+    fn rebuild_tile_metadata(&mut self, new_version: u64) {
+        let (atlas_w_px, atlas_h_px) = self.atlas_dims();
+        let atlas_w = atlas_w_px.max(1) as f32;
+        let atlas_h = atlas_h_px.max(1) as f32;
+        let tables: AtlasGpuTables = self.shared_atlas.gpu_tile_tables();
+
+        self.cached_tile_anim_meta.clear();
+        if tables.metas.is_empty() {
+            self.cached_tile_anim_meta.push(TileAnimMetaPod {
+                first_frame: 0,
+                frame_count: 0,
+                _pad: [0, 0],
+            });
+        } else {
+            for meta in tables.metas {
+                self.cached_tile_anim_meta.push(TileAnimMetaPod {
+                    first_frame: meta.first_frame,
+                    frame_count: meta.frame_count,
+                    _pad: [0, 0],
+                });
+            }
+        }
+
+        self.cached_tile_frame_data.clear();
+        if tables.frames.is_empty() {
+            self.cached_tile_frame_data.push(TileFramePod {
+                ofs: [0.0, 0.0],
+                scale: [0.0, 0.0],
+            });
+        } else {
+            for rect in tables.frames {
+                self.cached_tile_frame_data.push(TileFramePod {
+                    ofs: [rect.x as f32 / atlas_w, rect.y as f32 / atlas_h],
+                    scale: [rect.w as f32 / atlas_w, rect.h as f32 / atlas_h],
+                });
+            }
+        }
+
+        self.cached_atlas_layout_version = new_version;
+        self.tile_gpu_dirty = true;
+        self.log_layer(format!(
+            "Updated tile metadata (tiles: {}, frames: {})",
+            self.cached_tile_anim_meta.len(),
+            self.cached_tile_frame_data.len()
+        ));
+    }
+
+    fn upload_tile_metadata_to_gpu(&mut self, device: &wgpu::Device) {
+        if self.gpu.is_none() {
+            return;
+        }
+        self.ensure_tile_metadata();
+        use wgpu::util::DeviceExt;
+        let g = self.gpu.as_mut().unwrap();
+
+        let meta_slice: &[TileAnimMetaPod] = if self.cached_tile_anim_meta.is_empty() {
+            std::slice::from_ref(&DUMMY_TILE_META)
+        } else {
+            &self.cached_tile_anim_meta
+        };
+        if self.tile_gpu_dirty || g.tile_meta_ssbo.is_none() {
+            g.tile_meta_ssbo = Some(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vm-tile-meta-ssbo"),
+                    contents: bytemuck::cast_slice(meta_slice),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                }),
+            );
+        }
+
+        let frame_slice: &[TileFramePod] = if self.cached_tile_frame_data.is_empty() {
+            std::slice::from_ref(&DUMMY_TILE_FRAME)
+        } else {
+            &self.cached_tile_frame_data
+        };
+        if self.tile_gpu_dirty || g.tile_frames_ssbo.is_none() {
+            g.tile_frames_ssbo = Some(device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("vm-tile-frame-ssbo"),
+                    contents: bytemuck::cast_slice(frame_slice),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                },
+            ));
+        }
+
+        if self.tile_gpu_dirty {
+            self.log_layer("Uploaded tile metadata buffers");
+        }
+        self.tile_gpu_dirty = false;
     }
 
     /// Create a VM with a fixed-size atlas (atlas_w x atlas_h).
@@ -815,10 +951,13 @@ impl VM {
             skip_surface_clear: false,
             cached_v2: Vec::new(),
             cached_i2: Vec::new(),
-            cached_tile_offsets: Vec::new(),
-            cached_tile_counts: Vec::new(),
+            cached_tile_bins: Vec::new(),
             cached_tile_tris: Vec::new(),
             cached_fb_size_2d: (0, 0),
+            cached_tile_anim_meta: Vec::new(),
+            cached_tile_frame_data: Vec::new(),
+            cached_atlas_layout_version: 0,
+            tile_gpu_dirty: true,
             camera3d: Camera3D::default(),
             enabled: true,
             layer_index: 0,
@@ -1053,7 +1192,6 @@ impl VM {
             }
             Atom::SetAnimationCounter(n) => {
                 self.animation_counter = n;
-                self.mark_all_geometry_dirty();
             }
             Atom::SetSource2D(src) => {
                 self.source2d = src;
@@ -1291,14 +1429,13 @@ impl VM {
             i2d_ssbo: None,
             v3d_ssbo: None,
             i3d_ssbo: None,
-            tile_offsets: None,
-            tile_counts: None,
+            tile_bins: None,
             tile_tris: None,
+            tile_meta_ssbo: None,
+            tile_frames_ssbo: None,
             lights_ssbo: None,
             grid_hdr: None,
-            grid_offsets: None,
-            grid_counts: None,
-            grid_tris: None,
+            grid_data: None,
         });
     }
 
@@ -1435,7 +1572,7 @@ impl VM {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    // tile offsets
+                    // tile bins (offset/count)
                     binding: 6,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
@@ -1446,7 +1583,7 @@ impl VM {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    // tile counts
+                    // tile tris
                     binding: 7,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
@@ -1457,8 +1594,19 @@ impl VM {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    // tile tris
+                    // material atlas texture
                     binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // tile animation metadata
+                    binding: 10,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -1468,23 +1616,24 @@ impl VM {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    // tile frame rects
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // lights
                     binding: 9,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    // material atlas texture
-                    binding: 10,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
                     },
                     count: None,
                 },
@@ -1588,7 +1737,7 @@ impl VM {
                     },
                     count: None,
                 },
-                // binding 8: grid offsets (storage read)
+                // binding 8: combined grid data (storage read)
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -1599,9 +1748,8 @@ impl VM {
                     },
                     count: None,
                 },
-                // binding 9: grid counts (storage read)
                 wgpu::BindGroupLayoutEntry {
-                    binding: 9,
+                    binding: 12,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -1610,9 +1758,8 @@ impl VM {
                     },
                     count: None,
                 },
-                // binding 10: grid tris (storage read)
                 wgpu::BindGroupLayoutEntry {
-                    binding: 10,
+                    binding: 13,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -1727,6 +1874,7 @@ impl VM {
             self.init_gpu(device);
         }
         self.init_compute(device);
+        self.upload_tile_metadata_to_gpu(device);
         // Require surface to be STORAGE-capable. If your Texture lacks this, recreate with STORAGE_BINDING.
         surface.ensure_gpu_with(device);
         // Update uniforms
@@ -1755,7 +1903,8 @@ impl VM {
             mat2d_inv_c2: [m_inv[(0, 2)], m_inv[(1, 2)], m_inv[(2, 2)], 0.0],
             lights_count: self.lights.len() as u32,
             vm_flags: self.vm_flags(),
-            _pad_lights: [0, 0],
+            anim_counter: self.animation_counter as u32,
+            _pad_lights: 0,
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u2d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
@@ -1769,12 +1918,11 @@ impl VM {
         let fb_dims = (fb_w, fb_h);
         let mut geometry_changed = false;
         if self.geometry2d_dirty || self.cached_v2.is_empty() || self.cached_fb_size_2d != fb_dims {
-            let (verts_flat, indices_flat, tile_offsets, tile_counts, tile_tris) =
+            let (verts_flat, indices_flat, tile_bins, tile_tris) =
                 self.build_2d_batches(fb_w, fb_h);
             self.cached_v2 = verts_flat;
             self.cached_i2 = indices_flat;
-            self.cached_tile_offsets = tile_offsets;
-            self.cached_tile_counts = tile_counts;
+            self.cached_tile_bins = tile_bins;
             self.cached_tile_tris = tile_tris;
             self.cached_fb_size_2d = fb_dims;
             self.geometry2d_dirty = false;
@@ -1793,7 +1941,8 @@ impl VM {
                         bytemuck::bytes_of(&Vert2DPod {
                             pos: [0.0, 0.0],
                             uv: [0.0, 0.0],
-                            uv_os: [0.0, 0.0, 0.0, 0.0],
+                            tile_index: 0,
+                            _pad_tile: 0,
                         })
                         .to_vec(),
                     );
@@ -1828,20 +1977,11 @@ impl VM {
                 }
             }
 
-            if geometry_changed
-                || g.tile_offsets.is_none()
-                || g.tile_counts.is_none()
-                || g.tile_tris.is_none()
-            {
-                let offsets_slice: &[u32] = if self.cached_tile_offsets.is_empty() {
-                    &DUMMY_U32_1
+            if geometry_changed || g.tile_bins.is_none() || g.tile_tris.is_none() {
+                let bins_slice: &[TileBinPod] = if self.cached_tile_bins.is_empty() {
+                    &[]
                 } else {
-                    &self.cached_tile_offsets
-                };
-                let counts_slice: &[u32] = if self.cached_tile_counts.is_empty() {
-                    &DUMMY_U32_1
-                } else {
-                    &self.cached_tile_counts
+                    &self.cached_tile_bins
                 };
                 let tris_slice: &[u32] = if self.cached_tile_tris.is_empty() {
                     &DUMMY_U32_1
@@ -1849,20 +1989,20 @@ impl VM {
                     &self.cached_tile_tris
                 };
 
-                g.tile_offsets = Some(device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("vm-2d-tile-offsets"),
-                        contents: bytemuck::cast_slice(offsets_slice),
+                g.tile_bins = Some(
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vm-2d-tile-bins"),
+                        contents: if bins_slice.is_empty() {
+                            bytemuck::bytes_of(&TileBinPod {
+                                offset: 0,
+                                count: 0,
+                            })
+                        } else {
+                            bytemuck::cast_slice(bins_slice)
+                        },
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    },
-                ));
-                g.tile_counts = Some(device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("vm-2d-tile-counts"),
-                        contents: bytemuck::cast_slice(counts_slice),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    },
-                ));
+                    }),
+                );
                 g.tile_tris = Some(
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("vm-2d-tile-tris"),
@@ -1877,11 +2017,10 @@ impl VM {
                 "Uploaded {} 2D verts, {} indices (tiles: {})",
                 self.cached_v2.len(),
                 self.cached_i2.len(),
-                self.cached_tile_offsets.len()
+                self.cached_tile_bins.len()
             ));
         }
 
-        // Lights
         let mut lights_flat: Vec<LightPod> = Vec::with_capacity(self.lights.len().max(1));
         if self.lights.is_empty() {
             lights_flat.push(LightPod {
@@ -1925,9 +2064,9 @@ impl VM {
             contents: bytemuck::cast_slice(&lights_flat),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
+
         let g = self.gpu.as_mut().unwrap();
         g.lights_ssbo = Some(lights_buf);
-
         // Build bind group with surface view and atlas, plus 2D geometry SSBOs
         let view = &surface.gpu.as_ref().unwrap().view;
         g.u2d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1960,15 +2099,15 @@ impl VM {
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: g.tile_offsets.as_ref().unwrap().as_entire_binding(),
+                    resource: g.tile_bins.as_ref().unwrap().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: g.tile_counts.as_ref().unwrap().as_entire_binding(),
+                    resource: g.tile_tris.as_ref().unwrap().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 8,
-                    resource: g.tile_tris.as_ref().unwrap().as_entire_binding(),
+                    resource: wgpu::BindingResource::TextureView(&atlas_mat_tex_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -1976,7 +2115,11 @@ impl VM {
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: wgpu::BindingResource::TextureView(&atlas_mat_tex_view),
+                    resource: g.tile_meta_ssbo.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: g.tile_frames_ssbo.as_ref().unwrap().as_entire_binding(),
                 },
             ],
         }));
@@ -2011,6 +2154,7 @@ impl VM {
             self.init_gpu(device);
         }
         self.init_compute(device);
+        self.upload_tile_metadata_to_gpu(device);
         surface.ensure_gpu_with(device);
 
         // --- Uniforms ---
@@ -2036,7 +2180,8 @@ impl VM {
             mat3d_c3: [m[(0, 3)], m[(1, 3)], m[(2, 3)], m[(3, 3)]],
             lights_count: self.lights.len() as u32,
             vm_flags: self.vm_flags(),
-            _pad_lights: [0, 0],
+            anim_counter: self.animation_counter as u32,
+            _pad_lights: 0,
             cam_pos: [c.pos.x, c.pos.y, c.pos.z, 0.0],
             cam_fwd: [c.forward.x, c.forward.y, c.forward.z, 0.0],
             cam_right: [c.right.x, c.right.y, c.right.z, 0.0],
@@ -2125,11 +2270,10 @@ impl VM {
                             continue;
                         }
 
-                        let rect =
-                            match self.frame_rect(&poly.tile_id, self.animation_counter as u32) {
-                                Some(r) => r,
-                                None => continue,
-                            };
+                        let tile_index = match self.shared_atlas.tile_index(&poly.tile_id) {
+                            Some(idx) => idx,
+                            None => continue,
+                        };
 
                         let vcount = poly.vertices.len();
                         let mut poly_pos: Vec<[f32; 3]> = Vec::with_capacity(vcount);
@@ -2171,15 +2315,6 @@ impl VM {
 
                         let base = v3.len() as u32;
 
-                        let (atlas_w_px, atlas_h_px) = self.atlas_dims();
-                        let atlas_w = atlas_w_px as f32;
-                        let atlas_h = atlas_h_px as f32;
-
-                        let ofs_x = rect.x as f32 / atlas_w;
-                        let ofs_y = rect.y as f32 / atlas_h;
-                        let scl_x = rect.w as f32 / atlas_w;
-                        let scl_y = rect.h as f32 / atlas_h;
-
                         for (i, p) in poly_pos.iter().enumerate() {
                             let uv0 = poly.uvs[i];
                             let n = poly_nrm[i];
@@ -2188,7 +2323,9 @@ impl VM {
                                 _pad_pos: 0.0,
                                 uv: [uv0[0], uv0[1]],
                                 _pad_uv: [0.0, 0.0],
-                                uv_os: [ofs_x, ofs_y, scl_x, scl_y],
+                                tile_index,
+                                _pad_tile: 0,
+                                _pad_tile2: [0.0, 0.0],
                                 normal: [n[0], n[1], n[2]],
                                 _pad_n: 0.0,
                             });
@@ -2211,7 +2348,9 @@ impl VM {
                     _pad_pos: 0.0,
                     uv: [0.0; 2],
                     _pad_uv: [0.0, 0.0],
-                    uv_os: [0.0, 0.0, 0.0, 0.0],
+                    tile_index: 0,
+                    _pad_tile: 0,
+                    _pad_tile2: [0.0, 0.0],
                     normal: [0.0, 0.0, 1.0],
                     _pad_n: 0.0,
                 });
@@ -2240,38 +2379,44 @@ impl VM {
         use wgpu::util::DeviceExt;
         let gr = &self.scene_accel.grid;
 
-        let grid_hdr_data = Grid3DHeader {
-            origin: [gr.origin.x, gr.origin.y, gr.origin.z, 0.0],
-            cell_size: [gr.cell_size.x, gr.cell_size.y, gr.cell_size.z, 0.0],
-            dims: [gr.dims[0].max(1), gr.dims[1].max(1), gr.dims[2].max(1), 0],
-        };
-
-        let cell_offsets_slice: &[u32] = if gr.cell_offsets.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &gr.cell_offsets
-        };
-        let cell_counts_slice: &[u32] = if gr.cell_counts.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &gr.cell_counts
-        };
-        let cell_tris_slice: &[u32] = if gr.cell_tris.is_empty() {
-            &DUMMY_U32_1
-        } else {
-            &gr.cell_tris
-        };
-
         let mut uploaded_grid = false;
         let mut uploaded_geom = false;
         {
             let g = self.gpu.as_mut().unwrap();
-            let need_grid_upload = grid_changed
-                || g.grid_hdr.is_none()
-                || g.grid_offsets.is_none()
-                || g.grid_counts.is_none()
-                || g.grid_tris.is_none();
+            let need_grid_upload = grid_changed || g.grid_hdr.is_none() || g.grid_data.is_none();
             if need_grid_upload {
+                let offsets_data: Vec<u32> = if gr.cell_offsets.is_empty() {
+                    vec![0]
+                } else {
+                    gr.cell_offsets.clone()
+                };
+                let counts_data: Vec<u32> = if gr.cell_counts.is_empty() {
+                    vec![0]
+                } else {
+                    gr.cell_counts.clone()
+                };
+                let tris_data: Vec<u32> = if gr.cell_tris.is_empty() {
+                    vec![0]
+                } else {
+                    gr.cell_tris.clone()
+                };
+
+                let offsets_start = 0u32;
+                let counts_start = offsets_start + offsets_data.len() as u32;
+                let tris_start = counts_start + counts_data.len() as u32;
+                let mut combined: Vec<u32> =
+                    Vec::with_capacity(offsets_data.len() + counts_data.len() + tris_data.len());
+                combined.extend_from_slice(&offsets_data);
+                combined.extend_from_slice(&counts_data);
+                combined.extend_from_slice(&tris_data);
+
+                let grid_hdr_data = Grid3DHeader {
+                    origin: [gr.origin.x, gr.origin.y, gr.origin.z, 0.0],
+                    cell_size: [gr.cell_size.x, gr.cell_size.y, gr.cell_size.z, 0.0],
+                    dims: [gr.dims[0].max(1), gr.dims[1].max(1), gr.dims[2].max(1), 0],
+                    ranges: [offsets_start, counts_start, tris_start, 0],
+                };
+
                 g.grid_hdr = Some(
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("vm-grid3d-hdr"),
@@ -2279,24 +2424,10 @@ impl VM {
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     }),
                 );
-                g.grid_offsets = Some(device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("vm-grid3d-offsets"),
-                        contents: bytemuck::cast_slice(cell_offsets_slice),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    },
-                ));
-                g.grid_counts = Some(device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("vm-grid3d-counts"),
-                        contents: bytemuck::cast_slice(cell_counts_slice),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    },
-                ));
-                g.grid_tris = Some(
+                g.grid_data = Some(
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("vm-grid3d-tris"),
-                        contents: bytemuck::cast_slice(cell_tris_slice),
+                        label: Some("vm-grid3d-data"),
+                        contents: bytemuck::cast_slice(&combined),
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     }),
                 );
@@ -2394,15 +2525,15 @@ impl VM {
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: g.grid_offsets.as_ref().unwrap().as_entire_binding(),
+                        resource: g.grid_data.as_ref().unwrap().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: g.grid_counts.as_ref().unwrap().as_entire_binding(),
+                        binding: 12,
+                        resource: g.tile_meta_ssbo.as_ref().unwrap().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 10,
-                        resource: g.grid_tris.as_ref().unwrap().as_entire_binding(),
+                        binding: 13,
+                        resource: g.tile_frames_ssbo.as_ref().unwrap().as_entire_binding(),
                     },
                 ],
             }));

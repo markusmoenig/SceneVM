@@ -11,6 +11,17 @@ pub struct AtlasEntry {
     pub h: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AtlasTileMeta {
+    pub first_frame: u32,
+    pub frame_count: u32,
+}
+
+pub struct AtlasGpuTables {
+    pub metas: Vec<AtlasTileMeta>,
+    pub frames: Vec<AtlasEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Tile {
     pub w: u32,
@@ -26,6 +37,8 @@ pub struct SharedAtlasInner {
     pub atlas_material: Texture,
     pub atlas_dirty: bool,
     pub layout_dirty: bool,
+    pub layout_version: u64,
+    pub tiles_index_map: FxHashMap<Uuid, u32>,
     pub atlas_map: FxHashMap<Uuid, Vec<AtlasEntry>>,
 }
 
@@ -44,6 +57,8 @@ impl SharedAtlas {
                 atlas_material: Texture::new(width, height),
                 atlas_dirty: true,
                 layout_dirty: true,
+                layout_version: 0,
+                tiles_index_map: FxHashMap::default(),
                 atlas_map: FxHashMap::default(),
             })),
         }
@@ -77,6 +92,35 @@ impl SharedAtlas {
         }
         guard.atlas_dirty = true;
         guard.layout_dirty = true;
+    }
+
+    pub fn layout_version(&self) -> u64 {
+        let guard = self.inner.lock().unwrap();
+        guard.layout_version
+    }
+
+    pub fn tile_index(&self, id: &Uuid) -> Option<u32> {
+        let guard = self.inner.lock().unwrap();
+        guard.tiles_index_map.get(id).copied()
+    }
+
+    pub fn gpu_tile_tables(&self) -> AtlasGpuTables {
+        let guard = self.inner.lock().unwrap();
+        let mut metas: Vec<AtlasTileMeta> = Vec::new();
+        let mut frames: Vec<AtlasEntry> = Vec::new();
+        for id in &guard.tiles_order {
+            if let Some(rects) = guard.atlas_map.get(id) {
+                if guard.tiles_index_map.contains_key(id) && !rects.is_empty() {
+                    let first = frames.len() as u32;
+                    frames.extend(rects.iter().cloned());
+                    metas.push(AtlasTileMeta {
+                        first_frame: first,
+                        frame_count: rects.len() as u32,
+                    });
+                }
+            }
+        }
+        AtlasGpuTables { metas, frames }
     }
 
     pub fn remove_tile(&self, id: &Uuid) {
@@ -256,6 +300,15 @@ fn build_atlas_inner(inner: &mut SharedAtlasInner) {
             inner.atlas_map.insert(*id, rects);
         }
     }
+
+    inner.tiles_index_map.clear();
+    for id in &inner.tiles_order {
+        if inner.atlas_map.contains_key(id) {
+            let idx = inner.tiles_index_map.len() as u32;
+            inner.tiles_index_map.insert(*id, idx);
+        }
+    }
+    inner.layout_version = inner.layout_version.wrapping_add(1);
 }
 
 pub fn default_material_frame(bytes: usize) -> Vec<u8> {

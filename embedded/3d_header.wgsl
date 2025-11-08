@@ -12,7 +12,8 @@ struct U3D {
   mat3d_c3: vec4<f32>,
   lights_count: u32,
   vm_flags: u32,
-  _pad_lights: vec2<u32>,
+  anim_counter: u32,
+  _pad_lights: u32,
 
   // --- Camera (matches Compute3DUniforms on the CPU) ---
   cam_pos:   vec4<f32>,  // xyz, pad
@@ -43,12 +44,13 @@ struct Lights { data: array<LightWGSL>, };
 
 // Vert3D layout:
 // - uv       : OBJECT UVs (not atlas-mapped). These can be any scale; we wrap in shader.
-// - uv_os    : (offset.xy, scale.zw) in ATLAS UV space for this triangle's sub-rect.
-//              These are expected to be constant per-triangle; we read them from i0.
 struct Vert3D {
   pos: vec3<f32>, _pad0: f32,
   uv: vec2<f32>,
-  uv_os: vec4<f32>,     // offset.xy, scale.zw  (atlas space)
+  _pad_uv: vec2<f32>,
+  tile_index: u32,
+  _pad_tile: u32,
+  _pad_tile2: vec2<f32>,
   normal: vec3<f32>, _pad2: f32
 };
 struct Verts3D { data: array<Vert3D> };
@@ -62,15 +64,31 @@ struct Grid3DHeader {
   origin: vec4<f32>,     // xyz, pad
   cell_size: vec4<f32>,  // xyz, pad
   dims: vec4<u32>,       // nx, ny, nz, pad
+  ranges: vec4<u32>,     // offsets_start, counts_start, tris_start, _
 };
 @group(0) @binding(7) var<uniform> gridH: Grid3DHeader;
-struct U32s { data: array<u32> };
-struct I32s { data: array<i32> };
-
-@group(0) @binding(8)  var<storage, read> grid_offsets: U32s;
-@group(0) @binding(9)  var<storage, read> grid_counts:  U32s;
-@group(0) @binding(10) var<storage, read> grid_tris:    U32s;
+struct GridDataBuffer {
+  data: array<u32>,
+};
+@group(0) @binding(8)  var<storage, read> grid_data: GridDataBuffer;
 @group(0) @binding(11) var atlas_mat_tex: texture_2d<f32>;
+struct TileAnimMeta {
+  first_frame: u32,
+  frame_count: u32,
+  _pad: vec2<u32>,
+};
+struct TileAnims {
+  data: array<TileAnimMeta>,
+};
+struct TileFrame {
+  ofs: vec2<f32>,
+  scale: vec2<f32>,
+};
+struct TileFrames {
+  data: array<TileFrame>,
+};
+@group(0) @binding(12) var<storage, read> tile_anims: TileAnims;
+@group(0) @binding(13) var<storage, read> tile_frames: TileFrames;
 
 fn sv_grid_active() -> bool { return U.gp9.w > 0.5; }
 
@@ -113,6 +131,23 @@ fn clamp_index_u(i: u32, len: u32) -> u32 {
 
 // ---- UV wrapping helpers (GPU-side repeat inside atlas rect) ----
 // OBJECT-UV bary mapping into atlas
+fn sv_tile_frame(tile_index: u32) -> TileFrame {
+  let meta_len = arrayLength(&tile_anims.data);
+  if (meta_len == 0u) {
+    return TileFrame(vec2<f32>(0.0), vec2<f32>(0.0));
+  }
+  let idx = min(tile_index, meta_len - 1u);
+  let anim = tile_anims.data[idx];
+  let count = max(anim.frame_count, 1u);
+  let frames_len = arrayLength(&tile_frames.data);
+  if (frames_len == 0u) {
+    return TileFrame(vec2<f32>(0.0), vec2<f32>(0.0));
+  }
+  let frame_offset = anim.first_frame + (U.anim_counter % count);
+  let frame_idx = min(frame_offset, frames_len - 1u);
+  return tile_frames.data[frame_idx];
+}
+
 fn sv_tri_atlas_uv_obj(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec2<f32> {
   // Barycentric blend of per-vertex OBJECT uv
   let uv0 = verts3d.data[i0].uv;
@@ -121,16 +156,12 @@ fn sv_tri_atlas_uv_obj(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec2<f32>
   let w = 1.0 - bu - bv;
   let uv_obj = uv0 * w + uv1 * bu + uv2 * bv;
 
-  // Per-triangle atlas mapping (assumed constant; read from vertex 0 of the tri)
-  // offset.xy and scale.zw are *atlas* UVs for the tile sub-rect
-  let os = verts3d.data[i0].uv_os;
-  let ofs = os.xy;
-  let scl = os.zw;
+  let frame = sv_tile_frame(verts3d.data[i0].tile_index);
 
   // Repeat OBJECT uv, then scale into sub-rect and add offset
   var uv_wrapped = fract(uv_obj);          // [0,1) repeat in object space
   uv_wrapped.y = fract(1.0 - uv_wrapped.y); // flip Y so tiles aren't upside down
-  let uv_atlas   = ofs + uv_wrapped * scl; // map into atlas sub-rect
+  let uv_atlas   = frame.ofs + uv_wrapped * frame.scale; // map into atlas sub-rect
   return uv_atlas;
 }
 
@@ -189,6 +220,18 @@ fn clamp_cell(c: vec3<i32>) -> vec3<i32> {
 
 fn grid_bounds_max() -> vec3<f32> {
   return grid_bounds_min() + grid_cell_size() * vec3<f32>(grid_dims());
+}
+
+fn grid_offset(idx: u32) -> u32 {
+  return grid_data.data[gridH.ranges.x + idx];
+}
+
+fn grid_count(idx: u32) -> u32 {
+  return grid_data.data[gridH.ranges.y + idx];
+}
+
+fn grid_tri_index(idx: u32) -> u32 {
+  return grid_data.data[gridH.ranges.z + idx];
 }
 
 // Ray/AABB for the whole grid, returns (hit, tEnter, tExit)
@@ -295,13 +338,13 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
     let iy = u32(cell.y);
     let iz = u32(cell.z);
     let idx = grid_cell_index(ix, iy, iz);
-    let off = grid_offsets.data[idx];
-    let cnt = grid_counts.data[idx];
+    let off = grid_offset(idx);
+    let cnt = grid_count(idx);
 
     // Test tris in this cell; accept the closest hit that lies BEFORE we cross the next cell boundary
     let tCellExit = min(tNext.x, min(tNext.y, tNext.z));
     for (var k: u32 = 0u; k < cnt; k = k + 1u) {
-      let tri = grid_tris.data[off + k];
+      let tri = grid_tri_index(off + k);
 
       // Fetch tri indices (tri references indices3d in packs of 3)
       let i0 = indices3d.data[3u*tri + 0u];
