@@ -934,6 +934,12 @@ impl VM {
         };
         if !billboard_cmds.is_empty() {
             data_words.extend_from_slice(bytemuck::cast_slice(&billboard_cmds));
+            if self.activity_logging {
+                self.log_layer(format!(
+                    "Uploaded {} dynamic billboards",
+                    billboard_cmds.len()
+                ));
+            }
         }
 
         let logical_word_count = data_words.len() as u32;

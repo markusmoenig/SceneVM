@@ -49,6 +49,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (col.a < 0.01) { continue; }
             dyn_color = col;
             dyn_hit = true;
+            break;
         }
     }
 

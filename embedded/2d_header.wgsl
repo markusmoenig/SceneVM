@@ -133,9 +133,9 @@ fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
   return cmd;
 }
 
-fn sv_screen_from_world(world: vec2<f32>) -> vec2<f32> {
+fn sv_screen_from_world(world: vec3<f32>) -> vec2<f32> {
   let M = mat3x3<f32>(U.mat2d_c0.xyz, U.mat2d_c1.xyz, U.mat2d_c2.xyz);
-  let v = M * vec3<f32>(world, 1.0);
+  let v = M * vec3<f32>(world.xy, 1.0);
   return v.xy;
 }
 
@@ -144,23 +144,30 @@ fn sd_billboard_hit_screen(pix: vec2<f32>, cmd: DynBillboardCmd) -> DynBillboard
   if (cmd.params.y != DYNAMIC_KIND_BILLBOARD_TILE) {
     return hit;
   }
-  let center_world = cmd.center_size.xyz;
-  let center_scr = sv_screen_from_world(center_world.xy);
-  let right_scr = sv_screen_from_world((center_world + cmd.axis_right.xyz).xy) - center_scr;
-  let up_scr = sv_screen_from_world((center_world + cmd.axis_up.xyz).xy) - center_scr;
-  let det = right_scr.x * up_scr.y - right_scr.y * up_scr.x;
+  let axis_u = cmd.axis_right.xyz;
+  let axis_v = cmd.axis_up.xyz;
+  if (all(axis_u == vec3<f32>(0.0)) || all(axis_v == vec3<f32>(0.0))) {
+    return hit;
+  }
+  let center = cmd.center_size.xyz;
+  let center_scr = sv_screen_from_world(center);
+  let right_scr = sv_screen_from_world(center + axis_u);
+  let up_scr    = sv_screen_from_world(center + axis_v);
+  let axis_scr_u = right_scr - center_scr;
+  let axis_scr_v = up_scr - center_scr;
+  let det = axis_scr_u.x * axis_scr_v.y - axis_scr_u.y * axis_scr_v.x;
   if (abs(det) < 1e-5) {
     return hit;
   }
   let rel = pix - center_scr;
   let inv = 1.0 / det;
-  let u = ( rel.x * up_scr.y - rel.y * up_scr.x) * inv;
-  let v = (-rel.x * right_scr.y + rel.y * right_scr.x) * inv;
+  let u = ( rel.x * axis_scr_v.y - rel.y * axis_scr_v.x) * inv;
+  let v = (-rel.x * axis_scr_u.y + rel.y * axis_scr_u.x) * inv;
   if (abs(u) > 1.0 || abs(v) > 1.0) {
     return hit;
   }
   hit.hit = true;
-  hit.uv = vec2<f32>(0.5 * (u + 1.0), 0.5 * (1.0 - v));
+  hit.uv = vec2<f32>(0.5 * (u + 1.0), 0.5 * (v + 1.0));
   hit.tile_index = cmd.params.x;
   return hit;
 }
