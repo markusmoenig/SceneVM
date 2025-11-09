@@ -233,6 +233,11 @@ fn build_atlas_inner(inner: &mut SharedAtlasInner) {
     inner.atlas_material.data.fill(0);
     inner.atlas_map.clear();
 
+    // Pre-allocate hash maps with estimated capacity
+    let estimated_tiles = inner.tiles_order.len();
+    inner.atlas_map.reserve(estimated_tiles);
+    inner.tiles_index_map.reserve(estimated_tiles);
+
     let mut pen_x: u32 = 0;
     let mut pen_y: u32 = 0;
     let mut shelf_h: u32 = 0;

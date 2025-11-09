@@ -43,7 +43,8 @@ impl Poly3D {
 
         // 24 verts (4 per face) in the order: -Z(front), +Z(back), -X(left), +X(right), +Y(top), -Y(bottom)
         // Each face wound CCW looking at the face.
-        let vertices: Vec<[f32; 4]> = vec![
+        let mut vertices: Vec<[f32; 4]> = Vec::with_capacity(24);
+        vertices.extend_from_slice(&[
             // front (-Z)
             p(-1.0, -1.0, -1.0),
             p(1.0, -1.0, -1.0),
@@ -74,7 +75,7 @@ impl Poly3D {
             p(1.0, -1.0, 1.0),
             p(1.0, -1.0, -1.0),
             p(-1.0, -1.0, -1.0),
-        ];
+        ]);
 
         // Per-face UVs (full 0..1 quad per face)
         let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(24);
@@ -86,8 +87,7 @@ impl Poly3D {
         let mut indices: Vec<(usize, usize, usize)> = Vec::with_capacity(12);
         for f in 0..6 {
             let b = f * 4;
-            indices.push((b + 0, b + 1, b + 2));
-            indices.push((b + 0, b + 2, b + 3));
+            indices.extend_from_slice(&[(b + 0, b + 1, b + 2), (b + 0, b + 2, b + 3)]);
         }
 
         Self {

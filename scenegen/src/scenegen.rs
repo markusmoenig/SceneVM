@@ -1,6 +1,6 @@
 use scenevm::{Atom, GeoId, Light, Poly2D, Poly3D, RenderMode, SceneVM};
 use theframework::prelude::*;
-
+use uuid::Uuid;
 use vek::Mat4;
 
 pub struct Circle {

@@ -54,9 +54,10 @@ impl Poly2D {
     /// Returns `None` if there are fewer than 2 valid points or all segments are degenerate.
     pub fn line(id: GeoId, tile_id: Uuid, points: Vec<[f32; 2]>, width: f32, layer: i32) -> Self {
         let half = 0.5 * width;
-        let mut vertices: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
-        let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 4);
-        let mut indices: Vec<(usize, usize, usize)> = Vec::with_capacity((points.len() - 1) * 2);
+        let valid_segments = points.len().saturating_sub(1);
+        let mut vertices: Vec<[f32; 2]> = Vec::with_capacity(valid_segments * 4);
+        let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(valid_segments * 4);
+        let mut indices: Vec<(usize, usize, usize)> = Vec::with_capacity(valid_segments * 2);
 
         for seg in 0..(points.len() - 1) {
             let p0 = points[seg];
@@ -82,8 +83,10 @@ impl Poly2D {
             vertices.extend_from_slice(&[v0, v1, v2, v3]);
             // Simple UVs per quad (stretch along segment)
             uvs.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
-            indices.push((base + 0, base + 1, base + 2));
-            indices.push((base + 0, base + 2, base + 3));
+            indices.extend_from_slice(&[
+                (base + 0, base + 1, base + 2),
+                (base + 0, base + 2, base + 3),
+            ]);
         }
 
         Self {
@@ -115,14 +118,18 @@ impl Poly2D {
         let y0 = cy - half; // bottom
         let y1 = cy + half; // top
 
-        let vertices = vec![
+        let mut vertices = Vec::with_capacity(4);
+        let mut uvs = Vec::with_capacity(4);
+        let mut indices = Vec::with_capacity(2);
+
+        vertices.extend_from_slice(&[
             [x0, y0], // bottom-left
             [x0, y1], // top-left
             [x1, y1], // top-right
             [x1, y0], // bottom-right
-        ];
-        let uvs = vec![[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-        let indices = vec![(0, 1, 2), (0, 2, 3)];
+        ]);
+        uvs.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+        indices.extend_from_slice(&[(0, 1, 2), (0, 2, 3)]);
 
         Self {
             id,

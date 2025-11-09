@@ -629,8 +629,14 @@ impl VM {
     ) -> (Vec<Vert2DPod>, Vec<u32>, Vec<TileBinPod>, Vec<u32>) {
         use vek::Vec3;
 
-        let mut verts_flat: Vec<Vert2DPod> = Vec::new();
-        let mut indices_flat: Vec<u32> = Vec::new();
+        // Estimate capacities for better performance
+        let total_polys: usize = self.chunks_map.values().map(|ch| ch.polys_map.len()).sum();
+        let total_lines: usize = self.chunks_map.values().map(|ch| ch.lines2d_px.len()).sum();
+        let estimated_verts = total_polys * 4 + total_lines * 8; // Conservative estimate
+        let estimated_indices = total_polys * 6 + total_lines * 12; // Conservative estimate
+
+        let mut verts_flat: Vec<Vert2DPod> = Vec::with_capacity(estimated_verts);
+        let mut indices_flat: Vec<u32> = Vec::with_capacity(estimated_indices);
 
         #[derive(Clone, Copy)]
         struct TriMeta {
@@ -638,7 +644,7 @@ impl VM {
             prio: i32,
             ord: u32,
         }
-        let mut tri_meta: Vec<TriMeta> = Vec::new();
+        let mut tri_meta: Vec<TriMeta> = Vec::with_capacity(estimated_indices / 3);
         let mut tri_ord: u32 = 0;
 
         for (_cid, ch) in &self.chunks_map {
@@ -778,6 +784,11 @@ impl VM {
         let mut bins: Vec<Vec<TriRef>> = vec![Vec::new(); tiles_n];
 
         let tri_count = (indices_flat.len() / 3) as u32;
+        // Pre-allocate bins with estimated capacity
+        let estimated_tris_per_tile = (tri_count as usize) / tiles_n.max(1) + 1;
+        for bin in &mut bins {
+            bin.reserve(estimated_tris_per_tile);
+        }
         for t in 0..tri_count {
             let i0 = indices_flat[(3 * t as usize) + 0] as usize;
             let i1 = indices_flat[(3 * t as usize) + 1] as usize;
@@ -815,7 +826,7 @@ impl VM {
 
         let mut tile_offsets: Vec<u32> = Vec::with_capacity(tiles_n);
         let mut tile_counts: Vec<u32> = Vec::with_capacity(tiles_n);
-        let mut tile_tris: Vec<u32> = Vec::new();
+        let mut tile_tris: Vec<u32> = Vec::with_capacity(tri_count as usize);
         let mut running: u32 = 0;
         for v in &mut bins {
             tile_offsets.push(running);
@@ -826,9 +837,7 @@ impl VM {
                         .then_with(|| b.prio.cmp(&a.prio))
                         .then_with(|| b.ord.cmp(&a.ord))
                 });
-                for r in v.iter() {
-                    tile_tris.push(r.tri);
-                }
+                tile_tris.extend(v.iter().map(|r| r.tri));
             }
             let c = v.len() as u32;
             tile_counts.push(c);
@@ -1274,12 +1283,13 @@ impl VM {
                 let chunk_id = match self.current_chunk {
                     Some(cid) => cid,
                     None => {
-                        let cid = Uuid::new_v4();
+                        let cid = uuid::Uuid::new_v4();
                         self.chunks_map.insert(cid, Chunk::default());
                         self.current_chunk = Some(cid);
                         cid
                     }
                 };
+
                 self.chunks_map.entry(chunk_id).or_default().add(poly);
                 self.mark_2d_dirty();
             }
@@ -1293,6 +1303,7 @@ impl VM {
                         cid
                     }
                 };
+
                 self.chunks_map.entry(chunk_id).or_default().add_3d(poly);
                 self.accel_dirty = true;
             }
@@ -1504,7 +1515,7 @@ impl VM {
         }
     }
 
-    pub fn init_gpu(&mut self, device: &wgpu::Device) {
+    pub fn init_gpu(&mut self, device: &wgpu::Device) -> crate::SceneVMResult<()> {
         use wgpu::ShaderSource;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1639,6 +1650,8 @@ impl VM {
             grid_hdr: None,
             grid_data: None,
         });
+
+        Ok(())
     }
 
     /// Returns a copy of the current color atlas pixels (RGBA8).
@@ -1700,10 +1713,11 @@ impl VM {
 
 impl VM {
     /// Initialize compute pipelines and uniform buffers if not yet present.
-    pub fn init_compute(&mut self, device: &wgpu::Device) {
+    pub fn init_compute(&mut self, device: &wgpu::Device) -> crate::SceneVMResult<()> {
         if self.gpu.is_none() {
             // If render pipeline not initialized yet, do it now to allocate gpu struct
-            self.init_gpu(device);
+
+            self.init_gpu(device)?;
         }
         let g = self.gpu.as_mut().unwrap();
 
@@ -2062,6 +2076,8 @@ impl VM {
         }
         g.u2d_bg = None;
         g.u3d_bg = None;
+
+        Ok(())
     }
 
     /// Dispatches 2D compute pipeline into a storage-capable surface.
@@ -2072,11 +2088,11 @@ impl VM {
         surface: &mut Texture,
         fb_w: u32,
         fb_h: u32,
-    ) {
+    ) -> crate::SceneVMResult<()> {
         if self.gpu.is_none() {
-            self.init_gpu(device);
+            self.init_gpu(device)?;
         }
-        self.init_compute(device);
+        self.init_compute(device)?;
         self.upload_tile_metadata_to_gpu(device);
         // Require surface to be STORAGE-capable. If your Texture lacks this, recreate with STORAGE_BINDING.
         surface.ensure_gpu_with(device);
@@ -2130,6 +2146,14 @@ impl VM {
             self.cached_fb_size_2d = fb_dims;
             self.geometry2d_dirty = false;
             geometry_changed = true;
+            if self.activity_logging {
+                self.log_layer(format!(
+                    "2D geometry built: {} vertices, {} indices, {} tile bins",
+                    self.cached_v2.len(),
+                    self.cached_i2.len(),
+                    self.cached_tile_bins.len()
+                ));
+            }
         }
 
         use wgpu::util::DeviceExt;
@@ -2310,6 +2334,7 @@ impl VM {
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         queue.submit(Some(encoder.finish()));
+        Ok(())
     }
 
     /// Dispatches 3D compute pipeline into a storage-capable surface.
@@ -2320,11 +2345,11 @@ impl VM {
         surface: &mut Texture,
         fb_w: u32,
         fb_h: u32,
-    ) {
+    ) -> crate::SceneVMResult<()> {
         if self.gpu.is_none() {
-            self.init_gpu(device);
+            self.init_gpu(device)?;
         }
-        self.init_compute(device);
+        self.init_compute(device)?;
         self.upload_tile_metadata_to_gpu(device);
         surface.ensure_gpu_with(device);
 
@@ -2689,6 +2714,8 @@ impl VM {
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         queue.submit(Some(encoder.finish()));
+
+        Ok(())
     }
 
     /// Cast a CPU-side ray through a normalized screen UV and return the hit GeoId (if any).
@@ -3020,14 +3047,29 @@ impl VM {
         surface: &mut Texture,
         fb_w: u32,
         fb_h: u32,
-    ) {
-        if !self.enabled {
-            return;
+    ) -> crate::SceneVMResult<()> {
+        if self.gpu.is_none() {
+            self.init_gpu(device)?;
         }
+
         match self.render_mode {
-            RenderMode::Compute2D => self.compute_draw_2d_into(device, queue, surface, fb_w, fb_h),
-            RenderMode::Compute3D => self.compute_draw_3d_into(device, queue, surface, fb_w, fb_h),
+            RenderMode::Compute2D => {
+                self.compute_draw_2d_into(device, queue, surface, fb_w, fb_h)?;
+
+                if self.activity_logging {
+                    self.log_layer("2D compute draw completed".to_string());
+                }
+            }
+            RenderMode::Compute3D => {
+                self.compute_draw_3d_into(device, queue, surface, fb_w, fb_h)?;
+
+                if self.activity_logging {
+                    self.log_layer("3D compute draw completed".to_string());
+                }
+            }
         }
+
+        Ok(())
     }
 } // end impl VM
 

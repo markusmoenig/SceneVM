@@ -7,3 +7,4 @@ edition = "2024"
 scenevm = { path = ".." }
 theframework.workspace = true
 vek = { version = "0.17.1", default-features = true }
+uuid = { version = "1.18.1", features = ["v4"] }

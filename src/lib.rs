@@ -10,6 +10,20 @@ pub mod poly3d;
 pub mod texture;
 pub mod vm;
 
+/// Error types for SceneVM operations
+#[derive(Debug, Clone)]
+pub enum SceneVMError {
+    GpuInitFailed(String),
+    BufferAllocationFailed(String),
+    ShaderCompilationFailed(String),
+    TextureUploadFailed(String),
+    InvalidGeometry(String),
+    AtlasFull(String),
+    InvalidOperation(String),
+}
+
+pub type SceneVMResult<T> = Result<T, SceneVMError>;
+
 use rust_embed::RustEmbed;
 #[derive(RustEmbed)]
 #[folder = "embedded/"]
@@ -166,10 +180,19 @@ impl SceneVM {
         surface: &mut Texture,
         w: u32,
         h: u32,
+        log_errors: bool,
     ) {
-        base_vm.draw_into(device, queue, surface, w, h);
+        if let Err(e) = base_vm.draw_into(device, queue, surface, w, h) {
+            if log_errors {
+                println!("[SceneVM] Error drawing base VM: {:?}", e);
+            }
+        }
         for vm in overlays {
-            vm.draw_into(device, queue, surface, w, h);
+            if let Err(e) = vm.draw_into(device, queue, surface, w, h) {
+                if log_errors {
+                    println!("[SceneVM] Error drawing overlay VM: {:?}", e);
+                }
+            }
         }
     }
 
@@ -254,8 +277,7 @@ impl SceneVM {
         fb_h: u32,
         screen_uv: [f32; 2],
     ) -> Option<(GeoId, vek::Vec3<f32>, f32)> {
-        self.active_vm()
-            .pick_geo_id_at_uv(fb_w, fb_h, screen_uv)
+        self.active_vm().pick_geo_id_at_uv(fb_w, fb_h, screen_uv)
     }
 
     /// Prints statistics about 2D and 3D polygons currently loaded in all chunks.
@@ -516,6 +538,7 @@ impl SceneVM {
             &mut gpu.surface,
             w,
             h,
+            self.log_layer_activity,
         );
 
         // Readback into the surface's CPU memory (blocking on native, non-blocking noop on wasm)
@@ -554,6 +577,7 @@ impl SceneVM {
             &mut gpu.surface,
             w,
             h,
+            self.log_layer_activity,
         );
 
         // Start readback and await readiness
@@ -670,6 +694,7 @@ impl SceneVM {
                     &mut gpu.surface,
                     w,
                     h,
+                    self.log_layer_activity,
                 );
 
                 // Start non-blocking readback into the surface texture (map_async sets the flag)
