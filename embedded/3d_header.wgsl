@@ -394,8 +394,9 @@ fn dda_setup(p: vec3<f32>, rd: vec3<f32>, cell: vec3<i32>, tEnter: f32) -> DDASt
   let nb_y = minb.y + (select(fcell.y, fcell.y + 1.0, step.y > 0) * cs.y);
   let nb_z = minb.z + (select(fcell.z, fcell.z + 1.0, step.z > 0) * cs.z);
 
-  // safe reciprocals
-  let inv = 1.0 / max(abs(rd), vec3<f32>(1e-32));
+  // FIX: Preserve sign in reciprocals for correct tMax calculation
+  let safe_rd = select(sign(rd) * vec3<f32>(1e-32), rd, abs(rd) >= vec3<f32>(1e-32));
+  let inv = 1.0 / safe_rd;
 
   // time from *p* to the next boundary per axis, then make them absolute by + tEnter
   let tMax = vec3<f32>(
@@ -405,7 +406,7 @@ fn dda_setup(p: vec3<f32>, rd: vec3<f32>, cell: vec3<i32>, tEnter: f32) -> DDASt
   );
 
   // how much absolute time (Δt) to traverse exactly one cell per axis
-  let tDelta = vec3<f32>(cs.x * inv.x, cs.y * inv.y, cs.z * inv.z);
+  let tDelta = vec3<f32>(cs.x * abs(inv.x), cs.y * abs(inv.y), cs.z * abs(inv.z));
 
   return DDAState(tMax, tDelta, step);
 }
@@ -425,8 +426,8 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
     return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
   }
 
-  // Start cell: point at tEnter
-  var p = ro + rd * tEnter;
+  // Start cell: point at tEnter with small epsilon push to avoid boundary issues
+  var p = ro + rd * (tEnter + 1e-5);
   var cell = clamp_cell(grid_world_to_cell(p));
 
   // DDA setup
@@ -442,7 +443,7 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
   var best_Ng = vec3<f32>(0.0);
 
   // Hard cap to prevent infinite loops; plenty for large screens
-  let MAX_STEPS: u32 = 1u << 20u;
+  let MAX_STEPS: u32 = 256u;
   var steps: u32 = 0u;
 
   loop {
@@ -457,7 +458,7 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
     let off = grid_offset(idx);
     let cnt = grid_count(idx);
 
-    // Test tris in this cell; accept the closest hit that lies BEFORE we cross the next cell boundary
+    // Test tris in this cell; track the closest hit
     let tCellExit = min(tNext.x, min(tNext.y, tNext.z));
     for (var k: u32 = 0u; k < cnt; k = k + 1u) {
       let tri = grid_tri_index(off + k);
@@ -484,8 +485,9 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
       }
     }
 
-    if (best_t < 1e29) {
-      // Hit inside current cell slab -> earliest along ray
+    // FIX: Check if we found a hit closer than the next cell boundary
+    // If so, we can early-exit because no further cells can have closer triangles
+    if (best_t < tCellExit) {
       return TraceHit(true, best_t, best_tri, best_u, best_v, best_Ng);
     }
 

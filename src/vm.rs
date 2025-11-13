@@ -161,6 +161,13 @@ pub enum Atom {
         id: Uuid,
         color: [u8; 4],
     },
+    /// Add a solid-color 1x1 tile with `id`, RGBA color, and material properties.
+    /// Material properties: RGBA = roughness/metallic/opacity/emission
+    AddSolidWithMaterial {
+        id: Uuid,
+        color: [u8; 4],
+        material: [u8; 4],
+    },
     /// Build the atlas for all frames
     BuildAtlas,
     /// Add a polygon (world coords) that references a tile by UUID into the CURRENT chunk; indices are local to the chunk.
@@ -1245,6 +1252,18 @@ impl VM {
                 // Create a 1x1 tile with a single frame of the given color
                 let frame = color.to_vec();
                 let mat_frame = default_material_frame(4);
+                self.shared_atlas
+                    .add_tile(id, 1, 1, vec![frame], vec![mat_frame]);
+                self.mark_all_geometry_dirty();
+            }
+            Atom::AddSolidWithMaterial {
+                id,
+                color,
+                material,
+            } => {
+                // Create a 1x1 tile with a single frame of the given color and material properties
+                let frame = color.to_vec();
+                let mat_frame = material.to_vec();
                 self.shared_atlas
                     .add_tile(id, 1, 1, vec![frame], vec![mat_frame]);
                 self.mark_all_geometry_dirty();

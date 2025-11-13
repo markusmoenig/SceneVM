@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = [".", "scenegen", "run-wasm"]
+members = [".", "scenegen", "run-wasm", "cornell"]
 resolver = "2"
 
 [workspace.dependencies]
