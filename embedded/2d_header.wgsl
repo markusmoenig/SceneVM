@@ -205,8 +205,19 @@ fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
   return textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
 }
 // ----- SceneVM 2D helpers -----
-struct BaryHit { hit: bool, w: vec3<f32> };
-struct ColorHit { hit: bool, color: vec4<f32>, tri: u32, uv: vec2<f32> };
+// Note: vec3/vec4 require 16-byte alignment in structs for Vulkan SPIR-V
+struct BaryHit {
+  hit: bool,
+  _pad0: u32, _pad1: u32, _pad2: u32,  // pad to 16 bytes before vec3
+  w: vec3<f32>
+};
+struct ColorHit {
+  hit: bool,
+  _pad0: u32, _pad1: u32, _pad2: u32,  // pad to 16 bytes before vec4
+  color: vec4<f32>,
+  tri: u32,
+  uv: vec2<f32>
+};
 
 fn sv_edge(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
   return (p.x - a.x)*(b.y - a.y) - (p.y - a.y)*(b.x - a.x);
@@ -217,13 +228,13 @@ fn sv_tri_bary(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> BaryHi
   let e1 = sv_edge(p,b,c);
   let e2 = sv_edge(p,c,a);
   let ok = (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0);
-  if (!ok) { return BaryHit(false, vec3<f32>(0.0)); }
+  if (!ok) { return BaryHit(false, 0u, 0u, 0u, vec3<f32>(0.0)); }
   let area = abs((b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x));
-  if (area <= 0.0) { return BaryHit(false, vec3<f32>(0.0)); }
+  if (area <= 0.0) { return BaryHit(false, 0u, 0u, 0u, vec3<f32>(0.0)); }
   let w0 = abs((b.x - p.x)*(c.y - p.y) - (b.y - p.y)*(c.x - p.x)) / area;
   let w1 = abs((c.x - p.x)*(a.y - p.y) - (c.y - p.y)*(a.x - p.x)) / area;
   let w2 = 1.0 - w0 - w1;
-  return BaryHit(true, vec3<f32>(w0, w1, w2));
+  return BaryHit(true, 0u, 0u, 0u, vec3<f32>(w0, w1, w2));
 }
 
 fn sv_edge_signed(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -275,12 +286,12 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   let b = verts.data[i1].pos;
   let c = verts.data[i2].pos;
   let bh = sv_tri_bary(p, a, b, c);
-  if (!bh.hit) { return ColorHit(false, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
+  if (!bh.hit) { return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
 
   let w = bh.w;
   let uv = sv_tri_atlas_uv(i0, i1, i2, w);
   var col = sv_sample(uv);
-  if (col.a < 0.01) { return ColorHit(false, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
+  if (col.a < 0.01) { return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
 
   // --- Analytic edge AA ---
   let feather = 1.0;
@@ -293,7 +304,7 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   }
 
   // tri id is not known here; sv_shade_tile_pixel wraps this and sets it
-  return ColorHit(true, col, 0u, uv);
+  return ColorHit(true, 0u, 0u, 0u, col, 0u, uv);
 }
 
 fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
@@ -313,10 +324,10 @@ fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
     let i2 = indices.data[3u*t + 2u];
     let ch = sv_tri_color(p, i0, i1, i2);
     if (ch.hit) {
-      return ColorHit(true, ch.color, t, ch.uv);
+      return ColorHit(true, 0u, 0u, 0u, ch.color, t, ch.uv);
     }
   }
-  return ColorHit(false, vec4<f32>(0.0), 0u, vec2<f32>(0.0));
+  return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, vec2<f32>(0.0));
 }
 
 // RNG Helper

@@ -95,10 +95,10 @@ struct DynBillboardCmd {
 };
 
 struct DynBillboardHit {
-  hit: bool,
-  t: f32,
-  uv: vec2<f32>,
-  tile_index: u32,
+  hit: bool,           // offset 0, size 4 (stored as u32 in SPIR-V)
+  t: f32,              // offset 4, size 4
+  uv: vec2<f32>,       // offset 8, size 8 (needs 8-byte alignment)
+  tile_index: u32,     // offset 16, size 4
 };
 
 fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
@@ -158,16 +158,14 @@ fn sd_ray_billboard(ro: vec3<f32>, rd: vec3<f32>, cmd: DynBillboardCmd) -> DynBi
   return hit;
 }
 
-// Vert3D layout:
+// Vert3D layout (std430): Each member aligned to its natural alignment
 // - uv       : OBJECT UVs (not atlas-mapped). These can be any scale; we wrap in shader.
 struct Vert3D {
-  pos: vec3<f32>, _pad0: f32,
-  uv: vec2<f32>,
-  _pad_uv: vec2<f32>,
-  tile_index: u32,
-  _pad_tile: u32,
-  _pad_tile2: vec2<f32>,
-  normal: vec3<f32>, _pad2: f32
+  pos: vec3<f32>, _pad0: f32,               // offset 0, size 16 (vec3 needs 16-byte for vec4 slot)
+  uv: vec2<f32>, _pad_uv: vec2<f32>,        // offset 16, size 16 (two vec2s = 16 bytes)
+  tile_index: u32, _pad_tile: u32,          // offset 32, size 8
+  _pad_tile2: vec2<f32>,                    // offset 40, size 8 (vec2 aligned to 8)
+  normal: vec3<f32>, _pad2: f32             // offset 48, size 16
 };
 struct Verts3D { data: array<Vert3D> };
 struct Indices { data: array<u32> };
@@ -217,7 +215,14 @@ fn sv_sample(uv: vec2<f32>) -> vec4<f32> {
 // ---- 3D utilities ----
 // Full hit record including **geometric** normal (for debug/fallback). Shaders may
 // still compute/interpolate their own shading normal using vertex data.
-struct Hit3DFull { hit: bool, t: f32, u: f32, v: f32, Ng: vec3<f32> };
+// Note: vec3 requires 16-byte alignment in structs for Vulkan SPIR-V
+struct Hit3DFull {
+  hit: bool,
+  t: f32,
+  u: f32,
+  v: f32,           // offset 12, next vec3 needs offset 16
+  Ng: vec3<f32>     // offset 16 (naturally aligned)
+};
 
 fn sv_ray_tri_full(ro: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> Hit3DFull {
   let e1 = b - a;
@@ -299,13 +304,17 @@ fn sv_interp3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, u: f32, v: f32) -> vec3<
 // ===== Uniform-grid DDA traversal over triangles =====
 
 // Packed hit record returned by DDA tracing.
+// Note: vec3 requires 16-byte alignment in structs for Vulkan SPIR-V
 struct TraceHit {
-  hit: bool,
-  t: f32,        // distance along ray
-  tri: u32,      // winning triangle index (in indices3d, tri = tix)
-  u: f32,        // barycentric u
-  v: f32,        // barycentric v
-  Ng: vec3<f32>, // geometric normal
+  hit: bool,        // offset 0
+  t: f32,           // offset 4  (distance along ray)
+  tri: u32,         // offset 8  (winning triangle index in indices3d, tri = tix)
+  u: f32,           // offset 12 (barycentric u)
+  v: f32,           // offset 16 (barycentric v)
+  _pad0: u32,       // offset 20 (padding)
+  _pad1: u32,       // offset 24 (padding)
+  _pad2: u32,       // offset 28 (padding to align Ng to 16-byte boundary)
+  Ng: vec3<f32>,    // offset 32 (geometric normal, 16-byte aligned)
 };
 
 // Grid helpers
@@ -418,12 +427,12 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
   let bmin = grid_bounds_min();
   let bmax = grid_bounds_max();
   let rb = ray_box(ro, rd, bmin, bmax);
-  if (rb.x < 0.5) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0)); }
+  if (rb.x < 0.5) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0)); }
 
   var tEnter = max(rb.y, tmin);
   let tExit = min(rb.z, tmax);
   if (tEnter > tExit) {
-    return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
+    return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0));
   }
 
   // Start cell: point at tEnter with small epsilon push to avoid boundary issues
@@ -488,7 +497,7 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
     // FIX: Check if we found a hit closer than the next cell boundary
     // If so, we can early-exit because no further cells can have closer triangles
     if (best_t < tCellExit) {
-      return TraceHit(true, best_t, best_tri, best_u, best_v, best_Ng);
+      return TraceHit(true, best_t, best_tri, best_u, best_v, 0u, 0u, 0u, best_Ng);
     }
 
     // Advance to next cell along the smallest tNext
@@ -520,7 +529,7 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
     if (u32(cell.x) >= dims.x || u32(cell.y) >= dims.y || u32(cell.z) >= dims.z) { break; }
   }
 
-  return TraceHit(false, 0.0, 0u, 0.0, 0.0, vec3<f32>(0.0));
+  return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0));
 }
 // ===== end DDA =====
 
