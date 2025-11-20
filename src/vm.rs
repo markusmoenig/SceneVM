@@ -3067,6 +3067,11 @@ impl VM {
         fb_w: u32,
         fb_h: u32,
     ) -> crate::SceneVMResult<()> {
+        // Skip rendering if this VM layer is disabled
+        if !self.enabled {
+            return Ok(());
+        }
+
         if self.gpu.is_none() {
             self.init_gpu(device)?;
         }
