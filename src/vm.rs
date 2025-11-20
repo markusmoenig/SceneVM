@@ -852,13 +852,16 @@ impl VM {
         }
 
         if tile_offsets.is_empty() {
-            tile_offsets.push(0);
+            // AMD fix: Ensure minimum 16-byte buffer size
+            tile_offsets.extend_from_slice(&[0u32; 4]);
         }
         if tile_counts.is_empty() {
-            tile_counts.push(0);
+            // AMD fix: Ensure minimum 16-byte buffer size
+            tile_counts.extend_from_slice(&[0u32; 4]);
         }
         if tile_tris.is_empty() {
-            tile_tris.push(0);
+            // AMD fix: Ensure minimum 16-byte buffer size
+            tile_tris.extend_from_slice(&[0u32; 4]);
         }
 
         let mut tile_bins: Vec<TileBinPod> = Vec::with_capacity(tile_offsets.len());
@@ -960,8 +963,8 @@ impl VM {
 
         let logical_word_count = data_words.len() as u32;
         if data_words.is_empty() {
-            // wgpu validation requires at least one word for runtime-sized arrays
-            data_words.push(0);
+            // AMD fix: Ensure minimum 16-byte buffer size (wgpu validation + AMD compatibility)
+            data_words.extend_from_slice(&[0u32; 4]);
         }
 
         let header = SceneDataHeaderPod {
@@ -2535,7 +2538,8 @@ impl VM {
                 });
             }
             if i3.is_empty() {
-                i3.push(0);
+                // AMD fix: Ensure minimum 16-byte buffer size
+                i3.extend_from_slice(&[0u32; 4]);
             }
 
             self.cached_v3 = v3;

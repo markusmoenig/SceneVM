@@ -99,6 +99,9 @@ struct DynBillboardHit {
   t: f32,              // offset 4, size 4
   uv: vec2<f32>,       // offset 8, size 8 (needs 8-byte alignment)
   tile_index: u32,     // offset 16, size 4
+  _pad0: u32,          // offset 20, size 4 (AMD alignment fix)
+  _pad1: u32,          // offset 24, size 4
+  _pad2: u32,          // offset 28, size 4 (pad to 16-byte boundary)
 };
 
 fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
@@ -123,7 +126,7 @@ fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
 }
 
 fn sd_ray_billboard(ro: vec3<f32>, rd: vec3<f32>, cmd: DynBillboardCmd) -> DynBillboardHit {
-  var hit = DynBillboardHit(false, 0.0, vec2<f32>(0.0, 0.0), 0u);
+  var hit = DynBillboardHit(false, 0.0, vec2<f32>(0.0, 0.0), 0u, 0u, 0u, 0u);
   if (cmd.params.y != DYNAMIC_KIND_BILLBOARD_TILE) {
     return hit;
   }
@@ -404,7 +407,8 @@ fn dda_setup(p: vec3<f32>, rd: vec3<f32>, cell: vec3<i32>, tEnter: f32) -> DDASt
   let nb_z = minb.z + (select(fcell.z, fcell.z + 1.0, step.z > 0) * cs.z);
 
   // FIX: Preserve sign in reciprocals for correct tMax calculation
-  let safe_rd = select(sign(rd) * vec3<f32>(1e-32), rd, abs(rd) >= vec3<f32>(1e-32));
+  // AMD GPU fix: Use 1e-8 instead of 1e-32 to avoid denormalized float issues
+  let safe_rd = select(sign(rd) * vec3<f32>(1e-8), rd, abs(rd) >= vec3<f32>(1e-8));
   let inv = 1.0 / safe_rd;
 
   // time from *p* to the next boundary per axis, then make them absolute by + tEnter

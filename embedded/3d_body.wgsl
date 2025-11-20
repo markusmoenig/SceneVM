@@ -38,6 +38,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.x; let py = gid.y;
     if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
 
+    // AMD fix: Validate we have geometry before processing
+    let indices_len = arrayLength(&indices3d.data);
+    if (indices_len < 3u) {
+        let skip_clear = (U.vm_flags & VM_FLAG_SKIP_CLEAR) != 0u;
+        if (!skip_clear) {
+            sv_write(px, py, U.background);
+        }
+        return;
+    }
+
     let skip_clear = (U.vm_flags & VM_FLAG_SKIP_CLEAR) != 0u;
     if (!skip_clear) {
         let bg = U.background;
