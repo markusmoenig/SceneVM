@@ -149,6 +149,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i1 = indices3d.data[3u*tri_safe + 1u];
     let i2 = indices3d.data[3u*tri_safe + 2u];
 
+    // AMD fix: Validate vertex indices to prevent out-of-bounds access
+    let verts_len = arrayLength(&verts3d.data);
+    if (i0 >= verts_len || i1 >= verts_len || i2 >= verts_len) {
+        return;
+    }
+
     let uv0 = verts3d.data[i0].uv; let n0 = verts3d.data[i0].normal;
     let uv1 = verts3d.data[i1].uv; let n1 = verts3d.data[i1].normal;
     let uv2 = verts3d.data[i2].uv; let n2 = verts3d.data[i2].normal;

@@ -314,14 +314,34 @@ fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
 }
 
 fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
+  // AMD fix: Bounds check all SSBO accesses to prevent garbage data on Vulkan
+  let bins_len = arrayLength(&tile_bins.data);
+  if (bins_len == 0u || tid >= bins_len) {
+    return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, vec2<f32>(0.0));
+  }
+
   let bin = tile_bins.data[tid];
   let off = bin.offset;
   let cnt = bin.count;
+
+  let tris_len = arrayLength(&tile_tris.data);
+  let indices_len = arrayLength(&indices.data);
+
   for (var k: u32 = 0u; k < cnt; k = k + 1u) {
-    let t  = tile_tris.data[off + k];
-    let i0 = indices.data[3u*t + 0u];
-    let i1 = indices.data[3u*t + 1u];
-    let i2 = indices.data[3u*t + 2u];
+    let tri_idx = off + k;
+    if (tri_idx >= tris_len) { break; }
+
+    let t = tile_tris.data[tri_idx];
+    let base_idx = 3u * t;
+    if (base_idx + 2u >= indices_len) { continue; }
+
+    let i0 = indices.data[base_idx + 0u];
+    let i1 = indices.data[base_idx + 1u];
+    let i2 = indices.data[base_idx + 2u];
+
+    let verts_len = arrayLength(&verts.data);
+    if (i0 >= verts_len || i1 >= verts_len || i2 >= verts_len) { continue; }
+
     let ch = sv_tri_color(p, i0, i1, i2);
     if (ch.hit) {
       return ColorHit(true, 0u, 0u, 0u, ch.color, t, ch.uv);
