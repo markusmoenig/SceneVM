@@ -369,15 +369,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let V = -rd;
 
-        // Detect extreme albedo values from atlas bleeding
-        let is_extreme_bright = (albedo.r > 0.95 && albedo.g > 0.95 && albedo.b > 0.95);
-        let is_extreme_dark = (albedo.r < 0.05 && albedo.g < 0.05 && albedo.b < 0.05);
-
-        // Clamp albedo to prevent extreme values in lighting calculations
-        if (is_extreme_bright || is_extreme_dark) {
-            albedo = vec4<f32>(0.5, 0.5, 0.5, albedo.a);
-        }
-
         // Compute ambient occlusion
         let ao = compute_ao(P, N, P + vec3<f32>(f32(px), f32(py), f32(bounce)));
 
@@ -387,26 +378,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Ambient contribution
         let ambient = sky_rgb * albedo.rgb * ambient_strength * ao;
 
-        // FIX: Clamp small emissive values to 0 to avoid atlas bleeding artifacts
-        // At wall edges, texture filtering can bleed emissive values from adjacent tiles
-        var emissive_clamped = mat.emissive;
-        if (emissive_clamped < 0.95) {
-            emissive_clamped = 0.0; // Only use emissive if it's clearly intentional (>0.95)
-        }
-        let emissive = albedo.rgb * emissive_clamped * 2.0;
+        // Emissive contribution (self-illumination, multiplied by 2.0 for visibility)
+        let emissive = albedo.rgb * mat.emissive * 2.0;
 
         // Combine lighting for this layer
         var layer_color = direct + ambient + emissive;
 
         // Calculate layer opacity (from material and texture alpha)
-        var layer_opacity = albedo.a * mat.opacity;
-
-        // FIX: On first bounce, if we hit bright pixels that are supposed to be opaque (walls),
-        // force full opacity to prevent seeing through geometry gaps at wall edges.
-        // Don't apply to intentionally transparent materials (mat.opacity < 0.9)
-        if (bounce == 0u && mat.opacity >= 0.9 && (albedo.r > 0.7 || albedo.g > 0.7 || albedo.b > 0.7)) {
-            layer_opacity = 1.0;
-        }
+        let layer_opacity = albedo.a * mat.opacity;
 
         // Handle opaque vs transparent surfaces differently
         if (layer_opacity >= 0.99) {

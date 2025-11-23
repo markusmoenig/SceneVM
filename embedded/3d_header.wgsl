@@ -286,7 +286,14 @@ fn sv_tri_atlas_uv_obj(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec2<f32>
   var uv_wrapped = fract(uv_obj);          // [0,1) repeat in object space
   uv_wrapped.y = fract(1.0 - uv_wrapped.y); // flip Y so tiles aren't upside down
   let uv_atlas   = frame.ofs + uv_wrapped * frame.scale; // map into atlas sub-rect
-  return uv_atlas;
+
+  // Clamp into the interior of the frame to avoid bleeding from neighboring tiles.
+  // Use a half-texel pad in atlas UV space so sampling stays within the tile.
+  let atlas_dims = vec2<f32>(textureDimensions(atlas_tex, 0));
+  let pad_uv = vec2<f32>(0.5) / atlas_dims;
+  let uv_min = frame.ofs + pad_uv;
+  let uv_max = frame.ofs + frame.scale - pad_uv;
+  return clamp(uv_atlas, uv_min, uv_max);
 }
 
 // Sample atlas texture using barycentrics on a triangle with GPU-side repeat (object-UV based)
