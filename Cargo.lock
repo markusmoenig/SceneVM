@@ -684,6 +684,7 @@ dependencies = [
 name = "cornell"
 version = "0.1.0"
 dependencies = [
+ "rust-embed",
  "scenevm",
  "theframework",
  "uuid",
