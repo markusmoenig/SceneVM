@@ -10,6 +10,8 @@
 // - gp2.w:   Sun enabled (0.0 = disabled, 1.0 = enabled)
 // - gp3.xyz: Ambient color (RGB, independent from sky)
 // - gp3.w:   Ambient strength
+// - gp4.xyz: Fog color (RGB)
+// - gp4.w:   Fog density (0.0 = no fog, higher values = denser fog)
 
 // ===== Constants =====
 const PI: f32 = 3.14159265359;
@@ -315,6 +317,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Accumulated color (front to back compositing)
     var accum_color = vec3<f32>(0.0);
     var accum_alpha = 0.0;
+    var fog_distance = 0.0; // Track distance from camera for fog (set on first hit)
+    var first_hit = true;
 
     // Sky color for background (convert from sRGB to linear)
     let sky_rgb_srgb = select(U.background.rgb, U.gp0.xyz, length(U.gp0.xyz) > 0.01);
@@ -333,6 +337,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             accum_color += sky_color;
             accum_alpha = 1.0;
             break;
+        }
+
+        // Track distance from camera (only first hit counts for fog)
+        if (first_hit) {
+            fog_distance = hit.t; // Simple: just use the ray parameter distance
+            first_hit = false;
         }
 
         // Reconstruct hit information
@@ -391,7 +401,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let sky_factor = max(dot(N, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
         // Ray trace in reflection direction to check occlusion
         let sky_dir = reflect(rd, N);
-        let sky_visibility = trace_shadow(P, sky_dir, 1e6);
+        // Only trace if reflection actually points upward (sky is above)
+        let sky_dir_up = max(dot(sky_dir, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+        let sky_visibility = select(0.0, trace_shadow(P, sky_dir, 1e6), sky_dir_up > 0.0);
         // Combine: orientation determines amount, ray trace determines visibility
         let sky_contribution = sky_rgb * sky_factor * sky_visibility;
 
@@ -429,9 +441,23 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Apply tone mapping and gamma to accumulated color
+    // Apply fog based on distance traveled
     var final_color = accum_color;
 
+    let fog_density = U.gp4.w;
+    if (fog_density > 0.0) {
+        // Exponential squared fog: fog_amount = density * distance²
+        let fog_amount = fog_density * fog_distance * fog_distance;
+        let fog_factor = clamp(exp(-fog_amount), 0.0, 1.0);
+        let fog_color_srgb = U.gp4.xyz;
+        let fog_color = pow(fog_color_srgb, vec3<f32>(2.2)); // Convert to linear
+
+        // Mix between scene color and fog color based on fog factor
+        // fog_factor = 1.0 means no fog (close), 0.0 means full fog (far)
+        final_color = mix(fog_color, final_color, fog_factor);
+    }
+
+    // Apply tone mapping and gamma to accumulated color
     final_color = final_color / (final_color + vec3<f32>(1.0));
     final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
 
