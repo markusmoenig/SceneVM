@@ -3,11 +3,13 @@
 //
 // Uniforms (gp0-gp9):
 // - gp0.xyz: Sky color (RGB)
-// - gp0.w:   Ambient strength
+// - gp0.w:   Unused
 // - gp1.xyz: Sun color (RGB)
 // - gp1.w:   Sun intensity
 // - gp2.xyz: Sun direction (normalized)
 // - gp2.w:   Sun enabled (0.0 = disabled, 1.0 = enabled)
+// - gp3.xyz: Ambient color (RGB, independent from sky)
+// - gp3.w:   Ambient strength
 
 // ===== Constants =====
 const PI: f32 = 3.14159265359;
@@ -204,7 +206,7 @@ fn pbr_lighting(P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, albedo: vec3<f32>, mat
     // ===== Directional Sun Light =====
     if (U.gp2.w > 0.5) { // Sun enabled
         let sun_dir = normalize(U.gp2.xyz);
-        let sun_color = U.gp1.xyz;
+        let sun_color = pow(U.gp1.xyz, vec3<f32>(2.2)); // Convert from sRGB to linear
         let sun_intensity = U.gp1.w;
 
         let L = -sun_dir; // Light direction points FROM surface TO light
@@ -245,7 +247,7 @@ fn pbr_lighting(P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, albedo: vec3<f32>, mat
         if (light.header.y == 0u) { continue; } // skip non-emitting lights
 
         let Lp = light.position.xyz;
-        let Lc = light.color.xyz;
+        let Lc = pow(light.color.xyz, vec3<f32>(2.2)); // Convert from sRGB to linear
         let Li = light.params0.x + light.params1.x; // intensity + flicker
 
         let start_d = light.params0.z;
@@ -314,9 +316,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var accum_color = vec3<f32>(0.0);
     var accum_alpha = 0.0;
 
-    // Sky color for background
-    let sky_rgb = select(U.background.rgb, U.gp0.xyz, length(U.gp0.xyz) > 0.01);
-    let ambient_strength = select(0.03, U.gp0.w, U.gp0.w > 0.0);
+    // Sky color for background (convert from sRGB to linear)
+    let sky_rgb_srgb = select(U.background.rgb, U.gp0.xyz, length(U.gp0.xyz) > 0.01);
+    let sky_rgb = pow(sky_rgb_srgb, vec3<f32>(2.2));
+    let ambient_strength = select(0.3, U.gp3.w, U.gp3.w > 0.0);
 
     // Trace through transparent layers
     for (var bounce: u32 = 0u; bounce < MAX_TRANSPARENCY_BOUNCES; bounce = bounce + 1u) {
@@ -353,6 +356,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Sample albedo and material
         var albedo = sv_tri_sample_albedo(i0, i1, i2, hit.u, hit.v);
+        // Convert user-defined sRGB colors to linear space for PBR calculations
+        albedo = vec4<f32>(pow(albedo.rgb, vec3<f32>(2.2)), albedo.a);
+
         let mat_data = sv_tri_sample_rmoe(i0, i1, i2, hit.u, hit.v);
         let mat = unpack_material(mat_data);
 
@@ -376,7 +382,21 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let direct = pbr_lighting(P, N, V, albedo.rgb, mat);
 
         // Ambient contribution
-        let ambient = sky_rgb * albedo.rgb * ambient_strength * ao;
+        let has_ambient_color = length(U.gp3.xyz) > 0.01;
+        let ambient_color_srgb = select(vec3<f32>(0.05), U.gp3.xyz, has_ambient_color);
+        let ambient_color = pow(ambient_color_srgb, vec3<f32>(2.2)); // Convert from sRGB to linear
+
+        // Sky contribution: combine orientation and occlusion
+        // How much the surface faces upward (0.0 = horizontal, 1.0 = straight up)
+        let sky_factor = max(dot(N, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
+        // Ray trace in reflection direction to check occlusion
+        let sky_dir = reflect(rd, N);
+        let sky_visibility = trace_shadow(P, sky_dir, 1e6);
+        // Combine: orientation determines amount, ray trace determines visibility
+        let sky_contribution = sky_rgb * sky_factor * sky_visibility;
+
+        // Combine ambient (uniform) and sky (directional based on upward facing)
+        let ambient = (ambient_color * ambient_strength + sky_contribution) * albedo.rgb * ao;
 
         // Emissive contribution (self-illumination, multiplied by 2.0 for visibility)
         let emissive = albedo.rgb * mat.emissive * 2.0;

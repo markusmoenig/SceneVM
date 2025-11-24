@@ -322,8 +322,11 @@ pub fn default_material_frame(bytes: usize) -> Vec<u8> {
     }
     let mut v = Vec::with_capacity(bytes);
     let pixels = bytes / 4;
+    // Default: roughness=0.5 (7/15), metallic=0.0 (0/15), opacity=1.0 (15/15), emissive=0.0 (0/15)
+    // Packed as: byte0 = r|(m<<4) = 7|0 = 7, byte1 = o|(e<<4) = 15|0 = 15
+    // Normal defaults to 0.0: 128 = (0.0*0.5+0.5)*255
     for _ in 0..pixels {
-        v.extend_from_slice(&[128u8, 0u8, 255u8, 0u8]);
+        v.extend_from_slice(&[7u8, 15u8, 128u8, 128u8]);
     }
     if v.len() < bytes {
         v.resize(bytes, 0);
