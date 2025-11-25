@@ -627,10 +627,16 @@ impl SceneVM {
     /// and kicks off a new GPU frame if none is in flight. Call this every frame.
     /// On WASM, you must call `init_async().await` once before rendering.
     pub fn render_frame(&mut self, out_pixels: &mut [u8], out_w: u32, out_h: u32) -> RenderResult {
+        // let start = std::time::Instant::now();
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             // Native path just does the full render and readback synchronously
             self.draw(out_pixels, out_w, out_h);
+
+            // let elapsed = start.elapsed();
+            // println!("Frame time: {:.2}ms", elapsed.as_secs_f64() * 1000.0);
+
             return RenderResult::Presented;
         }
 

@@ -463,7 +463,7 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
   var best_Ng = vec3<f32>(0.0);
 
   // Hard cap to prevent infinite loops; plenty for large screens
-  let MAX_STEPS: u32 = 256u;
+  let MAX_STEPS: u32 = 50u;
   var steps: u32 = 0u;
 
   loop {
