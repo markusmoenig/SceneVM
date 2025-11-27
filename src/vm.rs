@@ -12,21 +12,24 @@ use rustc_hash::FxHashMap;
 use uuid::Uuid;
 use vek::{Mat3, Mat4, Vec3, Vec4};
 
-// --- Scene-wide acceleration structures (uniform grid over all 3D geometry) ---
+// --- Scene-wide acceleration structure (BVH over all 3D geometry) ---
 #[derive(Debug, Clone, Default)]
-pub struct SceneGridAccel {
-    pub origin: vek::Vec3<f32>,    // world-space min of the grid AABB
-    pub cell_size: vek::Vec3<f32>, // world size of a cell (x,y,z)
-    pub dims: [u32; 3],            // nx, ny, nz
-    // CSR arrays for cell -> tri list
-    pub cell_offsets: Vec<u32>, // len = nx*ny*nz
-    pub cell_counts: Vec<u32>,  // len = nx*ny*nz
-    pub cell_tris: Vec<u32>,    // flattened triangle indices
+pub struct SceneBvhAccel {
+    /// World-space minimum of the scene AABB (root bounds min).
+    pub origin: vek::Vec3<f32>,
+    /// Extent of the scene AABB (root bounds max = origin + extent).
+    pub extent: vek::Vec3<f32>,
+    /// Flattened BVH node data, packed as u32 words for the GPU buffer.
+    pub nodes: Vec<u32>,
+    /// Triangle indices referenced by BVH leaves.
+    pub tri_indices: Vec<u32>,
+    pub node_count: u32,
+    pub tri_count: u32,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct SceneAccel {
-    pub grid: SceneGridAccel,
+    pub bvh: SceneBvhAccel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -271,12 +274,10 @@ pub enum Atom {
     AddDynamic {
         object: DynamicObject,
     },
-    /// Build/replace the global scene uniform grid over all current 3D geometry
-    SetSceneGridCells {
-        target_cells: u32,
+    /// Set BVH leaf size (max triangles per leaf)
+    SetBvhLeafSize {
+        max_tris: u32,
     },
-    /// Reset the scene acceleration structure (will be rebuilt on next BuildSceneGrid)
-    ClearSceneGrid,
     /// Set the camera
     SetCamera3D {
         camera: Camera3D,
@@ -526,8 +527,8 @@ pub struct VM {
 
     pub current_layer: i32,
 
-    // Scene-wide 3D acceleration via grid
-    pub scene_grid_cells: u32,
+    // Scene-wide 3D acceleration via BVH
+    pub bvh_leaf_size: u32,
     pub scene_accel: SceneAccel,
     pub accel_dirty: bool,
     cached_v3: Vec<Vert3DPod>,
@@ -1157,7 +1158,7 @@ impl VM {
             current_layer: 0,
             scene_accel: SceneAccel::default(),
             accel_dirty: true,
-            scene_grid_cells: 5000,
+            bvh_leaf_size: 8,
             cached_v3: Vec::new(),
             cached_i3: Vec::new(),
             geometry2d_dirty: true,
@@ -1523,17 +1524,12 @@ impl VM {
             Atom::AddDynamic { object } => {
                 self.push_dynamic_object(object);
             }
-            Atom::SetSceneGridCells { target_cells } => {
-                self.scene_grid_cells = target_cells;
-                self.accel_dirty = true;
-            }
-            Atom::ClearSceneGrid => {
-                // Reset to an empty 1x1 grid to keep bindings valid
-                self.scene_accel = SceneAccel::default();
-                self.accel_dirty = true;
-            }
             Atom::SetCamera3D { camera } => {
                 self.camera3d = camera;
+            }
+            Atom::SetBvhLeafSize { max_tris } => {
+                self.bvh_leaf_size = max_tris.max(1);
+                self.accel_dirty = true;
             }
         }
     }
@@ -2550,16 +2546,12 @@ impl VM {
 
         let mut grid_changed = false;
         if self.accel_dirty {
-            self.scene_accel.grid = Self::build_scene_grid_from(
-                &self.cached_v3,
-                &self.cached_i3,
-                0.0,
-                self.scene_grid_cells,
-            );
+            self.scene_accel.bvh =
+                Self::build_scene_bvh_from(&self.cached_v3, &self.cached_i3, self.bvh_leaf_size);
             grid_changed = true;
             self.accel_dirty = false;
         }
-        let gr = &self.scene_accel.grid;
+        let gr = &self.scene_accel.bvh;
 
         let mut uploaded_grid = false;
         let mut uploaded_geom = false;
@@ -2567,36 +2559,28 @@ impl VM {
             let g = self.gpu.as_mut().unwrap();
             let need_grid_upload = grid_changed || g.grid_hdr.is_none() || g.grid_data.is_none();
             if need_grid_upload {
-                let offsets_data: Vec<u32> = if gr.cell_offsets.is_empty() {
+                let node_data: Vec<u32> = if gr.nodes.is_empty() {
                     vec![0]
                 } else {
-                    gr.cell_offsets.clone()
+                    gr.nodes.clone()
                 };
-                let counts_data: Vec<u32> = if gr.cell_counts.is_empty() {
+                let tris_data: Vec<u32> = if gr.tri_indices.is_empty() {
                     vec![0]
                 } else {
-                    gr.cell_counts.clone()
-                };
-                let tris_data: Vec<u32> = if gr.cell_tris.is_empty() {
-                    vec![0]
-                } else {
-                    gr.cell_tris.clone()
+                    gr.tri_indices.clone()
                 };
 
-                let offsets_start = 0u32;
-                let counts_start = offsets_start + offsets_data.len() as u32;
-                let tris_start = counts_start + counts_data.len() as u32;
-                let mut combined: Vec<u32> =
-                    Vec::with_capacity(offsets_data.len() + counts_data.len() + tris_data.len());
-                combined.extend_from_slice(&offsets_data);
-                combined.extend_from_slice(&counts_data);
+                let nodes_start = 0u32;
+                let tris_start = nodes_start + node_data.len() as u32;
+                let mut combined: Vec<u32> = Vec::with_capacity(node_data.len() + tris_data.len());
+                combined.extend_from_slice(&node_data);
                 combined.extend_from_slice(&tris_data);
 
                 let grid_hdr_data = Grid3DHeader {
                     origin: [gr.origin.x, gr.origin.y, gr.origin.z, 0.0],
-                    cell_size: [gr.cell_size.x, gr.cell_size.y, gr.cell_size.z, 0.0],
-                    dims: [gr.dims[0].max(1), gr.dims[1].max(1), gr.dims[2].max(1), 0],
-                    ranges: [offsets_start, counts_start, tris_start, 0],
+                    cell_size: [gr.extent.x, gr.extent.y, gr.extent.z, 0.0],
+                    dims: [1, 1, 1, 0],
+                    ranges: [nodes_start, tris_start, gr.node_count, gr.tri_count],
                 };
 
                 g.grid_hdr = Some(
@@ -2645,13 +2629,10 @@ impl VM {
             ));
         }
         if uploaded_grid {
-            let gr = &self.scene_accel.grid;
+            let gr = &self.scene_accel.bvh;
             self.log_layer(format!(
-                "Rebuilt 3D grid accel dims {}x{}x{}, cells {}",
-                gr.dims[0],
-                gr.dims[1],
-                gr.dims[2],
-                gr.cell_counts.len()
+                "Rebuilt 3D BVH accel nodes {}, tris {}",
+                gr.node_count, gr.tri_count
             ));
         }
 
@@ -2801,265 +2782,229 @@ impl VM {
         best_geo.map(|id| (id, best_pos, best_t))
     }
 
-    fn build_scene_grid_from(
-        verts: &[Vert3DPod],
-        indices: &[u32],
-        cell_world: f32,
-        target_cells: u32,
-    ) -> SceneGridAccel {
+    fn build_scene_bvh_from(verts: &[Vert3DPod], indices: &[u32], leaf_size: u32) -> SceneBvhAccel {
+        use std::cmp::Ordering;
         use vek::Vec3;
 
-        #[inline(always)]
-        fn vmin(a: vek::Vec3<f32>, b: vek::Vec3<f32>) -> vek::Vec3<f32> {
-            vek::Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z))
-        }
-        #[inline(always)]
-        fn vmax(a: vek::Vec3<f32>, b: vek::Vec3<f32>) -> vek::Vec3<f32> {
-            vek::Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z))
+        #[derive(Clone, Copy, Debug, Default)]
+        struct BvhNode {
+            bmin: Vec3<f32>,
+            bmax: Vec3<f32>,
+            left_first: u32,
+            tri_count: u32,
         }
 
-        // --- 1) Scene AABB (over all positions) ---
-        let mut bmin = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
-        let mut bmax = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        #[inline(always)]
+        fn vmin(a: Vec3<f32>, b: Vec3<f32>) -> Vec3<f32> {
+            Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z))
+        }
+        #[inline(always)]
+        fn vmax(a: Vec3<f32>, b: Vec3<f32>) -> Vec3<f32> {
+            Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z))
+        }
+
+        // --- Scene bounds over all vertices ---
+        let mut scene_min = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        let mut scene_max = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
         for v in verts {
             let p = Vec3::new(v.pos[0], v.pos[1], v.pos[2]);
-            bmin = vmin(bmin, p);
-            bmax = vmax(bmax, p);
+            scene_min = vmin(scene_min, p);
+            scene_max = vmax(scene_max, p);
         }
 
-        // Empty scene guard
-        if !bmin.x.is_finite() {
-            // Make a 1x1x1 dummy grid so bindings are valid
-            return SceneGridAccel {
+        if !scene_min.x.is_finite() {
+            // Empty scene guard: keep bindings valid with a small dummy box
+            return SceneBvhAccel {
                 origin: Vec3::zero(),
-                cell_size: Vec3::broadcast(1.0),
-                dims: [1, 1, 1],
-                cell_offsets: vec![0],
-                cell_counts: vec![0],
-                cell_tris: vec![0],
+                extent: Vec3::broadcast(1.0),
+                nodes: vec![0],
+                tri_indices: vec![0],
+                node_count: 0,
+                tri_count: 0,
             };
         }
 
-        // --- 2) Pad scene AABB slightly ---
-        let diag = (bmax - bmin).magnitude().max(1e-6);
-        let pad = 0.1 * diag; // scene padding
-        bmin -= Vec3::broadcast(pad);
-        bmax += Vec3::broadcast(pad);
+        // Pad bounds slightly for numerical robustness
+        let diag = (scene_max - scene_min).magnitude().max(1e-6);
+        let pad = 0.1 * diag;
+        scene_min -= Vec3::broadcast(pad);
+        scene_max += Vec3::broadcast(pad);
 
-        // --- 3) Choose grid resolution ---
-        let size = bmax - bmin;
-        let vol = (size.x * size.y * size.z).max(1e-9);
-        let nx: u32;
-        let ny: u32;
-        let nz;
+        let mut extent = scene_max - scene_min;
+        extent.x = extent.x.max(1e-4);
+        extent.y = extent.y.max(1e-4);
+        extent.z = extent.z.max(1e-4);
 
-        if cell_world > 0.0 {
-            // User-enforced cell size
-            nx = (size.x / cell_world).ceil().max(1.0) as u32;
-            ny = (size.y / cell_world).ceil().max(1.0) as u32;
-            nz = (size.z / cell_world).ceil().max(1.0) as u32;
-        } else {
-            // Aim for target_cells
-            let t = target_cells.max(1) as f32;
-            let s = (vol / t).cbrt(); // cubic cell size
-            nx = (size.x / s).ceil().max(1.0) as u32;
-            ny = (size.y / s).ceil().max(1.0) as u32;
-            nz = (size.z / s).ceil().max(1.0) as u32;
+        let tri_count = indices.len() / 3;
+        if tri_count == 0 {
+            return SceneBvhAccel {
+                origin: scene_min,
+                extent,
+                nodes: vec![0],
+                tri_indices: vec![0],
+                node_count: 0,
+                tri_count: 0,
+            };
         }
 
-        let dims = [nx, ny, nz];
-        let cell_size = Vec3::new(
-            size.x / nx.max(1) as f32,
-            size.y / ny.max(1) as f32,
-            size.z / nz.max(1) as f32,
+        // Leaf size is a direct knob; clamp to keep traversal stack small.
+        let mut leaf_size = leaf_size.max(1);
+        leaf_size = leaf_size.min(16);
+
+        // Precompute tri bounds and centroids
+        let mut tri_bounds: Vec<(Vec3<f32>, Vec3<f32>)> = Vec::with_capacity(tri_count);
+        let mut tri_centroids: Vec<Vec3<f32>> = Vec::with_capacity(tri_count);
+        for tri in 0..tri_count {
+            let i0 = indices[3 * tri + 0] as usize;
+            let i1 = indices[3 * tri + 1] as usize;
+            let i2 = indices[3 * tri + 2] as usize;
+
+            let p0 = Vec3::new(verts[i0].pos[0], verts[i0].pos[1], verts[i0].pos[2]);
+            let p1 = Vec3::new(verts[i1].pos[0], verts[i1].pos[1], verts[i1].pos[2]);
+            let p2 = Vec3::new(verts[i2].pos[0], verts[i2].pos[1], verts[i2].pos[2]);
+
+            let tmin = vmin(vmin(p0, p1), p2);
+            let tmax = vmax(vmax(p0, p1), p2);
+            tri_bounds.push((tmin, tmax));
+            tri_centroids.push((p0 + p1 + p2) / 3.0);
+        }
+
+        // BVH nodes + triangle ordering array (re-ordered in place)
+        let mut nodes: Vec<BvhNode> = Vec::new();
+        nodes.push(BvhNode::default()); // root placeholder
+        let mut tri_indices: Vec<u32> = (0..tri_count as u32).collect();
+
+        // Recursively build a binary BVH using median split on the widest centroid axis.
+        fn build_node(
+            node_idx: usize,
+            start: u32,
+            count: u32,
+            leaf_size: u32,
+            nodes: &mut Vec<BvhNode>,
+            tri_indices: &mut [u32],
+            tri_bounds: &[(Vec3<f32>, Vec3<f32>)],
+            tri_centroids: &[Vec3<f32>],
+        ) {
+            let start_usize = start as usize;
+            let count_usize = count as usize;
+            let end = start_usize + count_usize;
+
+            let mut bmin = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+            let mut bmax = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for &t in &tri_indices[start_usize..end] {
+                let (tmin, tmax) = tri_bounds[t as usize];
+                bmin = vmin(bmin, tmin);
+                bmax = vmax(bmax, tmax);
+            }
+            nodes[node_idx].bmin = bmin;
+            nodes[node_idx].bmax = bmax;
+
+            if count <= leaf_size {
+                nodes[node_idx].left_first = start;
+                nodes[node_idx].tri_count = count;
+                return;
+            }
+
+            // Centroid bounds for split axis selection
+            let mut cmin = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+            let mut cmax = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for &t in &tri_indices[start_usize..end] {
+                let c = tri_centroids[t as usize];
+                cmin = vmin(cmin, c);
+                cmax = vmax(cmax, c);
+            }
+            let cextent = cmax - cmin;
+            let mut axis = 0usize;
+            if cextent.y > cextent.x && cextent.y >= cextent.z {
+                axis = 1;
+            } else if cextent.z > cextent.x && cextent.z > cextent.y {
+                axis = 2;
+            }
+
+            // Median split by centroid along selected axis
+            let mid = start_usize + count_usize / 2;
+            tri_indices[start_usize..end].select_nth_unstable_by(mid - start_usize, |&a, &b| {
+                let ca = match axis {
+                    0 => tri_centroids[a as usize].x,
+                    1 => tri_centroids[a as usize].y,
+                    _ => tri_centroids[a as usize].z,
+                };
+                let cb = match axis {
+                    0 => tri_centroids[b as usize].x,
+                    1 => tri_centroids[b as usize].y,
+                    _ => tri_centroids[b as usize].z,
+                };
+                ca.partial_cmp(&cb).unwrap_or(Ordering::Equal)
+            });
+
+            let left_idx = nodes.len();
+            nodes[node_idx].left_first = left_idx as u32;
+            nodes[node_idx].tri_count = 0;
+            nodes.push(BvhNode::default());
+            nodes.push(BvhNode::default());
+
+            let left_count = (mid - start_usize) as u32;
+            build_node(
+                left_idx,
+                start,
+                left_count,
+                leaf_size,
+                nodes,
+                tri_indices,
+                tri_bounds,
+                tri_centroids,
+            );
+            build_node(
+                left_idx + 1,
+                mid as u32,
+                count - left_count,
+                leaf_size,
+                nodes,
+                tri_indices,
+                tri_bounds,
+                tri_centroids,
+            );
+        }
+
+        build_node(
+            0,
+            0,
+            tri_count as u32,
+            leaf_size,
+            &mut nodes,
+            &mut tri_indices,
+            &tri_bounds,
+            &tri_centroids,
         );
 
-        // Precompute an epsilon in **world** based on cell size (robustness)
-        let cell_eps = cell_size.x.max(cell_size.y).max(cell_size.z) * 1.0;
-
-        // --- 4) Bin triangles into cells with **padded tri AABB** ---
-
-        let tri_count: usize = indices.len() / 3;
-
-        // Parallel version using Rayon (feature-gated); fallback to previous sequential if feature is off.
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-
-            // 4a) generate (cell_idx, tri) pairs in parallel
-            let mut pairs: Vec<(u32, u32)> = (0..tri_count)
-                .into_par_iter()
-                .map(|tri| {
-                    let i0 = indices[3 * tri + 0] as usize;
-                    let i1 = indices[3 * tri + 1] as usize;
-                    let i2 = indices[3 * tri + 2] as usize;
-
-                    let p0 = Vec3::new(verts[i0].pos[0], verts[i0].pos[1], verts[i0].pos[2]);
-                    let p1 = Vec3::new(verts[i1].pos[0], verts[i1].pos[1], verts[i1].pos[2]);
-                    let p2 = Vec3::new(verts[i2].pos[0], verts[i2].pos[1], verts[i2].pos[2]);
-
-                    let mut tmin = vmin(vmin(p0, p1), p2);
-                    let mut tmax = vmax(vmax(p0, p1), p2);
-                    tmin -= Vec3::broadcast(cell_eps);
-                    tmax += Vec3::broadcast(cell_eps);
-
-                    let rel_min = (tmin - bmin) / cell_size;
-                    let rel_max = (tmax - bmin) / cell_size;
-
-                    let mut ix0 = rel_min.x.floor() as i32;
-                    let mut iy0 = rel_min.y.floor() as i32;
-                    let mut iz0 = rel_min.z.floor() as i32;
-                    let mut ix1 = rel_max.x.ceil() as i32;
-                    let mut iy1 = rel_max.y.ceil() as i32;
-                    let mut iz1 = rel_max.z.ceil() as i32;
-
-                    ix0 = ix0.clamp(0, nx as i32 - 1);
-                    iy0 = iy0.clamp(0, ny as i32 - 1);
-                    iz0 = iz0.clamp(0, nz as i32 - 1);
-                    ix1 = ix1.clamp(0, nx as i32 - 1);
-                    iy1 = iy1.clamp(0, ny as i32 - 1);
-                    iz1 = iz1.clamp(0, nz as i32 - 1);
-
-                    let mut local: Vec<(u32, u32)> = Vec::new();
-                    if ix0 <= ix1 && iy0 <= iy1 && iz0 <= iz1 {
-                        for z in iz0..=iz1 {
-                            for y in iy0..=iy1 {
-                                for x in ix0..=ix1 {
-                                    let idx = (z as u32 * ny + y as u32) * nx + x as u32;
-                                    local.push((idx, tri as u32));
-                                }
-                            }
-                        }
-                    }
-                    local
-                })
-                .reduce(
-                    || Vec::new(),
-                    |mut a, mut b| {
-                        a.append(&mut b);
-                        a
-                    },
-                );
-
-            // 4b) sort pairs by cell index (deterministic)
-            use rayon::slice::ParallelSliceMut;
-            pairs.par_sort_unstable_by_key(|p| p.0);
-
-            // 4c) build CSR with per-cell dedup (deterministic order)
-            let cell_count_usize = (nx as usize) * (ny as usize) * (nz as usize);
-            let mut offsets = vec![0u32; cell_count_usize];
-            let mut counts = vec![0u32; cell_count_usize];
-            let mut tris: Vec<u32> = Vec::with_capacity(pairs.len());
-
-            let mut run = 0u32;
-            let mut i = 0usize;
-            while i < pairs.len() {
-                let cell = pairs[i].0 as usize;
-                let start = i;
-                let key = pairs[i].0;
-                // advance i to end of this cell's run
-                while i < pairs.len() && pairs[i].0 == key {
-                    i += 1;
-                }
-                // dedup tri ids within this cell
-                let mut cell_tris: Vec<u32> = pairs[start..i].iter().map(|&(_, t)| t).collect();
-                cell_tris.sort_unstable();
-                cell_tris.dedup();
-
-                offsets[cell] = run;
-                counts[cell] = cell_tris.len() as u32;
-                run += counts[cell];
-
-                tris.extend_from_slice(&cell_tris);
-            }
-
-            // --- 6) Store on the VM ---
-            return SceneGridAccel {
-                origin: bmin,
-                cell_size,
-                dims,
-                cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
-                cell_counts: if counts.is_empty() { vec![0] } else { counts },
-                cell_tris: if tris.is_empty() { vec![0] } else { tris },
-            };
+        // Flatten nodes into u32 words for the GPU buffer
+        let mut node_data: Vec<u32> = Vec::with_capacity(nodes.len() * 8);
+        for n in &nodes {
+            node_data.push(f32::to_bits(n.bmin.x));
+            node_data.push(f32::to_bits(n.bmin.y));
+            node_data.push(f32::to_bits(n.bmin.z));
+            node_data.push(f32::to_bits(n.bmax.x));
+            node_data.push(f32::to_bits(n.bmax.y));
+            node_data.push(f32::to_bits(n.bmax.z));
+            node_data.push(n.left_first);
+            node_data.push(n.tri_count);
         }
 
-        #[cfg(not(feature = "parallel"))]
-        {
-            // Storage for CSR
-            let cell_count = (nx as usize) * (ny as usize) * (nz as usize);
-            let mut cell_vecs: Vec<Vec<u32>> = vec![Vec::new(); cell_count];
-            // your existing sequential version (unchanged)
-            for tri in 0..tri_count {
-                let i0 = indices[3 * tri + 0] as usize;
-                let i1 = indices[3 * tri + 1] as usize;
-                let i2 = indices[3 * tri + 2] as usize;
-
-                let p0 = Vec3::new(verts[i0].pos[0], verts[i0].pos[1], verts[i0].pos[2]);
-                let p1 = Vec3::new(verts[i1].pos[0], verts[i1].pos[1], verts[i1].pos[2]);
-                let p2 = Vec3::new(verts[i2].pos[0], verts[i2].pos[1], verts[i2].pos[2]);
-
-                let mut tmin = vmin(vmin(p0, p1), p2);
-                let mut tmax = vmax(vmax(p0, p1), p2);
-                tmin -= Vec3::broadcast(cell_eps);
-                tmax += Vec3::broadcast(cell_eps);
-
-                let rel_min = (tmin - bmin) / cell_size;
-                let rel_max = (tmax - bmin) / cell_size;
-
-                let mut ix0 = rel_min.x.floor() as i32;
-                let mut iy0 = rel_min.y.floor() as i32;
-                let mut iz0 = rel_min.z.floor() as i32;
-                let mut ix1 = rel_max.x.ceil() as i32;
-                let mut iy1 = rel_max.y.ceil() as i32;
-                let mut iz1 = rel_max.z.ceil() as i32;
-
-                ix0 = ix0.clamp(0, nx as i32 - 1);
-                iy0 = iy0.clamp(0, ny as i32 - 1);
-                iz0 = iz0.clamp(0, nz as i32 - 1);
-                ix1 = ix1.clamp(0, nx as i32 - 1);
-                iy1 = iy1.clamp(0, ny as i32 - 1);
-                iz1 = iz1.clamp(0, nz as i32 - 1);
-
-                if ix0 > ix1 || iy0 > iy1 || iz0 > iz1 {
-                    continue;
-                }
-
-                for z in iz0..=iz1 {
-                    for y in iy0..=iy1 {
-                        for x in ix0..=ix1 {
-                            let idx = ((z as u32 * ny + y as u32) * nx + x as u32) as usize;
-                            cell_vecs[idx].push(tri as u32);
-                        }
-                    }
-                }
-            }
-            // --- 5) CSR flatten (stable order) ---
-            let mut offsets = vec![0u32; cell_count];
-            let mut counts = vec![0u32; cell_count];
-            let mut tris: Vec<u32> = Vec::new();
-            tris.reserve(cell_vecs.iter().map(|v| v.len()).sum());
-
-            let mut run = 0u32;
-            for (i, v) in cell_vecs.iter_mut().enumerate() {
-                offsets[i] = run;
-                // sort for determinism (optional)
-                v.sort_unstable();
-                v.dedup(); // optional de-dup if your binning can push the same tri twice
-                run += v.len() as u32;
-                counts[i] = v.len() as u32;
-                tris.extend(v.iter().copied());
-            }
-
-            // --- 6) Store on the VM ---
-            SceneGridAccel {
-                origin: bmin,
-                cell_size,
-                dims,
-                cell_offsets: if offsets.is_empty() { vec![0] } else { offsets },
-                cell_counts: if counts.is_empty() { vec![0] } else { counts },
-                cell_tris: if tris.is_empty() { vec![0] } else { tris },
-            }
+        SceneBvhAccel {
+            origin: scene_min,
+            extent,
+            nodes: if node_data.is_empty() {
+                vec![0]
+            } else {
+                node_data
+            },
+            tri_indices: if tri_indices.is_empty() {
+                vec![0]
+            } else {
+                tri_indices
+            },
+            node_count: nodes.len() as u32,
+            tri_count: tri_count as u32,
         }
     }
 

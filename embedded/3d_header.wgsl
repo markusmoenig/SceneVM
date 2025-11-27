@@ -176,12 +176,12 @@ struct Indices { data: array<u32> };
 @group(0) @binding(5) var<storage, read> verts3d: Verts3D;
 @group(0) @binding(6) var<storage, read> indices3d: Indices;
 
-// --- Scene-wide uniform grid (optional toggle via gp9.w) ---
+// --- Scene-wide BVH accel (reusing existing grid bindings; toggle via gp9.w) ---
 struct Grid3DHeader {
   origin: vec4<f32>,     // xyz, pad
   cell_size: vec4<f32>,  // xyz, pad
   dims: vec4<u32>,       // nx, ny, nz, pad
-  ranges: vec4<u32>,     // offsets_start, counts_start, tris_start, _
+  ranges: vec4<u32>,     // nodes_start, tris_start, node_count, tri_count
 };
 @group(0) @binding(7) var<uniform> gridH: Grid3DHeader;
 struct GridDataBuffer {
@@ -311,7 +311,7 @@ fn sv_interp3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, u: f32, v: f32) -> vec3<
   return a*(1.0-u-v) + b*u + c*v;
 }
 
-// ===== Uniform-grid DDA traversal over triangles =====
+// ===== BVH traversal over triangles (bindings unchanged) =====
 
 // Packed hit record returned by DDA tracing.
 // Note: vec3 requires 16-byte alignment in structs for Vulkan SPIR-V
@@ -327,23 +327,25 @@ struct TraceHit {
   Ng: vec3<f32>,    // offset 32 (geometric normal, 16-byte aligned)
 };
 
-// Grid helpers
+// Grid helpers (preserve API surface; dims defaults to 1^3 for BVH backing)
 fn grid_bounds_min() -> vec3<f32> { return gridH.origin.xyz; }
 fn grid_cell_size() -> vec3<f32> { return gridH.cell_size.xyz; }
-fn grid_dims() -> vec3<u32> { return gridH.dims.xyz; }
-
-fn grid_cell_index(ix: u32, iy: u32, iz: u32) -> u32 {
-  let nx = gridH.dims.x; let ny = gridH.dims.y;
-  return (iz * ny + iy) * nx + ix;
+fn grid_dims() -> vec3<u32> { return max(gridH.dims.xyz, vec3<u32>(1u)); }
+fn grid_bounds_max() -> vec3<f32> {
+  return grid_bounds_min() + grid_cell_size() * vec3<f32>(grid_dims());
 }
 
+// Legacy grid helpers kept for API compatibility (no-op with BVH backing)
+fn grid_cell_index(ix: u32, iy: u32, iz: u32) -> u32 {
+  let nx = max(gridH.dims.x, 1u); let ny = max(gridH.dims.y, 1u);
+  return (iz * ny + iy) * nx + ix;
+}
 fn grid_world_to_cell(p: vec3<f32>) -> vec3<i32> {
   let minb = grid_bounds_min();
   let cs = grid_cell_size();
   let rel = (p - minb) / cs;
   return vec3<i32>(floor(rel));
 }
-
 fn clamp_cell(c: vec3<i32>) -> vec3<i32> {
   let d = grid_dims();
   return vec3<i32>(
@@ -352,21 +354,54 @@ fn clamp_cell(c: vec3<i32>) -> vec3<i32> {
     clamp(c.z, 0, i32(d.z) - 1)
   );
 }
+fn grid_offset(idx: u32) -> u32 { return grid_data.data[gridH.ranges.x + idx]; }
+fn grid_count(_idx: u32) -> u32 { return 0u; }
+fn grid_tri_index(idx: u32) -> u32 { return bvh_tri_id(idx); }
 
-fn grid_bounds_max() -> vec3<f32> {
-  return grid_bounds_min() + grid_cell_size() * vec3<f32>(grid_dims());
+// BVH buffer layout helpers (node = 2x vec3 bounds + left_first + tri_count)
+struct BvhNode {
+  bmin: vec3<f32>,
+  bmax: vec3<f32>,
+  left_first: u32,
+  tri_count: u32,
+};
+
+fn bvh_nodes_start() -> u32 { return gridH.ranges.x; }
+fn bvh_tris_start() -> u32 { return gridH.ranges.y; }
+fn bvh_node_count() -> u32 { return gridH.ranges.z; }
+fn bvh_tri_count() -> u32 { return gridH.ranges.w; }
+
+fn bvh_node_base(idx: u32) -> u32 { return bvh_nodes_start() + idx * 8u; }
+
+fn bvh_load_node(idx: u32) -> BvhNode {
+  let base = bvh_node_base(idx);
+  let bmin = vec3<f32>(
+    bitcast<f32>(grid_data.data[base + 0u]),
+    bitcast<f32>(grid_data.data[base + 1u]),
+    bitcast<f32>(grid_data.data[base + 2u])
+  );
+  let bmax = vec3<f32>(
+    bitcast<f32>(grid_data.data[base + 3u]),
+    bitcast<f32>(grid_data.data[base + 4u]),
+    bitcast<f32>(grid_data.data[base + 5u])
+  );
+  let left_first = grid_data.data[base + 6u];
+  let tri_count = grid_data.data[base + 7u];
+  return BvhNode(bmin, bmax, left_first, tri_count);
 }
 
-fn grid_offset(idx: u32) -> u32 {
-  return grid_data.data[gridH.ranges.x + idx];
+fn bvh_tri_id(offset: u32) -> u32 {
+  return grid_data.data[bvh_tris_start() + offset];
 }
 
-fn grid_count(idx: u32) -> u32 {
-  return grid_data.data[gridH.ranges.y + idx];
-}
-
-fn grid_tri_index(idx: u32) -> u32 {
-  return grid_data.data[gridH.ranges.z + idx];
+// Legacy DDA API surface (kept for compatibility; no longer used internally)
+struct DDAState {
+  tMax:   vec3<f32>,
+  tDelta: vec3<f32>,
+  step:   vec3<i32>,
+};
+fn dda_setup(_p: vec3<f32>, _rd: vec3<f32>, _cell: vec3<i32>, _tEnter: f32) -> DDAState {
+  return DDAState(vec3<f32>(0.0), vec3<f32>(0.0), vec3<i32>(0, 0, 0));
 }
 
 // Ray/AABB for the whole grid, returns (hit, tEnter, tExit)
@@ -390,159 +425,112 @@ fn ray_box(ro: vec3<f32>, rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> ve
   return vec3<f32>(hit, tmin, tmax);
 }
 
-struct DDAState {
-  tMax:   vec3<f32>,  // absolute times when we hit the next boundary on each axis
-  tDelta: vec3<f32>,  // absolute time increment to cross one full cell along each axis
-  step:   vec3<i32>,  // -1 or +1 per axis
-};
-
-// p = point at tEnter (AABB entry), tEnter = absolute time
-fn dda_setup(p: vec3<f32>, rd: vec3<f32>, cell: vec3<i32>, tEnter: f32) -> DDAState {
-  let cs = grid_cell_size();
-  let minb = grid_bounds_min();
-  let fcell = vec3<f32>(cell);
-
-  let step = vec3<i32>(
-    select(-1, 1, rd.x >= 0.0),
-    select(-1, 1, rd.y >= 0.0),
-    select(-1, 1, rd.z >= 0.0)
-  );
-
-  // next boundary coordinate (on the side we are heading to)
-  let nb_x = minb.x + (select(fcell.x, fcell.x + 1.0, step.x > 0) * cs.x);
-  let nb_y = minb.y + (select(fcell.y, fcell.y + 1.0, step.y > 0) * cs.y);
-  let nb_z = minb.z + (select(fcell.z, fcell.z + 1.0, step.z > 0) * cs.z);
-
-  // FIX: Preserve sign in reciprocals for correct tMax calculation
-  // AMD GPU fix: Use 1e-8 instead of 1e-32 to avoid denormalized float issues
-  let safe_rd = select(sign(rd) * vec3<f32>(1e-8), rd, abs(rd) >= vec3<f32>(1e-8));
-  let inv = 1.0 / safe_rd;
-
-  // time from *p* to the next boundary per axis, then make them absolute by + tEnter
-  let tMax = vec3<f32>(
-    tEnter + (nb_x - p.x) * inv.x,
-    tEnter + (nb_y - p.y) * inv.y,
-    tEnter + (nb_z - p.z) * inv.z
-  );
-
-  // how much absolute time (Δt) to traverse exactly one cell per axis
-  let tDelta = vec3<f32>(cs.x * abs(inv.x), cs.y * abs(inv.y), cs.z * abs(inv.z));
-
-  return DDAState(tMax, tDelta, step);
-}
-
-// Core: uniform-grid DDA traversal. Assumes grid buffers populated.
-// tmin/tmax clip the segment (e.g., near/far planes).
+// BVH traversal. tmin/tmax clip the segment (e.g., near/far planes).
 fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit {
-  // Intersect ray with grid AABB
-  let bmin = grid_bounds_min();
-  let bmax = grid_bounds_max();
-  let rb = ray_box(ro, rd, bmin, bmax);
-  if (rb.x < 0.5) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0)); }
+  let node_count = bvh_node_count();
+  if (node_count == 0u) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0)); }
 
-  var tEnter = max(rb.y, tmin);
-  let tExit = min(rb.z, tmax);
-  if (tEnter > tExit) {
-    return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0));
-  }
+  // Early reject with the root bounds stored in the header
+  let rb_root = ray_box(ro, rd, grid_bounds_min(), grid_bounds_max());
+  if (rb_root.x < 0.5) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0)); }
+  let seg_min = max(rb_root.y, tmin);
+  let seg_max = min(rb_root.z, tmax);
+  if (seg_min > seg_max) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0)); }
 
-  // Start cell: point at tEnter with small epsilon push to avoid boundary issues
-  var p = ro + rd * (tEnter + 1e-5);
-  var cell = clamp_cell(grid_world_to_cell(p));
-
-  // DDA setup
-  var st = dda_setup(p, rd, cell, tEnter);
-  var tNext = st.tMax;  // next boundary crossings
-
-  let dims = grid_dims();
-
-  var best_t = 1e30;
+  var best_t = seg_max;
   var best_tri: u32 = 0u;
   var best_u = 0.0;
   var best_v = 0.0;
   var best_Ng = vec3<f32>(0.0);
 
-  // Hard cap to prevent infinite loops; plenty for large screens
-  let MAX_STEPS: u32 = 50u;
-  var steps: u32 = 0u;
+  // Small explicit stack
+  var stack: array<u32, 64u>;
+  var stack_size: u32 = 1u;
+  stack[0u] = 0u;
 
   loop {
-    if (steps >= MAX_STEPS) { break; }
-    steps = steps + 1u;
+    if (stack_size == 0u) { break; }
+    stack_size = stack_size - 1u;
+    let node_idx = stack[stack_size];
+    if (node_idx >= node_count) { continue; }
 
-    // Cell index & triangle span
-    let ix = u32(cell.x);
-    let iy = u32(cell.y);
-    let iz = u32(cell.z);
-    let idx = grid_cell_index(ix, iy, iz);
-    let off = grid_offset(idx);
-    let cnt = grid_count(idx);
+    let node = bvh_load_node(node_idx);
+    let rb = ray_box(ro, rd, node.bmin, node.bmax);
+    if (rb.x < 0.5) { continue; }
+    let entry = max(rb.y, seg_min);
+    let exit = min(rb.z, best_t);
+    if (entry > exit) { continue; }
 
-    // Test tris in this cell; track the closest hit
-    let tCellExit = min(tNext.x, min(tNext.y, tNext.z));
-    for (var k: u32 = 0u; k < cnt; k = k + 1u) {
-      let tri = grid_tri_index(off + k);
+    if (node.tri_count > 0u) {
+      let base = node.left_first;
+      for (var i: u32 = 0u; i < node.tri_count; i = i + 1u) {
+        let tri = bvh_tri_id(base + i);
+        if (tri >= bvh_tri_count()) { continue; }
+        if (tri * 3u + 2u >= arrayLength(&indices3d.data)) { continue; }
 
-      // Fetch tri indices (tri references indices3d in packs of 3)
-      let i0 = indices3d.data[3u*tri + 0u];
-      let i1 = indices3d.data[3u*tri + 1u];
-      let i2 = indices3d.data[3u*tri + 2u];
+        let i0 = indices3d.data[3u*tri + 0u];
+        let i1 = indices3d.data[3u*tri + 1u];
+        let i2 = indices3d.data[3u*tri + 2u];
 
-      // Triangle vertices
-      let a = verts3d.data[i0].pos;
-      let b = verts3d.data[i1].pos;
-      let c = verts3d.data[i2].pos;
+        // Triangle vertices
+        let a = verts3d.data[i0].pos;
+        let b = verts3d.data[i1].pos;
+        let c = verts3d.data[i2].pos;
 
-      let hit = sv_ray_tri_full(ro, rd, a, b, c);
-      if (!hit.hit) { continue; }
+        let hit = sv_ray_tri_full(ro, rd, a, b, c);
+        if (!hit.hit) { continue; }
 
-      if (hit.t < best_t) {
-        best_t  = hit.t;
-        best_tri = tri;
-        best_u  = hit.u;
-        best_v  = hit.v;
-        best_Ng = hit.Ng;
+        if (hit.t > seg_min && hit.t < best_t) {
+          best_t  = hit.t;
+          best_tri = tri;
+          best_u  = hit.u;
+          best_v  = hit.v;
+          best_Ng = hit.Ng;
+        }
       }
+      continue;
     }
 
-    // FIX: Check if we found a hit closer than the next cell boundary
-    // If so, we can early-exit because no further cells can have closer triangles
-    if (best_t < tCellExit) {
-      return TraceHit(true, best_t, best_tri, best_u, best_v, 0u, 0u, 0u, best_Ng);
-    }
+    // Internal node: visit near child first
+    let left_idx = node.left_first;
+    let right_idx = left_idx + 1u;
+    let left = bvh_load_node(left_idx);
+    let right = bvh_load_node(right_idx);
+    let rb_left = ray_box(ro, rd, left.bmin, left.bmax);
+    let rb_right = ray_box(ro, rd, right.bmin, right.bmax);
 
-    // Advance to next cell along the smallest tNext
-    if (tNext.x < tNext.y) {
-      if (tNext.x < tNext.z) {
-        cell.x += st.step.x;
-        tEnter = tNext.x;
-        tNext.x += abs(st.tDelta.x);
-      } else {
-        cell.z += st.step.z;
-        tEnter = tNext.z;
-        tNext.z += abs(st.tDelta.z);
-      }
-    } else {
-      if (tNext.y < tNext.z) {
-        cell.y += st.step.y;
-        tEnter = tNext.y;
-        tNext.y += abs(st.tDelta.y);
-      } else {
-        cell.z += st.step.z;
-        tEnter = tNext.z;
-        tNext.z += abs(st.tDelta.z);
-      }
-    }
+    let left_hit = rb_left.x > 0.5 && max(rb_left.y, seg_min) <= min(rb_left.z, best_t);
+    let right_hit = rb_right.x > 0.5 && max(rb_right.y, seg_min) <= min(rb_right.z, best_t);
 
-    // Out of grid or beyond segment
-    if (tEnter > tExit) { break; }
-    if (cell.x < 0 || cell.y < 0 || cell.z < 0) { break; }
-    if (u32(cell.x) >= dims.x || u32(cell.y) >= dims.y || u32(cell.z) >= dims.z) { break; }
+    if (left_hit && right_hit) {
+      let l_entry = max(rb_left.y, seg_min);
+      let r_entry = max(rb_right.y, seg_min);
+      if (stack_size + 2u < 64u) {
+        if (l_entry < r_entry) {
+          stack[stack_size] = right_idx;
+          stack[stack_size + 1u] = left_idx;
+        } else {
+          stack[stack_size] = left_idx;
+          stack[stack_size + 1u] = right_idx;
+        }
+        stack_size = stack_size + 2u;
+      }
+    } else if (left_hit && stack_size < 64u) {
+      stack[stack_size] = left_idx;
+      stack_size = stack_size + 1u;
+    } else if (right_hit && stack_size < 64u) {
+      stack[stack_size] = right_idx;
+      stack_size = stack_size + 1u;
+    }
+  }
+
+  if (best_t < seg_max && best_t < 1e29) {
+    return TraceHit(true, best_t, best_tri, best_u, best_v, 0u, 0u, 0u, best_Ng);
   }
 
   return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0));
 }
-// ===== end DDA =====
+// ===== end BVH =====
 
 // TBN from triangle positions and OBJECT-space UVs (no atlas mapping here),
 // using geometric normal for stability.
