@@ -2783,7 +2783,6 @@ impl VM {
     }
 
     fn build_scene_bvh_from(verts: &[Vert3DPod], indices: &[u32], leaf_size: u32) -> SceneBvhAccel {
-        use std::cmp::Ordering;
         use vek::Vec3;
 
         #[derive(Clone, Copy, Debug, Default)]
@@ -2875,6 +2874,14 @@ impl VM {
         let mut tri_indices: Vec<u32> = (0..tri_count as u32).collect();
 
         // Recursively build a binary BVH using median split on the widest centroid axis.
+        fn surface_area(e: Vec3<f32>) -> f32 {
+            let ex = e.x.max(0.0);
+            let ey = e.y.max(0.0);
+            let ez = e.z.max(0.0);
+            2.0 * (ex * ey + ey * ez + ez * ex).max(1e-12)
+        }
+
+        // Recursively build a binary BVH using binned SAH on centroid axis.
         fn build_node(
             node_idx: usize,
             start: u32,
@@ -2914,28 +2921,168 @@ impl VM {
                 cmax = vmax(cmax, c);
             }
             let cextent = cmax - cmin;
-            let mut axis = 0usize;
-            if cextent.y > cextent.x && cextent.y >= cextent.z {
-                axis = 1;
-            } else if cextent.z > cextent.x && cextent.z > cextent.y {
-                axis = 2;
+            const BINS: usize = 16;
+            let mut best_axis = 3usize;
+            let mut best_cost = f32::INFINITY;
+            let mut best_split_bin = 0usize;
+
+            for axis in 0..3 {
+                let extent_axis = match axis {
+                    0 => cextent.x,
+                    1 => cextent.y,
+                    _ => cextent.z,
+                };
+                if extent_axis < 1e-6 {
+                    continue;
+                }
+
+                let mut bin_count = [0u32; BINS];
+                let mut bin_bmin = [Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY); BINS];
+                let mut bin_bmax =
+                    [Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY); BINS];
+
+                for &t in &tri_indices[start_usize..end] {
+                    let c = tri_centroids[t as usize];
+                    let c_axis = match axis {
+                        0 => c.x,
+                        1 => c.y,
+                        _ => c.z,
+                    };
+                    let mut bin = (((c_axis
+                        - match axis {
+                            0 => cmin.x,
+                            1 => cmin.y,
+                            _ => cmin.z,
+                        })
+                        / extent_axis)
+                        * ((BINS - 1) as f32)) as i32;
+                    bin = bin.clamp(0, (BINS - 1) as i32);
+                    let bin = bin as usize;
+                    bin_count[bin] += 1;
+                    let (tmin, tmax) = tri_bounds[t as usize];
+                    bin_bmin[bin] = vmin(bin_bmin[bin], tmin);
+                    bin_bmax[bin] = vmax(bin_bmax[bin], tmax);
+                }
+
+                let mut prefix_count = [0u32; BINS];
+                let mut prefix_bmin =
+                    [Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY); BINS];
+                let mut prefix_bmax =
+                    [Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY); BINS];
+
+                let mut running_count = 0u32;
+                let mut running_bmin = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+                let mut running_bmax =
+                    Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+                for i in 0..BINS {
+                    running_count += bin_count[i];
+                    running_bmin = vmin(running_bmin, bin_bmin[i]);
+                    running_bmax = vmax(running_bmax, bin_bmax[i]);
+                    prefix_count[i] = running_count;
+                    prefix_bmin[i] = running_bmin;
+                    prefix_bmax[i] = running_bmax;
+                }
+
+                let mut suffix_count = [0u32; BINS];
+                let mut suffix_bmin =
+                    [Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY); BINS];
+                let mut suffix_bmax =
+                    [Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY); BINS];
+
+                let mut running_count_r = 0u32;
+                let mut running_bmin_r = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+                let mut running_bmax_r =
+                    Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+                for i in (0..BINS).rev() {
+                    running_count_r += bin_count[i];
+                    running_bmin_r = vmin(running_bmin_r, bin_bmin[i]);
+                    running_bmax_r = vmax(running_bmax_r, bin_bmax[i]);
+                    suffix_count[i] = running_count_r;
+                    suffix_bmin[i] = running_bmin_r;
+                    suffix_bmax[i] = running_bmax_r;
+                }
+
+                for split_bin in 0..(BINS - 1) {
+                    let left_count = prefix_count[split_bin];
+                    let right_count = suffix_count[split_bin + 1];
+                    if left_count == 0 || right_count == 0 {
+                        continue;
+                    }
+                    let left_sa = surface_area(prefix_bmax[split_bin] - prefix_bmin[split_bin]);
+                    let right_sa =
+                        surface_area(suffix_bmax[split_bin + 1] - suffix_bmin[split_bin + 1]);
+                    let cost = left_sa * left_count as f32 + right_sa * right_count as f32;
+                    if cost < best_cost {
+                        best_cost = cost;
+                        best_axis = axis;
+                        best_split_bin = split_bin;
+                    }
+                }
             }
 
-            // Median split by centroid along selected axis
-            let mid = start_usize + count_usize / 2;
-            tri_indices[start_usize..end].select_nth_unstable_by(mid - start_usize, |&a, &b| {
-                let ca = match axis {
-                    0 => tri_centroids[a as usize].x,
-                    1 => tri_centroids[a as usize].y,
-                    _ => tri_centroids[a as usize].z,
-                };
-                let cb = match axis {
-                    0 => tri_centroids[b as usize].x,
-                    1 => tri_centroids[b as usize].y,
-                    _ => tri_centroids[b as usize].z,
-                };
-                ca.partial_cmp(&cb).unwrap_or(Ordering::Equal)
-            });
+            let node_sa = surface_area(bmax - bmin);
+            let leaf_cost = node_sa * count as f32;
+
+            if best_axis == 3 || best_cost >= leaf_cost {
+                nodes[node_idx].left_first = start;
+                nodes[node_idx].tri_count = count;
+                return;
+            }
+
+            // Partition by best axis/split (using bin membership to match SAH evaluation)
+            let cmin_axis = match best_axis {
+                0 => cmin.x,
+                1 => cmin.y,
+                _ => cmin.z,
+            };
+            let cextent_axis = match best_axis {
+                0 => cextent.x,
+                1 => cextent.y,
+                _ => cextent.z,
+            };
+
+            let mut i = start_usize;
+            let mut j = end - 1;
+            while i <= j {
+                let ci_val = tri_centroids[tri_indices[i] as usize][best_axis];
+                let mut bin_i =
+                    (((ci_val - cmin_axis) / cextent_axis) * ((BINS - 1) as f32)) as i32;
+                bin_i = bin_i.clamp(0, (BINS - 1) as i32);
+
+                if bin_i as usize <= best_split_bin {
+                    i += 1;
+                    continue;
+                }
+
+                let cj_val = tri_centroids[tri_indices[j] as usize][best_axis];
+                let mut bin_j =
+                    (((cj_val - cmin_axis) / cextent_axis) * ((BINS - 1) as f32)) as i32;
+                bin_j = bin_j.clamp(0, (BINS - 1) as i32);
+
+                if bin_j as usize > best_split_bin {
+                    if j == 0 {
+                        break;
+                    }
+                    j -= 1;
+                    continue;
+                }
+
+                tri_indices.swap(i, j);
+                i += 1;
+                if j == 0 {
+                    break;
+                }
+                j -= 1;
+            }
+
+            let mid = i.max(start_usize + 1).min(end - 1);
+            let left_count = (mid - start_usize) as u32;
+            let right_count = count - left_count;
+            if left_count == 0 || right_count == 0 {
+                nodes[node_idx].left_first = start;
+                nodes[node_idx].tri_count = count;
+                return;
+            }
 
             let left_idx = nodes.len();
             nodes[node_idx].left_first = left_idx as u32;
@@ -2943,7 +3090,6 @@ impl VM {
             nodes.push(BvhNode::default());
             nodes.push(BvhNode::default());
 
-            let left_count = (mid - start_usize) as u32;
             build_node(
                 left_idx,
                 start,
@@ -2957,7 +3103,7 @@ impl VM {
             build_node(
                 left_idx + 1,
                 mid as u32,
-                count - left_count,
+                right_count,
                 leaf_size,
                 nodes,
                 tri_indices,
