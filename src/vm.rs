@@ -41,6 +41,7 @@ pub enum GeoId {
     Light(u32),
     ItemLight(u32),
     Triangle(u32),
+    Terrain(u32),
 }
 
 #[repr(C)]
