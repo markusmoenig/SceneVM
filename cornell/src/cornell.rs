@@ -180,7 +180,7 @@ impl TheTrait for CornellBox {
             material: pack_material(
                 0.0,  // Very low roughness (very shiny)
                 0.0,  // Non-metallic
-                0.1,  // Semi-transparent (10% opacity)
+                0.3,  // Semi-transparent (30% opacity)
                 0.0,  // No emission
                 None, // Default normal X (0.0)
                 None, // Default normal Y (0.0)

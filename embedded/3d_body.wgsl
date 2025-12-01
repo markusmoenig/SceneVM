@@ -747,7 +747,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let max_sky_dist = select(50.0, U.gp6.y, U.gp6.y >= 0.0);
 
             var sky_contribution = vec3<f32>(0.0);
-            if (max_sky_dist > 0.0 && sky_factor > 0.0) {
+            // If reflection sampling is on, avoid double-counting sky for highly specular surfaces
+            let reflections_on = U.gp6.w > 0.0;
+            let skip_sky_for_mirror = reflections_on && mat.metallic > 0.5;
+            if (!skip_sky_for_mirror && max_sky_dist > 0.0 && sky_factor > 0.0) {
                 let sky_dir = reflect(rd, N);
                 let sky_dir_up = max(dot(sky_dir, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
                 let sky_visibility = select(0.0, trace_shadow(P, sky_dir, max_sky_dist), sky_dir_up > 0.0);

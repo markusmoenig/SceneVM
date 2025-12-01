@@ -2,6 +2,49 @@ use scenevm::{Atom, GeoId, Light, Poly2D, Poly3D, RenderMode, SceneVM};
 use theframework::prelude::*;
 use uuid::Uuid;
 use vek::Mat4;
+/// Helper function to pack material properties into the unified u32 format
+///
+/// ## Format
+/// - Bits 0-3:   Roughness (0-15, maps to 0.0-1.0)
+/// - Bits 4-7:   Metallic  (0-15, maps to 0.0-1.0)
+/// - Bits 8-11:  Opacity   (0-15, maps to 0.0-1.0)
+/// - Bits 12-15: Emissive  (0-15, maps to 0.0-1.0)
+/// - Bits 16-23: Normal X (0-255, maps to -1.0 to +1.0, typically 128 = 0.0)
+/// - Bits 24-31: Normal Y (0-255, maps to -1.0 to +1.0, typically 128 = 0.0)
+///
+/// # Arguments
+/// * `roughness` - 0.0 to 1.0
+/// * `metallic` - 0.0 to 1.0
+/// * `opacity` - 0.0 to 1.0
+/// * `emissive` - 0.0 to 1.0
+/// * `normal_x` - -1.0 to +1.0 (optional, default 0.0)
+/// * `normal_y` - -1.0 to +1.0 (optional, default 0.0)
+fn pack_material(
+    roughness: f32,
+    metallic: f32,
+    opacity: f32,
+    emissive: f32,
+    normal_x: Option<f32>,
+    normal_y: Option<f32>,
+) -> [u8; 4] {
+    // Clamp and quantize to 4 bits (0-15)
+    let r = (roughness.clamp(0.0, 1.0) * 15.0).round() as u8;
+    let m = (metallic.clamp(0.0, 1.0) * 15.0).round() as u8;
+    let o = (opacity.clamp(0.0, 1.0) * 15.0).round() as u8;
+    let e = (emissive.clamp(0.0, 1.0) * 15.0).round() as u8;
+
+    // Pack into lower 16 bits
+    let mat_lo = r | (m << 4);
+    let mat_hi = o | (e << 4);
+
+    // Pack normals into upper 16 bits (convert -1..1 to 0..255)
+    let nx = normal_x.unwrap_or(0.0);
+    let ny = normal_y.unwrap_or(0.0);
+    let norm_x = ((nx.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+    let norm_y = ((ny.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+
+    [mat_lo, mat_hi, norm_x, norm_y]
+}
 
 pub struct Circle {
     vm: SceneVM,
@@ -41,9 +84,17 @@ impl TheTrait for Circle {
 
         // self.vm.set_layer_activity_logging(true);
         self.vm.execute(Atom::SetBackground(Vec4::zero()));
-        self.vm.execute(Atom::AddSolid {
+        self.vm.execute(Atom::AddSolidWithMaterial {
             id: tile_id,
-            color: [255, 0, 0, 255],
+            color: [128, 128, 128, 255],
+            material: pack_material(
+                0.0,  // Very low roughness (very shiny)
+                0.0,  // Non-metallic
+                1.0,  // Semi-transparent (30% opacity)
+                0.0,  // No emission
+                None, // Default normal X (0.0)
+                None, // Default normal Y (0.0)
+            ),
         });
         self.vm.execute(Atom::AddSolid {
             id: overlay_tile,
@@ -57,12 +108,39 @@ impl TheTrait for Circle {
 
         self.vm.execute(Atom::AddLight {
             id: GeoId::Light(0),
-            light: Light::new_pointlight(Vec3::new(0.0, 1.0, -4.0)),
+            light: Light::new_pointlight(Vec3::new(0.0, 1.0, -4.0))
+                .with_color(Vec3::new(1.0, 0.95, 0.9))
+                .with_intensity(150.0)
+                .with_radius(12.0)
+                .with_end_distance(18.0),
         });
 
         // Render Settings
+        self.vm.execute(Atom::SetGP5(Vec4::new(
+            8.0, // AO Samples
+            0.5, // AO radius
+            1.0, // Bump Strength
+            8.0, // Max transparency bounces
+        )));
+        // Add a little ambient so the cube is visible even if the light misses
+        self.vm.execute(Atom::SetGP3(Vec4::new(
+            0.6,  // Ambient R (linear)
+            0.6,  // Ambient G
+            0.7,  // Ambient B
+            0.15, // Ambient strength
+        )));
+        // Sky tint for reflections/background
         self.vm
-            .execute(Atom::SetGP5(vek::Vec4::new(8.0, 0.5, 1.0, 8.0)));
+            .execute(Atom::SetGP0(Vec4::new(0.1, 0.15, 0.2, 1.0)));
+
+        // Enable PBR reflections
+        // gp6: x: Max shadow distance, y: Max sky distance, z: Max shadow steps, w: Reflection samples
+        self.vm.execute(Atom::SetGP6(Vec4::new(
+            10.0, // Max shadow distance
+            50.0, // Max sky distance
+            2.0,  // Max shadow steps (for transparent shadows)
+            16.0, // Reflection samples (4 for good quality reflections)
+        )));
 
         self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
 
