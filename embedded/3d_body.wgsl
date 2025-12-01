@@ -19,7 +19,7 @@
 // - gp6.x:   Max shadow distance (default 10.0)
 // - gp6.y:   Max sky distance (default 50.0)
 // - gp6.z:   Max shadow steps (default 0, 0=binary/fast, >0=transparent shadows)
-// - gp6.w:   Reflections (0 = disabled, >0 = enabled sharp mirror reflections)
+// - gp6.w:   Reflection samples (0 = disabled, >=1 = GGX PBR reflection rays)
 
 // ===== Constants =====
 const PI: f32 = 3.14159265359;
@@ -123,8 +123,11 @@ fn unpack_material(mats: vec4<f32>) -> Material {
 
     // Lower 16 bits: materials (4 bits each)
     let mat_bits = packed & 0xFFFFu;
-    let min_roughness = select(0.04, U.gp6.x, U.gp6.x > 0.0);
-    let roughness = max(f32(mat_bits & 0xFu) / 15.0, min_roughness);
+    let roughness = clamp(
+        max(f32(mat_bits & 0xFu) / 15.0, MIN_ROUGHNESS),
+        MIN_ROUGHNESS,
+        1.0
+    );
     let metallic = f32((mat_bits >> 4u) & 0xFu) / 15.0;
     let opacity = f32((mat_bits >> 8u) & 0xFu) / 15.0;
     let emissive = f32((mat_bits >> 12u) & 0xFu) / 15.0;
@@ -757,46 +760,66 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Emissive contribution (self-illumination)
             let emissive = albedo.rgb * mat.emissive * 2.0;
 
-            // PBR Reflections (sharp mirror only)
+            // PBR Reflections (GGX importance sampled, gp6.w = sample count)
             var reflections = vec3<f32>(0.0);
-            let reflection_enabled = U.gp6.w > 0.0;
+            let reflection_samples = u32(max(U.gp6.w, 0.0));
 
-            if (reflection_enabled && mat.metallic > 0.1) {
+            if (reflection_samples > 0u) {
                 let F0 = mix(vec3<f32>(0.04), albedo.rgb, mat.metallic);
+                let roughness = clamp(mat.roughness, MIN_ROUGHNESS, 1.0);
+                let onb = build_onb(N);
+                let sample_count = max(reflection_samples, 1u);
+                let max_refl_dist = select(50.0, U.gp6.y, U.gp6.y >= 0.0);
 
-                // Perfect reflection direction
-                let R = reflect(-V, N);
+                var refl_accum = vec3<f32>(0.0);
+                var weight_sum = 0.0;
 
-                // Trace single reflection ray
-                let refl_hit = trace_unified(P + N * 0.01, R, 0.0, 50.0);
+                for (var s: u32 = 0u; s < sample_count; s = s + 1u) {
+                    let rand = hash33(P + vec3<f32>(
+                        f32(px) * 0.5 + f32(s),
+                        f32(py) * 0.5 + f32(bounce) * 0.73,
+                        f32(s) * 7.31
+                    ));
 
-                var refl_color = vec3<f32>(0.0);
-                if (refl_hit.hit_type == HIT_TYPE_NONE) {
-                    // Reflect sky
-                    refl_color = select(U.background.rgb, U.gp0.xyz, length(U.gp0.xyz) > 0.01);
-                } else {
-                    // Get reflected surface properties
-                    let refl_P = refl_hit.position;
-                    let refl_N = refl_hit.normal;
-                    let refl_V = -R;
-                    let refl_albedo = refl_hit.albedo.rgb;
-                    let refl_mat = refl_hit.material;
+                    // Sample microfacet normal and build reflection direction
+                    let H_sample = sample_ggx(rand.x, rand.y, roughness);
+                    let H = normalize(onb * H_sample);
+                    let L = reflect(-V, H);
+                    let NdotL = max(dot(N, L), 0.0);
+                    if (NdotL <= 0.0) { continue; }
 
-                    if (refl_mat.emissive > 0.99) {
-                        refl_color = refl_albedo * 2.0;
+                    let refl_hit = trace_unified(P + N * 0.01, L, 0.0, max_refl_dist);
+
+                    var sample_color = vec3<f32>(0.0);
+                    if (refl_hit.hit_type == HIT_TYPE_NONE) {
+                        // Reflect sky
+                        sample_color = select(U.background.rgb, U.gp0.xyz, length(U.gp0.xyz) > 0.01);
                     } else {
-                        let refl_direct = pbr_lighting(refl_P, refl_N, refl_V, refl_albedo, refl_mat);
-                        let refl_ambient = (ambient_color * ambient_strength) * refl_albedo;
-                        let refl_emissive = refl_albedo * refl_mat.emissive * 2.0;
-                        refl_color = refl_direct + refl_ambient + refl_emissive;
+                        // Get reflected surface properties
+                        let refl_P = refl_hit.position;
+                        let refl_N = refl_hit.normal;
+                        let refl_V = -L;
+                        let refl_albedo = refl_hit.albedo.rgb;
+                        let refl_mat = refl_hit.material;
+
+                        if (refl_mat.emissive > 0.99) {
+                            sample_color = refl_albedo * 2.0;
+                        } else {
+                            let refl_direct = pbr_lighting(refl_P, refl_N, refl_V, refl_albedo, refl_mat);
+                            let refl_ambient = (ambient_color * ambient_strength) * refl_albedo;
+                            let refl_emissive = refl_albedo * refl_mat.emissive * 2.0;
+                            sample_color = refl_direct + refl_ambient + refl_emissive;
+                        }
                     }
+
+                    let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
+                    refl_accum += sample_color * F * NdotL;
+                    weight_sum += NdotL;
                 }
 
-                // Fresnel effect (stronger reflections at grazing angles)
-                let NdotV = max(dot(N, V), 0.0);
-                let F = fresnel_schlick(NdotV, F0);
-
-                reflections = refl_color * F;
+                if (weight_sum > 0.0) {
+                    reflections = refl_accum / weight_sum;
+                }
             }
 
             // Combine lighting for this layer

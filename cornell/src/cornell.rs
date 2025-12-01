@@ -165,8 +165,8 @@ impl TheTrait for CornellBox {
             id: metal_id,
             color: [220, 220, 240, 255], // Bright metallic silver for mirror
             material: pack_material(
-                0.05, // Very smooth (near mirror, but with tiny bit of roughness for visibility)
-                0.9,  // High metallic (strong reflections, but 10% diffuse so it's visible)
+                0.2,  // Slightly rough so GGX reflections blur; tweak to compare
+                1.0,  // High metallic (strong reflections, but 10% diffuse so it's visible)
                 1.0,  // Full opacity
                 0.0,  // No emission
                 None, // Default normal X (0.0)
@@ -178,9 +178,9 @@ impl TheTrait for CornellBox {
             id: glass_id,
             color: [200, 230, 255, 255], // Blue glass color (alpha in material, not here)
             material: pack_material(
-                0.05, // Very low roughness (very shiny)
+                0.0,  // Very low roughness (very shiny)
                 0.0,  // Non-metallic
-                0.1,  // Semi-transparent (50% opacity)
+                0.1,  // Semi-transparent (10% opacity)
                 0.0,  // No emission
                 None, // Default normal X (0.0)
                 None, // Default normal Y (0.0)
@@ -362,7 +362,7 @@ impl TheTrait for CornellBox {
             8.0, // AO Samples
             0.5, // AO radius
             1.0, // Bump Strength
-            8.0, // Reflection samples (4 for good quality reflections)
+            8.0, // Max transparency bounces
         )));
 
         // Enable PBR reflections
