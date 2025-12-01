@@ -163,10 +163,10 @@ impl TheTrait for CornellBox {
         // Create solid materials with packed material properties
         self.vm.execute(Atom::AddSolidWithMaterial {
             id: metal_id,
-            color: [150, 150, 170, 255], // Metallic gray color
+            color: [220, 220, 240, 255], // Bright metallic silver for mirror
             material: pack_material(
-                0.2,  // Low roughness (shiny)
-                0.6,  // High metallic
+                0.05, // Very smooth (near mirror, but with tiny bit of roughness for visibility)
+                0.9,  // High metallic (strong reflections, but 10% diffuse so it's visible)
                 1.0,  // Full opacity
                 0.0,  // No emission
                 None, // Default normal X (0.0)
@@ -180,7 +180,7 @@ impl TheTrait for CornellBox {
             material: pack_material(
                 0.05, // Very low roughness (very shiny)
                 0.0,  // Non-metallic
-                0.5,  // Semi-transparent (50% opacity)
+                0.1,  // Semi-transparent (50% opacity)
                 0.0,  // No emission
                 None, // Default normal X (0.0)
                 None, // Default normal Y (0.0)
@@ -328,12 +328,21 @@ impl TheTrait for CornellBox {
 
         // Set up rendering
 
-        // Set sky and background to pure black to hide edge artifacts
+        // Set sky and background to dark gray so reflections have something to show
         self.vm
-            .execute(Atom::SetGP0(Vec4::new(0.0, 0.0, 0.0, 0.03))); // Black sky
+            .execute(Atom::SetGP0(Vec4::new(0.1, 0.1, 0.15, 1.0))); // Dark blue-gray sky for reflections
 
         self.vm
-            .execute(Atom::SetBackground(Vec4::new(0.0, 0.0, 0.0, 1.0))); // Pure black background
+            .execute(Atom::SetBackground(Vec4::new(0.05, 0.05, 0.08, 1.0))); // Dark background
+
+        // Add ambient light so surfaces aren't completely black
+        // gp3: Ambient color (RGB) + ambient strength (w)
+        self.vm.execute(Atom::SetGP3(Vec4::new(
+            0.8, // Ambient R (linear space)
+            0.8, // Ambient G
+            0.8, // Ambient B
+            0.3, // Ambient strength (30%)
+        )));
 
         self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
 
@@ -348,6 +357,22 @@ impl TheTrait for CornellBox {
             .with_perspective(60.0, 0.1, 100.0);
 
         self.vm.execute(Atom::SetCamera3D { camera });
+
+        self.vm.execute(Atom::SetGP5(Vec4::new(
+            8.0, // AO Samples
+            0.5, // AO radius
+            1.0, // Bump Strength
+            8.0, // Reflection samples (4 for good quality reflections)
+        )));
+
+        // Enable PBR reflections
+        // gp6: x: Max shadow distance, y: Max sky distance, z: Max shadow steps, w: Reflection samples
+        self.vm.execute(Atom::SetGP6(Vec4::new(
+            10.0, // Max shadow distance
+            50.0, // Max sky distance
+            2.0,  // Max shadow steps (for transparent shadows)
+            16.0, // Reflection samples (4 for good quality reflections)
+        )));
     }
 
     fn draw(&mut self, pixels: &mut [u8], ctx: &mut TheContext) {
