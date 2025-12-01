@@ -15,6 +15,21 @@ impl Default for DynamicKind {
     }
 }
 
+/// Repeat mode for billboard tiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepeatMode {
+    /// Scale the tile to fit the billboard size (default)
+    Scale = 0,
+    /// Repeat the tile across the billboard
+    Repeat = 1,
+}
+
+impl Default for RepeatMode {
+    fn default() -> Self {
+        RepeatMode::Scale
+    }
+}
+
 /// Per-frame dynamic object description (billboards, particles, etc.).
 #[derive(Clone, Debug)]
 pub struct DynamicObject {
@@ -24,7 +39,9 @@ pub struct DynamicObject {
     pub center: Vec3<f32>,
     pub view_right: Vec3<f32>,
     pub view_up: Vec3<f32>,
-    pub size: f32,
+    pub width: f32,
+    pub height: f32,
+    pub repeat_mode: RepeatMode,
 }
 
 impl Default for DynamicObject {
@@ -36,7 +53,9 @@ impl Default for DynamicObject {
             center: Vec3::zero(),
             view_right: Vec3::unit_x(),
             view_up: Vec3::unit_y(),
-            size: 1.0,
+            width: 1.0,
+            height: 1.0,
+            repeat_mode: RepeatMode::Scale,
         }
     }
 }
@@ -49,7 +68,8 @@ impl DynamicObject {
         center: Vec3<f32>,
         view_right: Vec3<f32>,
         view_up: Vec3<f32>,
-        size: f32,
+        width: f32,
+        height: f32,
     ) -> Self {
         Self {
             id,
@@ -58,19 +78,34 @@ impl DynamicObject {
             center,
             view_right,
             view_up,
-            size,
+            width,
+            height,
+            repeat_mode: RepeatMode::Scale,
         }
     }
 
     /// Convenience constructor for a 2D billboard, supplying only the XY position and size.
-    pub fn billboard_tile_2d(id: GeoId, tile_id: Uuid, pos: Vec2<f32>, size: f32) -> Self {
+    pub fn billboard_tile_2d(
+        id: GeoId,
+        tile_id: Uuid,
+        pos: Vec2<f32>,
+        width: f32,
+        height: f32,
+    ) -> Self {
         Self::billboard_tile(
             id,
             tile_id,
             Vec3::new(pos.x, pos.y, 0.0),
             Vec3::unit_x(),
             Vec3::unit_y(),
-            size,
+            width,
+            height,
         )
+    }
+
+    /// Set the repeat mode for this billboard.
+    pub fn with_repeat_mode(mut self, mode: RepeatMode) -> Self {
+        self.repeat_mode = mode;
+        self
     }
 }

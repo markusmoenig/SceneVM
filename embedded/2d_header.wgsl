@@ -100,16 +100,18 @@ fn sd_light(li: u32) -> LightWGSL {
 }
 
 struct DynBillboardCmd {
-  center_size: vec4<f32>,
-  axis_right: vec4<f32>,
-  axis_up: vec4<f32>,
-  params: vec4<u32>,
+  center: vec4<f32>,       // xyz + width
+  axis_right: vec4<f32>,   // xyz + height
+  axis_up: vec4<f32>,      // xyz + repeat_mode
+  params: vec4<u32>,       // tile_index, kind, unused, unused
 };
 
 struct DynBillboardHit2D {
-  hit: bool,
-  uv: vec2<f32>,
-  tile_index: u32,
+  hit: bool,           // offset 0, size 4
+  _pad0: u32,          // offset 4, size 4 (align vec2 to 8 bytes)
+  uv: vec2<f32>,       // offset 8, size 8 (needs 8-byte alignment)
+  tile_index: u32,     // offset 16, size 4
+  repeat_mode: u32,    // offset 20, size 4
 };
 
 fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
@@ -126,7 +128,7 @@ fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
   if (base + SCENE_BILLBOARD_CMD_WORDS > scene_data.header.data_word_count) {
     return cmd;
   }
-  cmd.center_size = sd_vec4f(base + 0u);
+  cmd.center = sd_vec4f(base + 0u);
   cmd.axis_right = sd_vec4f(base + 4u);
   cmd.axis_up = sd_vec4f(base + 8u);
   cmd.params = sd_vec4u(base + 12u);
@@ -140,7 +142,7 @@ fn sv_screen_from_world(world: vec3<f32>) -> vec2<f32> {
 }
 
 fn sd_billboard_hit_screen(pix: vec2<f32>, cmd: DynBillboardCmd) -> DynBillboardHit2D {
-  var hit = DynBillboardHit2D(false, vec2<f32>(0.0), 0u);
+  var hit = DynBillboardHit2D(false, 0u, vec2<f32>(0.0), 0u, 0u);
   if (cmd.params.y != DYNAMIC_KIND_BILLBOARD_TILE) {
     return hit;
   }
@@ -149,7 +151,11 @@ fn sd_billboard_hit_screen(pix: vec2<f32>, cmd: DynBillboardCmd) -> DynBillboard
   if (all(axis_u == vec3<f32>(0.0)) || all(axis_v == vec3<f32>(0.0))) {
     return hit;
   }
-  let center = cmd.center_size.xyz;
+  let center = cmd.center.xyz;
+  let width = cmd.center.w;
+  let height = cmd.axis_right.w;
+  let repeat_mode = u32(cmd.axis_up.w);
+
   let center_scr = sv_screen_from_world(center);
   let right_scr = sv_screen_from_world(center + axis_u);
   let up_scr    = sv_screen_from_world(center + axis_v);
@@ -167,8 +173,18 @@ fn sd_billboard_hit_screen(pix: vec2<f32>, cmd: DynBillboardCmd) -> DynBillboard
     return hit;
   }
   hit.hit = true;
-  hit.uv = vec2<f32>(0.5 * (u + 1.0), 0.5 * (v + 1.0));
+
+  // For repeat mode, scale UVs by the billboard dimensions
+  if (repeat_mode == 1u) {
+    // Repeat mode: scale UVs by width/height so tiles repeat at their natural size
+    hit.uv = vec2<f32>((u + 1.0) * 0.5 * width, (v + 1.0) * 0.5 * height);
+  } else {
+    // Scale mode: single UV [0,1] mapping
+    hit.uv = vec2<f32>(0.5 * (u + 1.0), 0.5 * (v + 1.0));
+  }
+
   hit.tile_index = cmd.params.x;
+  hit.repeat_mode = repeat_mode;
   return hit;
 }
 struct TileAnimMeta {

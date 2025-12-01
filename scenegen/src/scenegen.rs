@@ -60,17 +60,9 @@ impl TheTrait for Circle {
             light: Light::new_pointlight(Vec3::new(0.0, 1.0, -4.0)),
         });
 
-        // Enable bump mapping
+        // Render Settings
         self.vm
-            .execute(Atom::SetGP8(vek::Vec4::new(1.0, 0.0, 0.0, 0.0)));
-
-        // Enable bump mapping
-        self.vm.execute(Atom::SetGP9(vek::Vec4::new(
-            1.0 / 4096.0,
-            1.0 / 4096.0,
-            0.0,
-            1.0,
-        )));
+            .execute(Atom::SetGP5(vek::Vec4::new(8.0, 0.5, 1.0, 8.0)));
 
         self.vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
 

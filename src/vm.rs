@@ -135,10 +135,10 @@ const SCENE_LIGHT_WORDS: u32 =
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct DynamicBillboardPod {
-    pub center_size: [f32; 4],
-    pub axis_right: [f32; 4],
-    pub axis_up: [f32; 4],
-    pub params: [u32; 4],
+    pub center: [f32; 4],     // xyz + width
+    pub axis_right: [f32; 4], // xyz + height
+    pub axis_up: [f32; 4],    // xyz + repeat_mode (as f32)
+    pub params: [u32; 4],     // tile_index, kind, unused, unused
 }
 
 #[allow(dead_code)]
@@ -622,7 +622,11 @@ impl VM {
     }
 
     fn push_dynamic_object(&mut self, mut object: DynamicObject) {
-        if object.size <= 0.0 || !object.size.is_finite() {
+        if object.width <= 0.0
+            || !object.width.is_finite()
+            || object.height <= 0.0
+            || !object.height.is_finite()
+        {
             return;
         }
 
@@ -933,16 +937,26 @@ impl VM {
                         Some(idx) => idx,
                         None => continue,
                     };
-                    let half = (obj.size * 0.5).max(0.0);
-                    if !half.is_finite() || half <= 0.0 {
+                    let half_width = (obj.width * 0.5).max(0.0);
+                    let half_height = (obj.height * 0.5).max(0.0);
+                    if !half_width.is_finite()
+                        || half_width <= 0.0
+                        || !half_height.is_finite()
+                        || half_height <= 0.0
+                    {
                         continue;
                     }
-                    let axis_right = obj.view_right * half;
-                    let axis_up = obj.view_up * half;
+                    let axis_right = obj.view_right * half_width;
+                    let axis_up = obj.view_up * half_height;
                     billboard_cmds.push(DynamicBillboardPod {
-                        center_size: [obj.center.x, obj.center.y, obj.center.z, obj.size],
-                        axis_right: [axis_right.x, axis_right.y, axis_right.z, 0.0],
-                        axis_up: [axis_up.x, axis_up.y, axis_up.z, 0.0],
+                        center: [obj.center.x, obj.center.y, obj.center.z, obj.width],
+                        axis_right: [axis_right.x, axis_right.y, axis_right.z, obj.height],
+                        axis_up: [
+                            axis_up.x,
+                            axis_up.y,
+                            axis_up.z,
+                            obj.repeat_mode as u32 as f32,
+                        ],
                         params: [tile_index, DynamicKind::BillboardTile as u32, 0, 0],
                     });
                 }

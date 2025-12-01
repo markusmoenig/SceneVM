@@ -69,12 +69,12 @@ impl TheTrait for CornellBox {
     }
 
     fn init(&mut self, _ctx: &mut TheContext) {
-        if let Some(bytes) = Embedded::get("3d_body_pbr_raytraced.wgsl") {
-            let source = std::str::from_utf8(bytes.data.as_ref())
-                .unwrap_or("")
-                .to_string();
-            self.vm.execute(Atom::SetSource3D(source));
-        }
+        // if let Some(bytes) = Embedded::get("3d_body_pbr_raytraced.wgsl") {
+        //     let source = std::str::from_utf8(bytes.data.as_ref())
+        //         .unwrap_or("")
+        //         .to_string();
+        //     self.vm.execute(Atom::SetSource3D(source));
+        // }
 
         // Create unique IDs for our materials
         let red_wall_id = Uuid::new_v4();

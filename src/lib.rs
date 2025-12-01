@@ -36,7 +36,7 @@ pub use crate::{
     bbox2d::BBox2D,
     camera3d::{Camera3D, CameraKind},
     chunk::Chunk,
-    dynamic::{DynamicKind, DynamicObject},
+    dynamic::{DynamicKind, DynamicObject, RepeatMode},
     intodata::IntoDataInput,
     light::{Light, LightType},
     poly2d::Poly2D,

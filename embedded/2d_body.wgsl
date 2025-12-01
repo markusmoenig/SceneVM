@@ -43,9 +43,28 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let bh = sd_billboard_hit_screen(p, cmd);
             if (!bh.hit) { continue; }
+
+            // Sample based on repeat mode
             let frame = sv_tile_frame(bh.tile_index);
-            let uv = frame.ofs + bh.uv * frame.scale;
-            let col = textureSampleLevel(atlas_tex, atlas_smp, uv, 0.0);
+            var atlas_uv: vec2<f32>;
+
+            if (bh.repeat_mode == 1u) {
+                // Repeat mode: wrap UVs and map into atlas sub-rect
+                let uv_wrapped = fract(bh.uv);
+                atlas_uv = frame.ofs + uv_wrapped * frame.scale;
+
+                // Clamp to avoid bleeding from neighboring tiles
+                let atlas_dims = vec2<f32>(textureDimensions(atlas_tex, 0));
+                let pad_uv = vec2<f32>(0.5) / atlas_dims;
+                let uv_min = frame.ofs + pad_uv;
+                let uv_max = frame.ofs + frame.scale - pad_uv;
+                atlas_uv = clamp(atlas_uv, uv_min, uv_max);
+            } else {
+                // Scale mode: scale the tile to fit billboard size
+                atlas_uv = frame.ofs + bh.uv * frame.scale;
+            }
+
+            let col = textureSampleLevel(atlas_tex, atlas_smp, atlas_uv, 0.0);
             if (col.a < 0.01) { continue; }
             dyn_color = col;
             dyn_hit = true;

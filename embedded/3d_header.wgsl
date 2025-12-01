@@ -88,10 +88,10 @@ fn sd_light(li: u32) -> LightWGSL {
 }
 
 struct DynBillboardCmd {
-  center_size: vec4<f32>,
-  axis_right: vec4<f32>,
-  axis_up: vec4<f32>,
-  params: vec4<u32>,
+  center: vec4<f32>,       // xyz + width
+  axis_right: vec4<f32>,   // xyz + height
+  axis_up: vec4<f32>,      // xyz + repeat_mode
+  params: vec4<u32>,       // tile_index, kind, unused, unused
 };
 
 struct DynBillboardHit {
@@ -118,7 +118,7 @@ fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
   if (base + SCENE_BILLBOARD_CMD_WORDS > scene_data.header.data_word_count) {
     return cmd;
   }
-  cmd.center_size = sd_vec4f(base + 0u);
+  cmd.center = sd_vec4f(base + 0u);
   cmd.axis_right = sd_vec4f(base + 4u);
   cmd.axis_up = sd_vec4f(base + 8u);
   cmd.params = sd_vec4u(base + 12u);
@@ -140,7 +140,7 @@ fn sd_ray_billboard(ro: vec3<f32>, rd: vec3<f32>, cmd: DynBillboardCmd) -> DynBi
   if (abs(denom) < 1e-5) {
     return hit;
   }
-  let center = cmd.center_size.xyz;
+  let center = cmd.center.xyz;
   let t = dot(center - ro, normal) / denom;
   if (t <= 0.0) {
     return hit;
