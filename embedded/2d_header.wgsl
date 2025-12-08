@@ -112,6 +112,8 @@ struct DynBillboardHit2D {
   uv: vec2<f32>,       // offset 8, size 8 (needs 8-byte alignment)
   tile_index: u32,     // offset 16, size 4
   repeat_mode: u32,    // offset 20, size 4
+  _pad1: u32,          // offset 24, size 4 (AMD alignment fix)
+  _pad2: u32,          // offset 28, size 4 (pad to 32 bytes for 16-byte boundary alignment)
 };
 
 fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
@@ -142,7 +144,7 @@ fn sv_screen_from_world(world: vec3<f32>) -> vec2<f32> {
 }
 
 fn sd_billboard_hit_screen(pix: vec2<f32>, cmd: DynBillboardCmd) -> DynBillboardHit2D {
-  var hit = DynBillboardHit2D(false, 0u, vec2<f32>(0.0), 0u, 0u);
+  var hit = DynBillboardHit2D(false, 0u, vec2<f32>(0.0), 0u, 0u, 0u, 0u);
   if (cmd.params.y != DYNAMIC_KIND_BILLBOARD_TILE) {
     return hit;
   }
@@ -232,7 +234,9 @@ struct ColorHit {
   _pad0: u32, _pad1: u32, _pad2: u32,  // pad to 16 bytes before vec4
   color: vec4<f32>,
   tri: u32,
-  uv: vec2<f32>
+  _pad3: u32,  // align vec2 to 8 bytes
+  uv: vec2<f32>,
+  _pad4: u32, _pad5: u32  // pad to 48 bytes (16-byte aligned)
 };
 
 fn sv_edge(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -302,12 +306,12 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   let b = verts.data[i1].pos;
   let c = verts.data[i2].pos;
   let bh = sv_tri_bary(p, a, b, c);
-  if (!bh.hit) { return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
+  if (!bh.hit) { return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, 0u, vec2<f32>(0.0), 0u, 0u); }
 
   let w = bh.w;
   let uv = sv_tri_atlas_uv(i0, i1, i2, w);
   var col = sv_sample(uv);
-  if (col.a < 0.01) { return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, vec2<f32>(0.0)); }
+  if (col.a < 0.01) { return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, 0u, vec2<f32>(0.0), 0u, 0u); }
 
   // --- Analytic edge AA ---
   let feather = 1.0;
@@ -320,7 +324,7 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   }
 
   // tri id is not known here; sv_shade_tile_pixel wraps this and sets it
-  return ColorHit(true, 0u, 0u, 0u, col, 0u, uv);
+  return ColorHit(true, 0u, 0u, 0u, col, 0u, 0u, uv, 0u, 0u);
 }
 
 fn sv_world_from_screen(pix: vec2<f32>) -> vec2<f32> {
@@ -333,7 +337,7 @@ fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
   // AMD fix: Bounds check all SSBO accesses to prevent garbage data on Vulkan
   let bins_len = arrayLength(&tile_bins.data);
   if (bins_len == 0u || tid >= bins_len) {
-    return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, vec2<f32>(0.0));
+    return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, 0u, vec2<f32>(0.0), 0u, 0u);
   }
 
   let bin = tile_bins.data[tid];
@@ -360,10 +364,10 @@ fn sv_shade_tile_pixel(p: vec2<f32>, px: u32, py: u32, tid: u32) -> ColorHit {
 
     let ch = sv_tri_color(p, i0, i1, i2);
     if (ch.hit) {
-      return ColorHit(true, 0u, 0u, 0u, ch.color, t, ch.uv);
+      return ColorHit(true, 0u, 0u, 0u, ch.color, t, 0u, ch.uv, 0u, 0u);
     }
   }
-  return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, vec2<f32>(0.0));
+  return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, 0u, vec2<f32>(0.0), 0u, 0u);
 }
 
 // RNG Helper

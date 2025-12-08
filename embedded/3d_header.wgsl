@@ -101,7 +101,7 @@ struct DynBillboardHit {
   tile_index: u32,     // offset 16, size 4
   _pad0: u32,          // offset 20, size 4 (AMD alignment fix)
   _pad1: u32,          // offset 24, size 4
-  _pad2: u32,          // offset 28, size 4 (pad to 16-byte boundary)
+  _pad2: u32,          // offset 28, size 4 (pad to 32 bytes for 16-byte boundary alignment)
 };
 
 fn sd_billboard_cmd(idx: u32) -> DynBillboardCmd {
@@ -224,7 +224,8 @@ struct Hit3DFull {
   t: f32,
   u: f32,
   v: f32,           // offset 12, next vec3 needs offset 16
-  Ng: vec3<f32>     // offset 16 (naturally aligned)
+  Ng: vec3<f32>,    // offset 16 (naturally aligned)
+  _pad0: f32        // offset 28, pad to 32 bytes (16-byte aligned)
 };
 
 fn sv_ray_tri_full(ro: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> Hit3DFull {
@@ -232,20 +233,20 @@ fn sv_ray_tri_full(ro: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: 
   let e2 = c - a;
   let p = cross(rd, e2);
   let det = dot(e1, p);
-  if (abs(det) < 1e-8) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
+  if (abs(det) < 1e-8) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0), 0.0); }
   let inv_det = 1.0 / det;
   let tv = ro - a;
   let u = dot(tv, p) * inv_det;
-  if (u < 0.0 || u > 1.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
+  if (u < 0.0 || u > 1.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0), 0.0); }
   let q = cross(tv, e1);
   let v = dot(rd, q) * inv_det;
-  if (v < 0.0 || u + v > 1.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
+  if (v < 0.0 || u + v > 1.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0), 0.0); }
   let t = dot(e2, q) * inv_det;
-  if (t <= 0.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0)); }
+  if (t <= 0.0) { return Hit3DFull(false, 0.0, 0.0, 0.0, vec3<f32>(0.0), 0.0); }
   // Geometric normal; flip to face the ray if needed for stability
   var Ng = normalize(cross(e1, e2));
   if (det > 0.0) { Ng = -Ng; }
-  return Hit3DFull(true, t, u, v, Ng);
+  return Hit3DFull(true, t, u, v, Ng, 0.0);
 }
 
 // --- Helpers: wrap UVs and clamp indices to valid SSBO ranges ---
@@ -325,6 +326,7 @@ struct TraceHit {
   _pad1: u32,       // offset 24 (padding)
   _pad2: u32,       // offset 28 (padding to align Ng to 16-byte boundary)
   Ng: vec3<f32>,    // offset 32 (geometric normal, 16-byte aligned)
+  _pad3: f32,       // offset 44, pad to 48 bytes (16-byte aligned)
 };
 
 // Grid helpers (preserve API surface; dims defaults to 1^3 for BVH backing)
@@ -428,14 +430,14 @@ fn ray_box(ro: vec3<f32>, rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> ve
 // BVH traversal. tmin/tmax clip the segment (e.g., near/far planes).
 fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit {
   let node_count = bvh_node_count();
-  if (node_count == 0u) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0)); }
+  if (node_count == 0u) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0), 0.0); }
 
   // Early reject with the root bounds stored in the header
   let rb_root = ray_box(ro, rd, grid_bounds_min(), grid_bounds_max());
-  if (rb_root.x < 0.5) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0)); }
+  if (rb_root.x < 0.5) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0), 0.0); }
   let seg_min = max(rb_root.y, tmin);
   let seg_max = min(rb_root.z, tmax);
-  if (seg_min > seg_max) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0)); }
+  if (seg_min > seg_max) { return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0), 0.0); }
 
   var best_t = seg_max;
   var best_tri: u32 = 0u;
@@ -525,10 +527,10 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
   }
 
   if (best_t < seg_max && best_t < 1e29) {
-    return TraceHit(true, best_t, best_tri, best_u, best_v, 0u, 0u, 0u, best_Ng);
+    return TraceHit(true, best_t, best_tri, best_u, best_v, 0u, 0u, 0u, best_Ng, 0.0);
   }
 
-  return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0));
+  return TraceHit(false, 0.0, 0u, 0.0, 0.0, 0u, 0u, 0u, vec3<f32>(0.0), 0.0);
 }
 // ===== end BVH =====
 

@@ -114,6 +114,7 @@ struct Material {
     opacity: f32,
     emissive: f32,
     normal: vec3<f32>,
+    _pad0: f32,  // pad to 32 bytes (16-byte aligned)
 };
 
 fn unpack_material(mats: vec4<f32>) -> Material {
@@ -138,7 +139,7 @@ fn unpack_material(mats: vec4<f32>) -> Material {
     let ny = (f32((norm_bits >> 8u) & 0xFFu) / 255.0) * 2.0 - 1.0;
     let nz = sqrt(max(0.0, 1.0 - nx * nx - ny * ny));
 
-    return Material(roughness, metallic, opacity, emissive, vec3<f32>(nx, ny, nz));
+    return Material(roughness, metallic, opacity, emissive, vec3<f32>(nx, ny, nz), 0.0);
 }
 
 // ===== Unified Hit System =====
@@ -149,15 +150,20 @@ const HIT_TYPE_GEOMETRY: u32 = 1u;
 const HIT_TYPE_BILLBOARD: u32 = 2u;
 
 struct UnifiedHit {
-    hit_type: u32,          // 0=none, 1=geometry, 2=billboard
-    t: f32,                 // distance along ray
-    position: vec3<f32>,    // world space hit position
-    normal: vec3<f32>,      // surface normal (interpolated for geo, computed for billboard)
-    albedo: vec4<f32>,      // RGBA albedo (linear space)
-    material: Material,     // unpacked material data
-    // Internal data for re-querying if needed
-    tri: u32,               // triangle index (geometry only)
-    billboard_index: u32,   // billboard index (billboard only)
+    hit_type: u32,          // offset 0
+    t: f32,                 // offset 4
+    _pad0: u32,             // offset 8
+    _pad1: u32,             // offset 12 (align position to 16 bytes)
+    position: vec3<f32>,    // offset 16 (16-byte aligned)
+    _pad2: f32,             // offset 28
+    normal: vec3<f32>,      // offset 32 (16-byte aligned)
+    _pad3: f32,             // offset 44
+    albedo: vec4<f32>,      // offset 48 (16-byte aligned)
+    material: Material,     // offset 64 (Material is 32 bytes)
+    tri: u32,               // offset 96
+    billboard_index: u32,   // offset 100
+    _pad4: u32,             // offset 104
+    _pad5: u32,             // offset 108 (pad to 112 bytes, 16-byte aligned)
 };
 
 // ===== Billboard Support =====
@@ -170,7 +176,7 @@ struct BillboardHit {
     tile_index: u32,        // offset 16, size 4
     billboard_index: u32,   // offset 20, size 4
     repeat_mode: u32,       // offset 24, size 4
-    _pad1: u32,             // offset 28, size 4 (pad to 16-byte boundary)
+    _pad1: u32,             // offset 28, size 4 (pad to 32 bytes for 16-byte boundary alignment)
 };
 
 /// Ray-billboard intersection test
@@ -361,12 +367,18 @@ fn trace_unified(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> UnifiedH
         return UnifiedHit(
             HIT_TYPE_BILLBOARD,
             billboard_hit.t,
+            0u,
+            0u,
             P,
+            0.0,
             N,
+            0.0,
             albedo,
             mat,
             0u,
-            billboard_hit.billboard_index
+            billboard_hit.billboard_index,
+            0u,
+            0u
         );
     } else if (geo_hit.hit) {
         // Build unified hit from geometry
@@ -410,11 +422,17 @@ fn trace_unified(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> UnifiedH
         return UnifiedHit(
             HIT_TYPE_GEOMETRY,
             geo_hit.t,
+            0u,
+            0u,
             P,
+            0.0,
             N,
+            0.0,
             albedo,
             mat,
             tri,
+            0u,
+            0u,
             0u
         );
     }
@@ -423,10 +441,16 @@ fn trace_unified(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> UnifiedH
     return UnifiedHit(
         HIT_TYPE_NONE,
         tmax,
+        0u,
+        0u,
         vec3<f32>(0.0),
+        0.0,
         vec3<f32>(0.0, 1.0, 0.0),
+        0.0,
         vec4<f32>(0.0),
-        Material(0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0)),
+        Material(0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), 0.0),
+        0u,
+        0u,
         0u,
         0u
     );
