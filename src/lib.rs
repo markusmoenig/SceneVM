@@ -1,3 +1,4 @@
+pub mod app;
 pub mod atlas;
 pub mod bbox2d;
 pub mod camera3d;
@@ -32,6 +33,7 @@ use rust_embed::RustEmbed;
 pub struct Embedded;
 
 pub use crate::{
+    app::DemoApp,
     atlas::{AtlasEntry, SharedAtlas},
     bbox2d::BBox2D,
     camera3d::{Camera3D, CameraKind},
@@ -44,7 +46,6 @@ pub use crate::{
     texture::Texture,
     vm::{Atom, GeoId, LineStrip2D, RenderMode, VM},
 };
-
 use image;
 #[cfg(not(target_arch = "wasm32"))]
 use std::borrow::Cow;
@@ -1479,6 +1480,30 @@ impl SceneVM {
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeRenderCtx {
     size: (u32, u32),
+    last_result: RenderResult,
+    present_called: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeRenderCtx {
+    fn new(size: (u32, u32)) -> Self {
+        Self {
+            size,
+            last_result: RenderResult::InitPending,
+            present_called: false,
+        }
+    }
+
+    fn begin_frame(&mut self) {
+        self.present_called = false;
+    }
+
+    fn ensure_presented(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult> {
+        if !self.present_called {
+            self.present(vm)?;
+        }
+        Ok(self.last_result)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1488,7 +1513,12 @@ impl SceneVMRenderCtx for NativeRenderCtx {
     }
 
     fn present(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult> {
-        vm.render_to_window()
+        let res = vm.render_to_window();
+        if let Ok(r) = res {
+            self.last_result = r;
+        }
+        self.present_called = true;
+        res
     }
 }
 
@@ -1514,9 +1544,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                 .expect("failed to create window");
             let size = win.inner_size();
             let mut new_vm = SceneVM::new_with_window(&win);
-            let new_ctx = NativeRenderCtx {
-                size: (size.width, size.height),
-            };
+            let new_ctx = NativeRenderCtx::new((size.width, size.height));
             app.init(&mut new_vm, new_ctx.size);
             window = Some(win);
             vm = Some(new_vm);
@@ -1556,8 +1584,10 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                             app.mouse_down(vm_ref, cursor_pos.x as f32, cursor_pos.y as f32);
                         }
                         WindowEvent::RedrawRequested => {
+                            ctx_ref.begin_frame();
                             app.update(vm_ref);
                             let _ = app.render(vm_ref, ctx_ref);
+                            let _ = ctx_ref.ensure_presented(vm_ref);
                         }
                         _ => {}
                     }
@@ -1795,6 +1825,88 @@ pub unsafe extern "C" fn scenevm_ca_resize(ptr: *mut SceneVM, width: u32, height
 pub unsafe extern "C" fn scenevm_ca_render(ptr: *mut SceneVM) -> i32 {
     if let Some(vm) = unsafe { ptr.as_mut() } {
         match vm.render_to_window() {
+            Ok(RenderResult::Presented) => 0,
+            Ok(RenderResult::InitPending) => 1,
+            Ok(RenderResult::ReadbackPending) => 2,
+            Err(_) => -1,
+        }
+    } else {
+        -1
+    }
+}
+
+// -------------------------
+// Demo runner FFI (uses the built-in DemoApp shared across desktop/wasm)
+// -------------------------
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[repr(C)]
+pub struct SceneVMRunner {
+    app: crate::app::DemoApp,
+    vm: SceneVM,
+    ctx: NativeRenderCtx,
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_create(
+    layer_ptr: *mut c_void,
+    width: u32,
+    height: u32,
+) -> *mut SceneVMRunner {
+    if layer_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut vm = SceneVM::new_with_metal_layer(layer_ptr, width, height);
+    let mut app = crate::app::DemoApp::new();
+    let ctx = NativeRenderCtx::new((width, height));
+    app.init(&mut vm, ctx.size);
+    Box::into_raw(Box::new(SceneVMRunner { app, vm, ctx }))
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_destroy(ptr: *mut SceneVMRunner) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(ptr));
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_resize(ptr: *mut SceneVMRunner, width: u32, height: u32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.vm.resize_window_surface(width, height);
+        r.app.resize(&mut r.vm, (width, height));
+        r.ctx.size = (width, height);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_render(ptr: *mut SceneVMRunner) -> i32 {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.ctx.begin_frame();
+        r.app.update(&mut r.vm);
+        let _ = r.app.render(&mut r.vm, &mut r.ctx);
+        match r.ctx.ensure_presented(&mut r.vm) {
             Ok(RenderResult::Presented) => 0,
             Ok(RenderResult::InitPending) => 1,
             Ok(RenderResult::ReadbackPending) => 2,

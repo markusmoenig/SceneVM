@@ -1,0 +1,51 @@
+import Foundation
+import QuartzCore
+
+// C FFI imported directly via @_silgen_name to avoid a bridging header.
+@_silgen_name("scenevm_runner_create")
+func scenevm_runner_create(_ layer_ptr: UnsafeMutableRawPointer?, _ width: UInt32, _ height: UInt32) -> UnsafeMutableRawPointer?
+
+@_silgen_name("scenevm_runner_destroy")
+func scenevm_runner_destroy(_ vm: UnsafeMutableRawPointer?)
+
+@_silgen_name("scenevm_runner_resize")
+func scenevm_runner_resize(_ vm: UnsafeMutableRawPointer?, _ width: UInt32, _ height: UInt32)
+
+@_silgen_name("scenevm_runner_render")
+func scenevm_runner_render(_ vm: UnsafeMutableRawPointer?) -> Int32
+
+/// Thin Swift wrapper around the SceneVM FFI for CAMetalLayer presentation.
+final class SceneVMHandle {
+    private var vm: UnsafeMutableRawPointer?
+    private weak var layer: CAMetalLayer?
+
+    init?(layer: CAMetalLayer, size: CGSize, scale: CGFloat) {
+        let ptr = Unmanaged.passUnretained(layer).toOpaque()
+        let w = UInt32(max(max(layer.drawableSize.width, size.width * scale), 1))
+        let h = UInt32(max(max(layer.drawableSize.height, size.height * scale), 1))
+        guard let handle = scenevm_runner_create(ptr, w, h) else {
+            return nil
+        }
+        self.layer = layer
+        self.vm = handle
+    }
+
+    func resize(to size: CGSize, scale: CGFloat) {
+        guard let vm else { return }
+        let drawable = layer?.drawableSize ?? CGSize(width: size.width * scale, height: size.height * scale)
+        let w = UInt32(max(drawable.width, 1))
+        let h = UInt32(max(drawable.height, 1))
+        scenevm_runner_resize(vm, w, h)
+    }
+
+    func render() {
+        guard let vm else { return }
+        _ = scenevm_runner_render(vm)
+    }
+
+    deinit {
+        if let vm {
+            scenevm_runner_destroy(vm)
+        }
+    }
+}

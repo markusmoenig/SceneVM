@@ -55,3 +55,6 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 parallel = ["rayon"]
 
 default = ["parallel"]
+
+[lib]
+crate-type = ["rlib", "staticlib"]
