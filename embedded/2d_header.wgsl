@@ -247,7 +247,9 @@ fn sv_tri_bary(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> BaryHi
   let e0 = sv_edge(p,a,b);
   let e1 = sv_edge(p,b,c);
   let e2 = sv_edge(p,c,a);
-  let ok = (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0);
+  // Allow a small negative tolerance to avoid cracks between adjacent tris sharing an edge.
+  let tol = -1e-4;
+  let ok = (e0 >= tol && e1 >= tol && e2 >= tol) || (e0 <= -tol && e1 <= -tol && e2 <= -tol);
   if (!ok) { return BaryHit(false, 0u, 0u, 0u, vec3<f32>(0.0)); }
   let area = abs((b.x - a.x)*(c.y - a.y) - (b.y - a.y)*(c.x - a.x));
   if (area <= 0.0) { return BaryHit(false, 0u, 0u, 0u, vec3<f32>(0.0)); }
@@ -314,14 +316,14 @@ fn sv_tri_color(p: vec2<f32>, i0: u32, i1: u32, i2: u32) -> ColorHit {
   if (col.a < 0.01) { return ColorHit(false, 0u, 0u, 0u, vec4<f32>(0.0), 0u, 0u, vec2<f32>(0.0), 0u, 0u); }
 
   // --- Analytic edge AA ---
-  let feather = 1.0;
-  if (feather > 0.0) {
-    let d = sv_min_edge_distance_px(p, a, b, c);  // pixels
-    // Smooth coverage from 0..feather → 0..1 (softstep). Widen slightly for numeric stability.
-    let cov = smoothstep(0.0, feather, d);
-    // Multiply alpha by coverage (premultiplied not assumed here)
-    col.a = col.a * cov;
-  }
+  // Disable feathering to avoid visible cracks between adjacent triangles forming a solid.
+  // Set to >0.0 if you want AA on standalone tris and accept potential seams on shared edges.
+  // let feather = 0.0;
+  // if (feather > 0.0) {
+  //   let d = sv_min_edge_distance_px(p, a, b, c);  // pixels
+  //   let cov = smoothstep(0.0, feather, d);
+  //   col.a = col.a * cov;
+  // }
 
   // tri id is not known here; sv_shade_tile_pixel wraps this and sets it
   return ColorHit(true, 0u, 0u, 0u, col, 0u, 0u, uv, 0u, 0u);
