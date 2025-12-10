@@ -1,4 +1,5 @@
 pub mod app;
+pub mod app_trait;
 pub mod atlas;
 pub mod bbox2d;
 pub mod camera3d;
@@ -34,6 +35,7 @@ pub struct Embedded;
 
 pub use crate::{
     app::DemoApp,
+    app_trait::{SceneVMApp, SceneVMRenderCtx},
     atlas::{AtlasEntry, SharedAtlas},
     bbox2d::BBox2D,
     camera3d::{Camera3D, CameraKind},
@@ -84,26 +86,6 @@ pub enum RenderResult {
     InitPending,
     /// On WASM: a GPU readback is in flight; we presented the last completed frame this call.
     ReadbackPending,
-}
-
-/// Minimal app abstraction to write one SceneVM app for native + wasm.
-pub trait SceneVMApp {
-    /// Called once after the renderer is created and sized.
-    fn init(&mut self, _vm: &mut SceneVM, _size: (u32, u32)) {}
-    /// Per-frame update hook (e.g. animation).
-    fn update(&mut self, _vm: &mut SceneVM) {}
-    /// Render hook: call `ctx.present(vm)` to display.
-    fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx);
-    /// Resize callback with new logical size.
-    fn resize(&mut self, _vm: &mut SceneVM, _size: (u32, u32)) {}
-    /// Mouse/touch down callback in logical pixels.
-    fn mouse_down(&mut self, _vm: &mut SceneVM, _x: f32, _y: f32) {}
-}
-
-/// Rendering context supplied to `SceneVMApp::render`.
-pub trait SceneVMRenderCtx {
-    fn size(&self) -> (u32, u32);
-    fn present(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult>;
 }
 
 /// Render pipeline that blits the SceneVM storage texture into a window surface.
@@ -1527,9 +1509,18 @@ impl SceneVMRenderCtx for NativeRenderCtx {
 pub fn run_scenevm_app<A: SceneVMApp + 'static>(
     mut app: A,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use winit::dpi::LogicalSize;
     use winit::event::{Event, StartCause};
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowAttributes;
+
+    let frame_interval = app.target_fps().and_then(|fps| {
+        if fps > 0.0 {
+            Some(std::time::Duration::from_secs_f32(1.0 / fps))
+        } else {
+            None
+        }
+    });
 
     let event_loop = EventLoop::new()?;
     let mut window: Option<winit::window::Window> = None;
@@ -1539,8 +1530,13 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
     #[allow(deprecated)]
     event_loop.run(move |event, target| match event {
         Event::NewEvents(StartCause::Init) => {
+            let mut attrs = WindowAttributes::default()
+                .with_title(app.window_title().unwrap_or_else(|| "SceneVM".to_string()));
+            if let Some((w, h)) = app.initial_window_size() {
+                attrs = attrs.with_inner_size(LogicalSize::new(w as f64, h as f64));
+            }
             let win = target
-                .create_window(WindowAttributes::default().with_title("SceneVM"))
+                .create_window(attrs)
                 .expect("failed to create window");
             let size = win.inner_size();
             let mut new_vm = SceneVM::new_with_window(&win);
@@ -1575,13 +1571,46 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                         }
                         WindowEvent::CursorMoved { position, .. } => {
                             cursor_pos = position;
+                            let scale = win.scale_factor() as f32;
+                            app.mouse_move(
+                                vm_ref,
+                                (cursor_pos.x as f32) / scale,
+                                (cursor_pos.y as f32) / scale,
+                            );
                         }
                         WindowEvent::MouseInput {
-                            state: ElementState::Pressed,
+                            state,
                             button: MouseButton::Left,
                             ..
-                        } => {
-                            app.mouse_down(vm_ref, cursor_pos.x as f32, cursor_pos.y as f32);
+                        } => match state {
+                            ElementState::Pressed => {
+                                let scale = win.scale_factor() as f32;
+                                app.mouse_down(
+                                    vm_ref,
+                                    (cursor_pos.x as f32) / scale,
+                                    (cursor_pos.y as f32) / scale,
+                                );
+                            }
+                            ElementState::Released => {
+                                let scale = win.scale_factor() as f32;
+                                app.mouse_up(
+                                    vm_ref,
+                                    (cursor_pos.x as f32) / scale,
+                                    (cursor_pos.y as f32) / scale,
+                                );
+                            }
+                        },
+                        WindowEvent::MouseWheel { delta, .. } => {
+                            let (dx, dy) = match delta {
+                                winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                                    (x * 120.0, y * 120.0)
+                                }
+                                winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                                    (pos.x as f32, pos.y as f32)
+                                }
+                            };
+                            let scale = win.scale_factor() as f32;
+                            app.scroll(vm_ref, dx / scale, dy / scale);
                         }
                         WindowEvent::RedrawRequested => {
                             ctx_ref.begin_frame();
@@ -1596,6 +1625,9 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
         }
         Event::AboutToWait => {
             if let Some(win) = window.as_ref() {
+                if let Some(dt) = frame_interval {
+                    target.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + dt));
+                }
                 win.request_redraw();
             }
         }
@@ -1674,18 +1706,21 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(mut app: A) -> Result<(), JsValu
         .ok_or_else(|| JsValue::from_str("no document"))?;
     let canvas = create_or_get_canvas(&document)?;
 
-    let width = window
-        .inner_width()
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(800.0)
-        .round() as u32;
-    let height = window
-        .inner_height()
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(600.0)
-        .round() as u32;
+    let (width, height) = app.initial_window_size().unwrap_or_else(|| {
+        let w = window
+            .inner_width()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(800.0)
+            .round() as u32;
+        let h = window
+            .inner_height()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(600.0)
+            .round() as u32;
+        (w, h)
+    });
     canvas.set_width(width);
     canvas.set_height(height);
 
@@ -1914,5 +1949,49 @@ pub unsafe extern "C" fn scenevm_runner_render(ptr: *mut SceneVMRunner) -> i32 {
         }
     } else {
         -1
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_mouse_down(ptr: *mut SceneVMRunner, x: f32, y: f32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.mouse_down(&mut r.vm, x, y);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_mouse_up(ptr: *mut SceneVMRunner, x: f32, y: f32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.mouse_up(&mut r.vm, x, y);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_mouse_move(ptr: *mut SceneVMRunner, x: f32, y: f32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.mouse_move(&mut r.vm, x, y);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_scroll(ptr: *mut SceneVMRunner, dx: f32, dy: f32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.scroll(&mut r.vm, dx, dy);
     }
 }

@@ -97,5 +97,23 @@ impl SceneVMApp for DemoApp {
         let _ = ctx.present(vm);
     }
 
-    fn mouse_down(&mut self, _vm: &mut SceneVM, _x: f32, _y: f32) {}
+    fn window_title(&self) -> Option<String> {
+        Some("SceneVM Demo App".into())
+    }
+
+    fn mouse_down(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
+        println!("mouse_down at ({:.1}, {:.1})", x, y);
+    }
+
+    fn mouse_up(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
+        println!("mouse_up at ({:.1}, {:.1})", x, y);
+    }
+
+    fn mouse_move(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
+        println!("mouse_move at ({:.1}, {:.1})", x, y);
+    }
+
+    fn scroll(&mut self, _vm: &mut SceneVM, dx: f32, dy: f32) {
+        println!("scroll dx {:.2}, dy {:.2}", dx, dy);
+    }
 }

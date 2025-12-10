@@ -14,6 +14,18 @@ func scenevm_runner_resize(_ vm: UnsafeMutableRawPointer?, _ width: UInt32, _ he
 @_silgen_name("scenevm_runner_render")
 func scenevm_runner_render(_ vm: UnsafeMutableRawPointer?) -> Int32
 
+@_silgen_name("scenevm_runner_mouse_down")
+func scenevm_runner_mouse_down(_ vm: UnsafeMutableRawPointer?, _ x: Float, _ y: Float)
+
+@_silgen_name("scenevm_runner_mouse_up")
+func scenevm_runner_mouse_up(_ vm: UnsafeMutableRawPointer?, _ x: Float, _ y: Float)
+
+@_silgen_name("scenevm_runner_mouse_move")
+func scenevm_runner_mouse_move(_ vm: UnsafeMutableRawPointer?, _ x: Float, _ y: Float)
+
+@_silgen_name("scenevm_runner_scroll")
+func scenevm_runner_scroll(_ vm: UnsafeMutableRawPointer?, _ dx: Float, _ dy: Float)
+
 /// Thin Swift wrapper around the SceneVM FFI for CAMetalLayer presentation.
 final class SceneVMHandle {
     private var vm: UnsafeMutableRawPointer?
@@ -41,6 +53,26 @@ final class SceneVMHandle {
     func render() {
         guard let vm else { return }
         _ = scenevm_runner_render(vm)
+    }
+
+    func mouseDown(x: CGFloat, y: CGFloat) {
+        guard let vm else { return }
+        scenevm_runner_mouse_down(vm, Float(x), Float(y))
+    }
+
+    func mouseUp(x: CGFloat, y: CGFloat) {
+        guard let vm else { return }
+        scenevm_runner_mouse_up(vm, Float(x), Float(y))
+    }
+
+    func mouseMove(x: CGFloat, y: CGFloat) {
+        guard let vm else { return }
+        scenevm_runner_mouse_move(vm, Float(x), Float(y))
+    }
+
+    func scroll(dx: CGFloat, dy: CGFloat) {
+        guard let vm else { return }
+        scenevm_runner_scroll(vm, Float(dx), Float(dy))
     }
 
     deinit {

@@ -1,0 +1,308 @@
+use scenevm::{
+    Atom, GeoId, Light, Poly2D, Poly3D, RenderMode, RenderResult, SceneVM, SceneVMApp,
+    SceneVMRenderCtx, SceneVMResult,
+};
+use std::ffi::c_void;
+use uuid::Uuid;
+use vek::{Mat4, Vec3, Vec4};
+
+fn pack_material(
+    roughness: f32,
+    metallic: f32,
+    opacity: f32,
+    emissive: f32,
+    normal_x: Option<f32>,
+    normal_y: Option<f32>,
+) -> [u8; 4] {
+    let r = (roughness.clamp(0.0, 1.0) * 15.0).round() as u8;
+    let m = (metallic.clamp(0.0, 1.0) * 15.0).round() as u8;
+    let o = (opacity.clamp(0.0, 1.0) * 15.0).round() as u8;
+    let e = (emissive.clamp(0.0, 1.0) * 15.0).round() as u8;
+
+    let mat_lo = r | (m << 4);
+    let mat_hi = o | (e << 4);
+
+    let nx = normal_x.unwrap_or(0.0);
+    let ny = normal_y.unwrap_or(0.0);
+    let norm_x = ((nx.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+    let norm_y = ((ny.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+
+    [mat_lo, mat_hi, norm_x, norm_y]
+}
+
+pub struct TemplateApp {
+    matrix: Mat4<f32>,
+}
+
+impl TemplateApp {
+    pub fn new() -> Self {
+        Self {
+            matrix: Mat4::identity(),
+        }
+    }
+}
+
+impl SceneVMApp for TemplateApp {
+    fn initial_window_size(&self) -> Option<(u32, u32)> {
+        Some((960, 540))
+    }
+
+    fn window_title(&self) -> Option<String> {
+        Some("SceneVM Unified Template".to_string())
+    }
+
+    fn init(&mut self, vm: &mut SceneVM, _size: (u32, u32)) {
+        let tile_id = Uuid::new_v4();
+        let overlay_tile = Uuid::new_v4();
+
+        vm.execute(Atom::SetBackground(Vec4::zero()));
+        vm.execute(Atom::AddSolidWithMaterial {
+            id: tile_id,
+            color: [180, 180, 200, 255],
+            material: pack_material(0.1, 0.0, 1.0, 0.0, None, None),
+        });
+        vm.execute(Atom::AddSolid {
+            id: overlay_tile,
+            color: [255, 96, 96, 180],
+        });
+        vm.execute(Atom::BuildAtlas);
+
+        vm.execute(Atom::AddPoly3D {
+            poly: Poly3D::cube(GeoId::Unknown(0), tile_id, Vec3::zero(), 2.0),
+        });
+        vm.execute(Atom::AddLight {
+            id: GeoId::Light(0),
+            light: Light::new_pointlight(Vec3::new(0.0, 1.5, -4.0))
+                .with_color(Vec3::new(1.0, 0.95, 0.9))
+                .with_intensity(160.0)
+                .with_radius(12.0)
+                .with_end_distance(18.0),
+        });
+
+        vm.execute(Atom::SetGP3(Vec4::new(0.6, 0.6, 0.7, 0.15)));
+        vm.execute(Atom::SetGP6(Vec4::new(10.0, 50.0, 2.0, 16.0)));
+        vm.execute(Atom::SetRenderMode(RenderMode::Compute3D));
+
+        let overlay_index = vm.add_vm_layer();
+        vm.set_active_vm(overlay_index);
+        vm.execute(Atom::AddPoly {
+            poly: Poly2D::poly(
+                GeoId::Unknown(0),
+                overlay_tile,
+                vec![[40.0, 40.0], [260.0, 40.0], [260.0, 180.0], [40.0, 180.0]],
+                vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                vec![(0, 1, 2), (0, 2, 3)],
+            ),
+        });
+        vm.set_active_vm(0);
+    }
+
+    fn update(&mut self, vm: &mut SceneVM) {
+        let rot = Mat4::<f32>::rotation_y(0.02) * Mat4::<f32>::rotation_x(0.01);
+        self.matrix = rot * self.matrix;
+        vm.execute(Atom::SetTransform3D(self.matrix));
+    }
+
+    fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx) {
+        let _ = ctx.present(vm);
+    }
+
+    fn mouse_down(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
+        println!("mouse_down ({:.1}, {:.1})", x, y);
+    }
+
+    fn mouse_up(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
+        println!("mouse_up ({:.1}, {:.1})", x, y);
+    }
+
+    fn mouse_move(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
+        println!("mouse_move ({:.1}, {:.1})", x, y);
+    }
+
+    fn scroll(&mut self, _vm: &mut SceneVM, dx: f32, dy: f32) {
+        println!("scroll dx {:.2}, dy {:.2}", dx, dy);
+    }
+}
+
+// ---------- FFI runner for CAMetalLayer (macOS/iOS) ----------
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+struct FfiRenderCtx {
+    size: (u32, u32),
+    last_result: RenderResult,
+    presented: bool,
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+impl FfiRenderCtx {
+    fn new(size: (u32, u32)) -> Self {
+        Self {
+            size,
+            last_result: RenderResult::InitPending,
+            presented: false,
+        }
+    }
+
+    fn begin_frame(&mut self) {
+        self.presented = false;
+    }
+
+    fn ensure_presented(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult> {
+        if !self.presented {
+            let res = self.present(vm)?;
+            self.last_result = res;
+        }
+        Ok(self.last_result)
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+impl SceneVMRenderCtx for FfiRenderCtx {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn present(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult> {
+        let res = vm.render_to_window();
+        if let Ok(r) = res {
+            self.last_result = r;
+        }
+        self.presented = true;
+        res
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[repr(C)]
+pub struct SceneVMAppRunner {
+    app: TemplateApp,
+    vm: SceneVM,
+    ctx: FfiRenderCtx,
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_create(
+    layer_ptr: *mut c_void,
+    width: u32,
+    height: u32,
+) -> *mut SceneVMAppRunner {
+    if layer_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut vm = SceneVM::new_with_metal_layer(layer_ptr, width, height);
+    let mut app = TemplateApp::new();
+    let ctx = FfiRenderCtx::new((width, height));
+    app.init(&mut vm, ctx.size);
+    Box::into_raw(Box::new(SceneVMAppRunner { app, vm, ctx }))
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_destroy(ptr: *mut SceneVMAppRunner) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(ptr));
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_resize(
+    ptr: *mut SceneVMAppRunner,
+    width: u32,
+    height: u32,
+) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.vm.resize_window_surface(width, height);
+        r.app.resize(&mut r.vm, (width, height));
+        r.ctx.size = (width, height);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_render(ptr: *mut SceneVMAppRunner) -> i32 {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.ctx.begin_frame();
+        r.app.update(&mut r.vm);
+        let _ = r.app.render(&mut r.vm, &mut r.ctx);
+        match r.ctx.ensure_presented(&mut r.vm) {
+            Ok(RenderResult::Presented) => 0,
+            Ok(RenderResult::InitPending) => 1,
+            Ok(RenderResult::ReadbackPending) => 2,
+            Err(_) => -1,
+        }
+    } else {
+        -1
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_mouse_down(ptr: *mut SceneVMAppRunner, x: f32, y: f32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.mouse_down(&mut r.vm, x, y);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_mouse_up(ptr: *mut SceneVMAppRunner, x: f32, y: f32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.mouse_up(&mut r.vm, x, y);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_mouse_move(ptr: *mut SceneVMAppRunner, x: f32, y: f32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.mouse_move(&mut r.vm, x, y);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_scroll(ptr: *mut SceneVMAppRunner, dx: f32, dy: f32) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.scroll(&mut r.vm, dx, dy);
+    }
+}
