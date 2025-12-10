@@ -51,6 +51,8 @@ use std::borrow::Cow;
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 #[cfg(not(target_arch = "wasm32"))]
+use std::ffi::c_void;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
 #[cfg(target_arch = "wasm32")]
 use std::{cell::Cell, future::Future, rc::Rc};
@@ -671,6 +673,109 @@ impl SceneVM {
             )
         }
         .expect("Failed to create wgpu surface for window");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        }))
+        .expect("No compatible GPU adapter found");
+
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("scenevm-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
+        .expect("Failed to create wgpu device");
+
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+        let present_mode = caps
+            .present_modes
+            .iter()
+            .copied()
+            .find(|m| {
+                matches!(
+                    m,
+                    wgpu::PresentMode::Mailbox
+                        | wgpu::PresentMode::Immediate
+                        | wgpu::PresentMode::Fifo
+                )
+            })
+            .unwrap_or(wgpu::PresentMode::Fifo);
+        let alpha_mode = caps
+            .alpha_modes
+            .get(0)
+            .copied()
+            .unwrap_or(wgpu::CompositeAlphaMode::Auto);
+
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+            format: surface_format,
+            width,
+            height,
+            present_mode,
+            alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
+
+        let mut storage_surface = Texture::new(width, height);
+        storage_surface.ensure_gpu_with(&device);
+
+        let gpu = GPUState {
+            _instance: instance,
+            _adapter: adapter,
+            device,
+            queue,
+            surface: storage_surface,
+            window_surface: Some(WindowSurface {
+                surface,
+                config: surface_config,
+                format: surface_format,
+                present_pipeline: None,
+            }),
+        };
+
+        let atlas = SharedAtlas::new(4096, 4096);
+        let mut this = Self {
+            size: (width, height),
+            gpu: Some(gpu),
+            atlas: atlas.clone(),
+            vm: VM::new_with_shared_atlas(atlas.clone()),
+            overlay_vms: Vec::new(),
+            active_vm_index: 0,
+            log_layer_activity: false,
+        };
+        this.refresh_layer_metadata();
+        this
+    }
+
+    /// Create a SceneVM that presents into an existing CoreAnimation layer (Metal) without winit.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(target_os = "macos", target_os = "ios")
+    ))]
+    pub fn new_with_metal_layer(layer_ptr: *mut c_void, width: u32, height: u32) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: { wgpu::Backends::all() },
+            ..Default::default()
+        });
+
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
+        }
+        .expect("Failed to create wgpu surface for CoreAnimationLayer");
+
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
@@ -1635,4 +1740,67 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(mut app: A) -> Result<(), JsValu
             window.request_animation_frame(f.borrow().as_ref().unwrap().as_ref().unchecked_ref());
     }
     Ok(())
+}
+
+// -------------------------
+// C FFI for CoreAnimation layer (Metal) presentation (macOS/iOS)
+// -------------------------
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_ca_create(
+    layer_ptr: *mut c_void,
+    width: u32,
+    height: u32,
+) -> *mut SceneVM {
+    if layer_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let vm = SceneVM::new_with_metal_layer(layer_ptr, width, height);
+    Box::into_raw(Box::new(vm))
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_ca_destroy(ptr: *mut SceneVM) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(ptr));
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_ca_resize(ptr: *mut SceneVM, width: u32, height: u32) {
+    if let Some(vm) = unsafe { ptr.as_mut() } {
+        vm.resize_window_surface(width, height);
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_ca_render(ptr: *mut SceneVM) -> i32 {
+    if let Some(vm) = unsafe { ptr.as_mut() } {
+        match vm.render_to_window() {
+            Ok(RenderResult::Presented) => 0,
+            Ok(RenderResult::InitPending) => 1,
+            Ok(RenderResult::ReadbackPending) => 2,
+            Err(_) => -1,
+        }
+    } else {
+        -1
+    }
 }
