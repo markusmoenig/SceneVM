@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = [".", "scenegen", "run-wasm", "cornell"]
+members = [".", "scenegen", "run-wasm", "cornell", "window-demo"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -18,7 +18,7 @@ theframework = { path = "../TheFramework", features = [
 [dependencies]
 wgpu = "27.0.1"
 pollster = "0.4"
-uuid = { version = "1.18.1", features = ["v4"] }
+uuid = { version = "1.18.1", features = ["v4", "rng-getrandom"] }
 rustc-hash = "2.1.1"
 vek = { version = "0.17.1", default-features = true }
 bytemuck = "1.24.0"
@@ -34,10 +34,22 @@ rust-embed = { version = "8.5", default-features = true, features = [
 ] }
 rayon = { version = "1.10", optional = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+winit = "0.30"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
 wasm-bindgen = "0.2"
-web-sys = { version = "0.3", features = ['Window'] }
+web-sys = { version = "0.3", features = [
+    'Window',
+    'Document',
+    'HtmlCanvasElement',
+    'CanvasRenderingContext2d',
+    'ImageData',
+    'PointerEvent',
+    'console',
+] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [features]
 parallel = ["rayon"]

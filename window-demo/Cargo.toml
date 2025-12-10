@@ -1,0 +1,30 @@
+[package]
+name = "window-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scenevm = { path = ".." }
+winit = "0.30"
+uuid = { version = "1.18.1", features = ["v4", "js"] }
+vek = "0.17"
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+] }
+js-sys = { version = "0.3", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2" }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+] }
+js-sys = { version = "0.3" }

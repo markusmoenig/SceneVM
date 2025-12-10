@@ -46,6 +46,8 @@ pub use crate::{
 };
 
 use image;
+#[cfg(not(target_arch = "wasm32"))]
+use std::borrow::Cow;
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 #[cfg(not(target_arch = "wasm32"))]
@@ -58,7 +60,17 @@ use std::{
     task::{Context, Poll},
 };
 #[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{CanvasRenderingContext2d, Document, HtmlCanvasElement, Window as WebWindow};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::window::Window;
+#[cfg(not(target_arch = "wasm32"))]
+use winit::{dpi::PhysicalPosition, event::ElementState, event::MouseButton, event::WindowEvent};
 
 /// Result of a call to `render_frame`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -71,6 +83,45 @@ pub enum RenderResult {
     ReadbackPending,
 }
 
+/// Minimal app abstraction to write one SceneVM app for native + wasm.
+pub trait SceneVMApp {
+    /// Called once after the renderer is created and sized.
+    fn init(&mut self, _vm: &mut SceneVM, _size: (u32, u32)) {}
+    /// Per-frame update hook (e.g. animation).
+    fn update(&mut self, _vm: &mut SceneVM) {}
+    /// Render hook: call `ctx.present(vm)` to display.
+    fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx);
+    /// Resize callback with new logical size.
+    fn resize(&mut self, _vm: &mut SceneVM, _size: (u32, u32)) {}
+    /// Mouse/touch down callback in logical pixels.
+    fn mouse_down(&mut self, _vm: &mut SceneVM, _x: f32, _y: f32) {}
+}
+
+/// Rendering context supplied to `SceneVMApp::render`.
+pub trait SceneVMRenderCtx {
+    fn size(&self) -> (u32, u32);
+    fn present(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult>;
+}
+
+/// Render pipeline that blits the SceneVM storage texture into a window surface.
+#[cfg(not(target_arch = "wasm32"))]
+struct PresentPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+    sampler: wgpu::Sampler,
+    surface_format: wgpu::TextureFormat,
+}
+
+/// Optional window surface (swapchain) managed by SceneVM for direct presentation.
+#[cfg(not(target_arch = "wasm32"))]
+struct WindowSurface {
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    format: wgpu::TextureFormat,
+    present_pipeline: Option<PresentPipeline>,
+}
+
 pub struct GPUState {
     _instance: wgpu::Instance,
     _adapter: wgpu::Adapter,
@@ -78,6 +129,9 @@ pub struct GPUState {
     queue: wgpu::Queue,
     /// Main render surface for SceneVM
     surface: Texture,
+    /// Optional wgpu surface when presenting directly to a window.
+    #[cfg(not(target_arch = "wasm32"))]
+    window_surface: Option<WindowSurface>,
 }
 
 #[allow(dead_code)]
@@ -96,6 +150,165 @@ static GLOBAL_GPU: OnceLock<GlobalGpu> = OnceLock::new();
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static GLOBAL_GPU_WASM: RefCell<Option<GlobalGpu>> = RefCell::new(None);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PresentPipeline {
+    fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        source_view: &wgpu::TextureView,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scenevm-present-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                "
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_sampler: sampler;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -3.0),
+        vec2<f32>(3.0, 1.0),
+        vec2<f32>(-1.0, 1.0)
+    );
+    var uvs = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 2.0),
+        vec2<f32>(2.0, 0.0),
+        vec2<f32>(0.0, 0.0)
+    );
+    var out: VsOut;
+    out.pos = vec4<f32>(positions[vi], 0.0, 1.0);
+    out.uv = uvs[vi];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(src_tex, src_sampler, in.uv);
+}
+",
+            )),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scenevm-present-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("scenevm-present-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scenevm-present-bind-group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scenevm-present-pipeline-layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scenevm-present-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            bind_group,
+            sampler,
+            surface_format: format,
+        }
+    }
+
+    fn update_bind_group(&mut self, device: &wgpu::Device, source_view: &wgpu::TextureView) {
+        self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scenevm-present-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WindowSurface {
+    fn reconfigure(&mut self, device: &wgpu::Device) {
+        self.surface.configure(device, &self.config);
+    }
 }
 
 // --- WASM async map flag future support ---
@@ -422,6 +635,7 @@ impl SceneVM {
                 device,
                 queue,
                 surface,
+                window_surface: None,
             };
 
             let atlas = SharedAtlas::new(4096, 4096);
@@ -437,6 +651,108 @@ impl SceneVM {
             this.refresh_layer_metadata();
             this
         }
+    }
+
+    /// Create a SceneVM that is configured to present directly into a winit window surface.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with_window(window: &Window) -> Self {
+        let initial_size = window.inner_size();
+        let width = initial_size.width.max(1);
+        let height = initial_size.height.max(1);
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: { wgpu::Backends::all() },
+            ..Default::default()
+        });
+        let surface = unsafe {
+            instance.create_surface_unsafe(
+                wgpu::SurfaceTargetUnsafe::from_window(window)
+                    .expect("Failed to access raw window handle"),
+            )
+        }
+        .expect("Failed to create wgpu surface for window");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        }))
+        .expect("No compatible GPU adapter found");
+
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("scenevm-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
+        .expect("Failed to create wgpu device");
+
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+        let present_mode = caps
+            .present_modes
+            .iter()
+            .copied()
+            .find(|m| {
+                matches!(
+                    m,
+                    wgpu::PresentMode::Mailbox
+                        | wgpu::PresentMode::Immediate
+                        | wgpu::PresentMode::Fifo
+                )
+            })
+            .unwrap_or(wgpu::PresentMode::Fifo);
+        let alpha_mode = caps
+            .alpha_modes
+            .get(0)
+            .copied()
+            .unwrap_or(wgpu::CompositeAlphaMode::Auto);
+
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+            format: surface_format,
+            width,
+            height,
+            present_mode,
+            alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
+
+        let mut storage_surface = Texture::new(width, height);
+        storage_surface.ensure_gpu_with(&device);
+
+        let gpu = GPUState {
+            _instance: instance,
+            _adapter: adapter,
+            device,
+            queue,
+            surface: storage_surface,
+            window_surface: Some(WindowSurface {
+                surface,
+                config: surface_config,
+                format: surface_format,
+                present_pipeline: None,
+            }),
+        };
+
+        let atlas = SharedAtlas::new(4096, 4096);
+        let mut this = Self {
+            size: (width, height),
+            gpu: Some(gpu),
+            atlas: atlas.clone(),
+            vm: VM::new_with_shared_atlas(atlas.clone()),
+            overlay_vms: Vec::new(),
+            active_vm_index: 0,
+            log_layer_activity: false,
+        };
+        this.refresh_layer_metadata();
+        this
     }
 
     /// Initialize GPU backend asynchronously on WASM. On native, this will initialize synchronously if not already.
@@ -509,6 +825,7 @@ impl SceneVM {
                 device,
                 queue,
                 surface,
+                window_surface: None,
             };
             self.gpu = Some(gpu);
         }
@@ -525,6 +842,152 @@ impl SceneVM {
         if let Some(g) = self.gpu.as_ref() {
             tex.gpu_blit_to_storage(g, &g.surface.gpu.as_ref().unwrap().texture);
         }
+    }
+
+    /// Update the window surface size and internal storage texture (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn resize_window_surface(&mut self, width: u32, height: u32) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(ws) = gpu.window_surface.as_mut() else {
+            return;
+        };
+
+        let w = width.max(1);
+        let h = height.max(1);
+        if ws.config.width == w && ws.config.height == h {
+            return;
+        }
+
+        ws.config.width = w;
+        ws.config.height = h;
+        ws.reconfigure(&gpu.device);
+
+        self.size = (w, h);
+        gpu.surface.width = w;
+        gpu.surface.height = h;
+        gpu.surface.ensure_gpu_with(&gpu.device);
+
+        // Force recreation of the present pipeline/bindings on next render.
+        ws.present_pipeline = None;
+    }
+
+    /// Render directly into the configured window surface (native only, no CPU readback).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_to_window(&mut self) -> SceneVMResult<RenderResult> {
+        let (gpu_slot, base_vm, overlays) = (&mut self.gpu, &mut self.vm, &mut self.overlay_vms);
+        let Some(gpu) = gpu_slot.as_mut() else {
+            return Err(SceneVMError::InvalidOperation(
+                "GPU not initialized".to_string(),
+            ));
+        };
+        let Some(ws) = gpu.window_surface.as_mut() else {
+            return Err(SceneVMError::InvalidOperation(
+                "No window surface configured".to_string(),
+            ));
+        };
+
+        let target_w = ws.config.width.max(1);
+        let target_h = ws.config.height.max(1);
+
+        if self.size != (target_w, target_h) {
+            self.size = (target_w, target_h);
+            gpu.surface.width = target_w;
+            gpu.surface.height = target_h;
+            gpu.surface.ensure_gpu_with(&gpu.device);
+            ws.present_pipeline = None;
+        }
+
+        let (w, h) = self.size;
+        SceneVM::draw_all_vms(
+            base_vm,
+            overlays,
+            &gpu.device,
+            &gpu.queue,
+            &mut gpu.surface,
+            w,
+            h,
+            self.log_layer_activity,
+        );
+
+        let frame = match ws.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                ws.reconfigure(&gpu.device);
+                return Ok(RenderResult::InitPending);
+            }
+            Err(wgpu::SurfaceError::Timeout) => {
+                return Ok(RenderResult::ReadbackPending);
+            }
+            Err(wgpu::SurfaceError::Other) => {
+                return Err(SceneVMError::InvalidOperation(
+                    "Surface returned an unspecified error".to_string(),
+                ));
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                return Err(SceneVMError::BufferAllocationFailed(
+                    "Surface out of memory".to_string(),
+                ));
+            }
+        };
+
+        let frame_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let src_view = gpu
+            .surface
+            .gpu
+            .as_ref()
+            .expect("Surface GPU not allocated")
+            .view
+            .clone();
+
+        if ws
+            .present_pipeline
+            .as_ref()
+            .map(|p| p.surface_format != ws.format)
+            .unwrap_or(true)
+        {
+            ws.present_pipeline = Some(PresentPipeline::new(&gpu.device, ws.format, &src_view));
+        } else if let Some(pipeline) = ws.present_pipeline.as_mut() {
+            pipeline.update_bind_group(&gpu.device, &src_view);
+        }
+
+        let present = ws
+            .present_pipeline
+            .as_ref()
+            .expect("Present pipeline should be initialized");
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("scenevm-present-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scenevm-present-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&present.pipeline);
+            pass.set_bind_group(0, &present.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+
+        Ok(RenderResult::Presented)
     }
 
     /// Draw: if GPU is present, run the compute path. Returns immediately if GPU is not yet ready (WASM before init).
@@ -902,4 +1365,274 @@ impl SceneVM {
                 | Atom::ClearTiles
         )
     }
+}
+
+// -------------------------
+// Minimal cross-platform app runner
+// -------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeRenderCtx {
+    size: (u32, u32),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SceneVMRenderCtx for NativeRenderCtx {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn present(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult> {
+        vm.render_to_window()
+    }
+}
+
+/// Run a `SceneVMApp` on native (winit) with GPU presentation to a window.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_scenevm_app<A: SceneVMApp + 'static>(
+    mut app: A,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use winit::event::{Event, StartCause};
+    use winit::event_loop::{ControlFlow, EventLoop};
+    use winit::window::WindowAttributes;
+
+    let event_loop = EventLoop::new()?;
+    let mut window: Option<winit::window::Window> = None;
+    let mut vm: Option<SceneVM> = None;
+    let mut ctx: Option<NativeRenderCtx> = None;
+    let mut cursor_pos: PhysicalPosition<f64> = PhysicalPosition { x: 0.0, y: 0.0 };
+    #[allow(deprecated)]
+    event_loop.run(move |event, target| match event {
+        Event::NewEvents(StartCause::Init) => {
+            let win = target
+                .create_window(WindowAttributes::default().with_title("SceneVM"))
+                .expect("failed to create window");
+            let size = win.inner_size();
+            let mut new_vm = SceneVM::new_with_window(&win);
+            let new_ctx = NativeRenderCtx {
+                size: (size.width, size.height),
+            };
+            app.init(&mut new_vm, new_ctx.size);
+            window = Some(win);
+            vm = Some(new_vm);
+            ctx = Some(new_ctx);
+            target.set_control_flow(ControlFlow::Poll);
+        }
+        Event::WindowEvent { window_id, event } => {
+            if let (Some(win), Some(vm_ref), Some(ctx_ref)) =
+                (window.as_ref(), vm.as_mut(), ctx.as_mut())
+            {
+                if window_id == win.id() {
+                    match event {
+                        WindowEvent::CloseRequested => target.exit(),
+                        WindowEvent::Resized(size) => {
+                            ctx_ref.size = (size.width, size.height);
+                            vm_ref.resize_window_surface(size.width, size.height);
+                            app.resize(vm_ref, ctx_ref.size);
+                        }
+                        WindowEvent::ScaleFactorChanged {
+                            scale_factor: _,
+                            mut inner_size_writer,
+                        } => {
+                            let size = win.inner_size();
+                            let _ = inner_size_writer.request_inner_size(size);
+                            ctx_ref.size = (size.width, size.height);
+                            vm_ref.resize_window_surface(size.width, size.height);
+                            app.resize(vm_ref, ctx_ref.size);
+                        }
+                        WindowEvent::CursorMoved { position, .. } => {
+                            cursor_pos = position;
+                        }
+                        WindowEvent::MouseInput {
+                            state: ElementState::Pressed,
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            app.mouse_down(vm_ref, cursor_pos.x as f32, cursor_pos.y as f32);
+                        }
+                        WindowEvent::RedrawRequested => {
+                            app.update(vm_ref);
+                            let _ = app.render(vm_ref, ctx_ref);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Event::AboutToWait => {
+            if let Some(win) = window.as_ref() {
+                win.request_redraw();
+            }
+        }
+        _ => {}
+    })?;
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WasmRenderCtx {
+    buffer: Vec<u8>,
+    width: u32,
+    height: u32,
+    canvas: HtmlCanvasElement,
+    ctx: CanvasRenderingContext2d,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmRenderCtx {
+    fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.canvas.set_width(width);
+        self.canvas.set_height(height);
+        self.buffer.resize((width * height * 4) as usize, 0);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl SceneVMRenderCtx for WasmRenderCtx {
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn present(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult> {
+        let res = vm.render_frame(&mut self.buffer, self.width, self.height);
+        let clamped = wasm_bindgen::Clamped(&self.buffer[..]);
+        let image_data =
+            web_sys::ImageData::new_with_u8_clamped_array_and_sh(clamped, self.width, self.height)
+                .map_err(|e| SceneVMError::InvalidOperation(format!("{:?}", e)))?;
+        self.ctx
+            .put_image_data(&image_data, 0.0, 0.0)
+            .map_err(|e| SceneVMError::InvalidOperation(format!("{:?}", e)))?;
+        Ok(res)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn create_or_get_canvas(document: &Document) -> Result<HtmlCanvasElement, JsValue> {
+    if let Some(existing) = document
+        .get_element_by_id("canvas")
+        .and_then(|el| el.dyn_into::<HtmlCanvasElement>().ok())
+    {
+        return Ok(existing);
+    }
+    let canvas: HtmlCanvasElement = document
+        .create_element("canvas")?
+        .dyn_into::<HtmlCanvasElement>()?;
+    document
+        .body()
+        .ok_or_else(|| JsValue::from_str("no body"))?
+        .append_child(&canvas)?;
+    Ok(canvas)
+}
+
+/// Run a `SceneVMApp` in the browser using a canvas + ImageData blit.
+#[cfg(target_arch = "wasm32")]
+pub fn run_scenevm_app<A: SceneVMApp + 'static>(mut app: A) -> Result<(), JsValue> {
+    let window: WebWindow = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let document = window
+        .document()
+        .ok_or_else(|| JsValue::from_str("no document"))?;
+    let canvas = create_or_get_canvas(&document)?;
+
+    let width = window
+        .inner_width()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(800.0)
+        .round() as u32;
+    let height = window
+        .inner_height()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(600.0)
+        .round() as u32;
+    canvas.set_width(width);
+    canvas.set_height(height);
+
+    let ctx = canvas
+        .get_context("2d")?
+        .ok_or_else(|| JsValue::from_str("2d context missing"))?
+        .dyn_into::<CanvasRenderingContext2d>()?;
+
+    let mut vm = SceneVM::new(width, height);
+    let render_ctx = WasmRenderCtx {
+        buffer: vec![0u8; (width * height * 4) as usize],
+        width,
+        height,
+        canvas,
+        ctx,
+    };
+    app.init(&mut vm, (width, height));
+
+    let app_rc = Rc::new(RefCell::new(app));
+    let vm_rc = Rc::new(RefCell::new(vm));
+    let ctx_rc = Rc::new(RefCell::new(render_ctx));
+
+    // Resize handler
+    {
+        let app = Rc::clone(&app_rc);
+        let vm = Rc::clone(&vm_rc);
+        let ctx = Rc::clone(&ctx_rc);
+        let window_resize = window.clone();
+        let resize_closure = Closure::<dyn FnMut()>::new(move || {
+            if let (Ok(w), Ok(h)) = (window_resize.inner_width(), window_resize.inner_height()) {
+                let w = w.as_f64().unwrap_or(800.0).round() as u32;
+                let h = h.as_f64().unwrap_or(600.0).round() as u32;
+                ctx.borrow_mut().resize(w, h);
+                app.borrow_mut().resize(&mut vm.borrow_mut(), (w, h));
+            }
+        });
+        window
+            .add_event_listener_with_callback("resize", resize_closure.as_ref().unchecked_ref())?;
+        resize_closure.forget();
+    }
+
+    // Pointer down handler
+    {
+        let app = Rc::clone(&app_rc);
+        let vm = Rc::clone(&vm_rc);
+        let canvas = ctx_rc.borrow().canvas.clone();
+        let down_closure =
+            Closure::<dyn FnMut(web_sys::PointerEvent)>::new(move |e: web_sys::PointerEvent| {
+                let rect = canvas.get_bounding_client_rect();
+                let x = e.client_x() as f64 - rect.left();
+                let y = e.client_y() as f64 - rect.top();
+                app.borrow_mut()
+                    .mouse_down(&mut vm.borrow_mut(), x as f32, y as f32);
+            });
+        ctx_rc.borrow().canvas.add_event_listener_with_callback(
+            "pointerdown",
+            down_closure.as_ref().unchecked_ref(),
+        )?;
+        down_closure.forget();
+    }
+
+    // Animation loop
+    {
+        let app = Rc::clone(&app_rc);
+        let vm = Rc::clone(&vm_rc);
+        let ctx = Rc::clone(&ctx_rc);
+        let f = Rc::new(RefCell::new(None::<Closure<dyn FnMut()>>));
+        let f_clone = Rc::clone(&f);
+        let window_clone = window.clone();
+        *f.borrow_mut() = Some(Closure::<dyn FnMut()>::new(move || {
+            {
+                let mut app_mut = app.borrow_mut();
+                let mut vm_mut = vm.borrow_mut();
+                app_mut.update(&mut vm_mut);
+                let _ = app_mut.render(&mut vm_mut, &mut *ctx.borrow_mut());
+            }
+            let _ = window_clone.request_animation_frame(
+                f_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
+            );
+        }));
+        let _ =
+            window.request_animation_frame(f.borrow().as_ref().unwrap().as_ref().unchecked_ref());
+    }
+    Ok(())
 }
