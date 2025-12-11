@@ -21,6 +21,7 @@ final class MetalContainer: NSView {
     private let metalLayer = CAMetalLayer()
     private var handle: SceneVMHandle?
     private var displayLink: CVDisplayLink?
+    private var pinchScaleAccumulator: CGFloat = 1.0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -103,6 +104,14 @@ final class MetalContainer: NSView {
         handle?.scroll(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY)
     }
 
+    override func magnify(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        let (x, y) = toLogicalCoords(loc)
+        pinchScaleAccumulator += event.magnification
+        let scale = max(0.01, 1.0 + pinchScaleAccumulator)
+        handle?.pinch(scale: scale, center: CGPoint(x: x, y: y))
+    }
+
     deinit {
         if let dl = displayLink {
             CVDisplayLinkStop(dl)
@@ -122,6 +131,7 @@ final class MetalContainer: UIView {
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
     private var handle: SceneVMHandle?
     private var displayLink: CADisplayLink?
+    private var pinchRecognizer: UIPinchGestureRecognizer?
 
     override class var layerClass: AnyClass { CAMetalLayer.self }
 
@@ -136,6 +146,10 @@ final class MetalContainer: UIView {
 
         displayLink = CADisplayLink(target: self, selector: #selector(tick))
         displayLink?.add(to: .main, forMode: .common)
+
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        addGestureRecognizer(pinch)
+        pinchRecognizer = pinch
     }
 
     required init?(coder: NSCoder) {
@@ -190,6 +204,12 @@ final class MetalContainer: UIView {
         let loc = t.location(in: self)
         let (x, y) = toLogicalCoords(loc)
         handle?.mouseUp(x: x, y: y)
+    }
+
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        let loc = gesture.location(in: self)
+        let (x, y) = toLogicalCoords(loc)
+        handle?.pinch(scale: gesture.scale, center: CGPoint(x: x, y: y))
     }
 }
 #endif

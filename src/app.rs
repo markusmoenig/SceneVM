@@ -116,4 +116,11 @@ impl SceneVMApp for DemoApp {
     fn scroll(&mut self, _vm: &mut SceneVM, dx: f32, dy: f32) {
         println!("scroll dx {:.2}, dy {:.2}", dx, dy);
     }
+
+    fn pinch(&mut self, _vm: &mut SceneVM, scale: f32, center: (f32, f32)) {
+        println!(
+            "pinch scale {:.3} at ({:.1}, {:.1})",
+            scale, center.0, center.1
+        );
+    }
 }

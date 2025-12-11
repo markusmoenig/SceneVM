@@ -1995,3 +1995,19 @@ pub unsafe extern "C" fn scenevm_runner_scroll(ptr: *mut SceneVMRunner, dx: f32,
         r.app.scroll(&mut r.vm, dx, dy);
     }
 }
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scenevm_runner_pinch(
+    ptr: *mut SceneVMRunner,
+    scale: f32,
+    center_x: f32,
+    center_y: f32,
+) {
+    if let Some(r) = unsafe { ptr.as_mut() } {
+        r.app.pinch(&mut r.vm, scale, (center_x, center_y));
+    }
+}

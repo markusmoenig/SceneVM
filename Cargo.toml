@@ -48,6 +48,8 @@ web-sys = { version = "0.3", features = [
     'ImageData',
     'PointerEvent',
     'console',
+    'DomRect',
+    'Element',
 ] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 

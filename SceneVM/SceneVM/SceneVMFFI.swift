@@ -26,6 +26,9 @@ func scenevm_runner_mouse_move(_ vm: UnsafeMutableRawPointer?, _ x: Float, _ y: 
 @_silgen_name("scenevm_runner_scroll")
 func scenevm_runner_scroll(_ vm: UnsafeMutableRawPointer?, _ dx: Float, _ dy: Float)
 
+@_silgen_name("scenevm_runner_pinch")
+func scenevm_runner_pinch(_ vm: UnsafeMutableRawPointer?, _ scale: Float, _ center_x: Float, _ center_y: Float)
+
 /// Thin Swift wrapper around the SceneVM FFI for CAMetalLayer presentation.
 final class SceneVMHandle {
     private var vm: UnsafeMutableRawPointer?
@@ -73,6 +76,11 @@ final class SceneVMHandle {
     func scroll(dx: CGFloat, dy: CGFloat) {
         guard let vm else { return }
         scenevm_runner_scroll(vm, Float(dx), Float(dy))
+    }
+
+    func pinch(scale: CGFloat, center: CGPoint) {
+        guard let vm else { return }
+        scenevm_runner_pinch(vm, Float(scale), Float(center.x), Float(center.y))
     }
 
     deinit {
