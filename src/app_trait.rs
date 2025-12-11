@@ -20,6 +20,10 @@ pub trait SceneVMApp {
     fn update(&mut self, _vm: &mut SceneVM) {}
     /// Render hook: call `ctx.present(vm)` to display.
     fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx);
+    /// Return `true` if the app wants an update/render this tick. Default is always true.
+    fn needs_update(&mut self) -> bool {
+        true
+    }
     /// Resize callback with new logical size.
     fn resize(&mut self, _vm: &mut SceneVM, _size: (u32, u32)) {}
     /// Mouse/touch down callback in logical pixels.

@@ -1,4 +1,4 @@
-pub mod app;
+// pub mod app;
 pub mod app_trait;
 pub mod atlas;
 pub mod bbox2d;
@@ -34,7 +34,6 @@ use rust_embed::RustEmbed;
 pub struct Embedded;
 
 pub use crate::{
-    app::DemoApp,
     app_trait::{SceneVMApp, SceneVMRenderCtx},
     atlas::{AtlasEntry, SharedAtlas},
     bbox2d::BBox2D,
@@ -458,6 +457,11 @@ impl SceneVM {
     /// Index of the currently active VM used by `execute`.
     pub fn active_vm_index(&self) -> usize {
         self.active_vm_index
+    }
+
+    /// Normalized atlas rect (ofs.x, ofs.y, scale.x, scale.y) for a tile/frame, useful for SDF packing.
+    pub fn atlas_sdf_uv4(&self, id: &uuid::Uuid, anim_frame: u32) -> Option<[f32; 4]> {
+        self.atlas.sdf_uv4(id, anim_frame)
     }
 
     /// Enable or disable drawing for a VM layer. Disabled layers still receive commands.
@@ -1311,6 +1315,49 @@ impl SceneVM {
         self.compile_shader_internal(body_source, false)
     }
 
+    /// Compile an SDF body shader with the header and return detailed diagnostics.
+    /// If compilation succeeds (only warnings), the shader is automatically set as active.
+    pub fn compile_shader_sdf(&mut self, body_source: &str) -> ShaderCompilationResult {
+        use wgpu::ShaderSource;
+
+        let header_source = if let Some(bytes) = Embedded::get("sdf_header.wgsl") {
+            std::str::from_utf8(bytes.data.as_ref())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            "".to_string()
+        };
+
+        let full_source = format!("{}\n{}", header_source, body_source);
+
+        let device = if let Some(gpu) = &self.gpu {
+            &gpu.device
+        } else {
+            return ShaderCompilationResult {
+                success: false,
+                warnings: vec![],
+                errors: vec![ShaderDiagnostic {
+                    line: 0,
+                    message: "GPU device not initialized. Cannot compile shader.".to_string(),
+                }],
+            };
+        };
+
+        let _shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scenevm-compile-sdf"),
+            source: ShaderSource::Wgsl(full_source.into()),
+        });
+
+        self.vm
+            .execute(vm::Atom::SetSourceSdf(body_source.to_string()));
+
+        ShaderCompilationResult {
+            success: true,
+            warnings: vec![],
+            errors: vec![],
+        }
+    }
+
     /// Internal shader compilation with diagnostics
     fn compile_shader_internal(
         &mut self,
@@ -1613,10 +1660,12 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                             app.scroll(vm_ref, dx / scale, dy / scale);
                         }
                         WindowEvent::RedrawRequested => {
-                            ctx_ref.begin_frame();
-                            app.update(vm_ref);
-                            let _ = app.render(vm_ref, ctx_ref);
-                            let _ = ctx_ref.ensure_presented(vm_ref);
+                            if app.needs_update() {
+                                ctx_ref.begin_frame();
+                                app.update(vm_ref);
+                                let _ = app.render(vm_ref, ctx_ref);
+                                let _ = ctx_ref.ensure_presented(vm_ref);
+                            }
                         }
                         _ => {}
                     }
@@ -1625,10 +1674,19 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
         }
         Event::AboutToWait => {
             if let Some(win) = window.as_ref() {
+                let wants_frame = app.needs_update();
                 if let Some(dt) = frame_interval {
-                    target.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + dt));
+                    let next = std::time::Instant::now() + dt;
+                    target.set_control_flow(ControlFlow::WaitUntil(next));
+                    if wants_frame {
+                        win.request_redraw();
+                    }
+                } else if wants_frame {
+                    target.set_control_flow(ControlFlow::Poll);
+                    win.request_redraw();
+                } else {
+                    target.set_control_flow(ControlFlow::Wait);
                 }
-                win.request_redraw();
             }
         }
         _ => {}
@@ -1794,8 +1852,10 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(mut app: A) -> Result<(), JsValu
             {
                 let mut app_mut = app.borrow_mut();
                 let mut vm_mut = vm.borrow_mut();
-                app_mut.update(&mut vm_mut);
-                let _ = app_mut.render(&mut vm_mut, &mut *ctx.borrow_mut());
+                if app_mut.needs_update() {
+                    app_mut.update(&mut vm_mut);
+                    let _ = app_mut.render(&mut vm_mut, &mut *ctx.borrow_mut());
+                }
             }
             let _ = window_clone.request_animation_frame(
                 f_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref(),
@@ -1867,147 +1927,5 @@ pub unsafe extern "C" fn scenevm_ca_render(ptr: *mut SceneVM) -> i32 {
         }
     } else {
         -1
-    }
-}
-
-// -------------------------
-// Demo runner FFI (uses the built-in DemoApp shared across desktop/wasm)
-// -------------------------
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[repr(C)]
-pub struct SceneVMRunner {
-    app: crate::app::DemoApp,
-    vm: SceneVM,
-    ctx: NativeRenderCtx,
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_create(
-    layer_ptr: *mut c_void,
-    width: u32,
-    height: u32,
-) -> *mut SceneVMRunner {
-    if layer_ptr.is_null() {
-        return std::ptr::null_mut();
-    }
-    let mut vm = SceneVM::new_with_metal_layer(layer_ptr, width, height);
-    let mut app = crate::app::DemoApp::new();
-    let ctx = NativeRenderCtx::new((width, height));
-    app.init(&mut vm, ctx.size);
-    Box::into_raw(Box::new(SceneVMRunner { app, vm, ctx }))
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_destroy(ptr: *mut SceneVMRunner) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        drop(Box::from_raw(ptr));
-    }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_resize(ptr: *mut SceneVMRunner, width: u32, height: u32) {
-    if let Some(r) = unsafe { ptr.as_mut() } {
-        r.vm.resize_window_surface(width, height);
-        r.app.resize(&mut r.vm, (width, height));
-        r.ctx.size = (width, height);
-    }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_render(ptr: *mut SceneVMRunner) -> i32 {
-    if let Some(r) = unsafe { ptr.as_mut() } {
-        r.ctx.begin_frame();
-        r.app.update(&mut r.vm);
-        let _ = r.app.render(&mut r.vm, &mut r.ctx);
-        match r.ctx.ensure_presented(&mut r.vm) {
-            Ok(RenderResult::Presented) => 0,
-            Ok(RenderResult::InitPending) => 1,
-            Ok(RenderResult::ReadbackPending) => 2,
-            Err(_) => -1,
-        }
-    } else {
-        -1
-    }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_mouse_down(ptr: *mut SceneVMRunner, x: f32, y: f32) {
-    if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.mouse_down(&mut r.vm, x, y);
-    }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_mouse_up(ptr: *mut SceneVMRunner, x: f32, y: f32) {
-    if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.mouse_up(&mut r.vm, x, y);
-    }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_mouse_move(ptr: *mut SceneVMRunner, x: f32, y: f32) {
-    if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.mouse_move(&mut r.vm, x, y);
-    }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_scroll(ptr: *mut SceneVMRunner, dx: f32, dy: f32) {
-    if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.scroll(&mut r.vm, dx, dy);
-    }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(target_os = "macos", target_os = "ios")
-))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn scenevm_runner_pinch(
-    ptr: *mut SceneVMRunner,
-    scale: f32,
-    center_x: f32,
-    center_y: f32,
-) {
-    if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.pinch(&mut r.vm, scale, (center_x, center_y));
     }
 }

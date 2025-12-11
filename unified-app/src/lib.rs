@@ -97,6 +97,14 @@ impl SceneVMApp for TemplateApp {
         vm.set_active_vm(0);
     }
 
+    fn target_fps(&self) -> Option<f32> {
+        Some(30.0)
+    }
+
+    fn needs_update(&mut self) -> bool {
+        true
+    }
+
     fn update(&mut self, vm: &mut SceneVM) {
         let rot = Mat4::<f32>::rotation_y(0.02) * Mat4::<f32>::rotation_x(0.01);
         self.matrix = rot * self.matrix;
@@ -246,6 +254,7 @@ pub unsafe extern "C" fn unified_app_runner_resize(
         r.vm.resize_window_surface(width, height);
         r.app.resize(&mut r.vm, (width, height));
         r.ctx.size = (width, height);
+        r.ctx.presented = false; // force a new present on next render
     }
 }
 
@@ -256,6 +265,16 @@ pub unsafe extern "C" fn unified_app_runner_resize(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unified_app_runner_render(ptr: *mut SceneVMAppRunner) -> i32 {
     if let Some(r) = unsafe { ptr.as_mut() } {
+        // Always render if we haven't presented since last resize/loop iteration.
+        let should_render = r.app.needs_update() || !r.ctx.presented;
+        if !should_render {
+            // Re-use last result without doing any GPU work.
+            return match r.ctx.last_result {
+                RenderResult::Presented => 0,
+                RenderResult::InitPending => 1,
+                RenderResult::ReadbackPending => 2,
+            };
+        }
         r.ctx.begin_frame();
         r.app.update(&mut r.vm);
         let _ = r.app.render(&mut r.vm, &mut r.ctx);

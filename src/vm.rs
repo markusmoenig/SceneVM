@@ -235,7 +235,7 @@ pub enum Atom {
     SetGP7(Vec4<f32>),
     SetGP8(Vec4<f32>),
     SetGP9(Vec4<f32>),
-    /// Switch between 2D and 3D compute drawing
+    /// Switch between 2D/3D/SDF compute drawing
     SetRenderMode(RenderMode),
     /// Set a 2D transform (Mat3) applied on CPU to polygon vertices before 2D compute draw
     SetTransform2D(Mat3<f32>),
@@ -252,6 +252,10 @@ pub enum Atom {
     SetSource2D(String),
     /// Provide a custom WGSL body for the 3D compute shader. The VM will prepend a header and compile at runtime.
     SetSource3D(String),
+    /// Provide a custom WGSL body for the SDF compute shader. The VM will prepend a header and compile at runtime.
+    SetSourceSdf(String),
+    /// Replace the SDF data buffer (read-only storage) exposed to the shader.
+    SetSdfData(Vec<[f32; 4]>),
     /// Clear EVERYTHING: tiles, atlas, scene (chunks), counters and modes
     Clear,
     /// Clear only the tiles and atlas (keep scene/chunks intact)
@@ -311,12 +315,16 @@ pub struct VMGpu {
     // --- Compute pipelines and uniforms (lazily created)
     pub compute2d_pipeline: Option<wgpu::ComputePipeline>,
     pub compute3d_pipeline: Option<wgpu::ComputePipeline>,
+    pub compute_sdf_pipeline: Option<wgpu::ComputePipeline>,
     pub u2d_buf: Option<wgpu::Buffer>,
     pub u3d_buf: Option<wgpu::Buffer>,
+    pub u_sdf_buf: Option<wgpu::Buffer>,
     pub u2d_bgl: Option<wgpu::BindGroupLayout>,
     pub u3d_bgl: Option<wgpu::BindGroupLayout>,
+    pub u_sdf_bgl: Option<wgpu::BindGroupLayout>,
     pub u2d_bg: Option<wgpu::BindGroup>,
     pub u3d_bg: Option<wgpu::BindGroup>,
+    pub u_sdf_bg: Option<wgpu::BindGroup>,
     pub v2d_ssbo: Option<wgpu::Buffer>,
     pub i2d_ssbo: Option<wgpu::Buffer>,
     pub v3d_ssbo: Option<wgpu::Buffer>,
@@ -331,6 +339,8 @@ pub struct VMGpu {
     // --- Scene-wide uniform grid buffers (3D)
     pub grid_hdr: Option<wgpu::Buffer>,
     pub grid_data: Option<wgpu::Buffer>,
+    // --- SDF data
+    pub sdf_data_ssbo: Option<wgpu::Buffer>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -451,6 +461,28 @@ pub struct Compute3DUniforms {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ComputeSdfUniforms {
+    pub background: [f32; 4],
+    pub fb_size: [u32; 2],
+    _pad0: [u32; 2],
+    pub gp0: [f32; 4],
+    pub gp1: [f32; 4],
+    pub gp2: [f32; 4],
+    pub gp3: [f32; 4],
+    pub gp4: [f32; 4],
+    pub gp5: [f32; 4],
+    pub gp6: [f32; 4],
+    pub gp7: [f32; 4],
+    pub gp8: [f32; 4],
+    pub gp9: [f32; 4],
+    pub data_len: u32, // number of vec4 entries
+    pub vm_flags: u32,
+    pub anim_counter: u32,
+    pub _pad_tail: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Grid3DHeader {
     pub origin: [f32; 4],    // xyz, pad
     pub cell_size: [f32; 4], // xyz, pad
@@ -493,6 +525,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 pub enum RenderMode {
     Compute2D,
     Compute3D,
+    Sdf,
 }
 
 pub struct VM {
@@ -519,6 +552,9 @@ pub struct VM {
     // --- Programmable compute shader sources
     pub source2d: String,
     pub source3d: String,
+    pub source_sdf: String,
+    pub sdf_data: Vec<[f32; 4]>,
+    pub sdf_data_dirty: bool,
 
     pub transform2d: Mat3<f32>,
     pub transform3d: Mat4<f32>,
@@ -1127,6 +1163,30 @@ impl VM {
         self.tile_gpu_dirty = false;
     }
 
+    fn upload_sdf_data_to_gpu(&mut self, device: &wgpu::Device) {
+        if self.gpu.is_none() {
+            return;
+        }
+        use wgpu::util::DeviceExt;
+        let g = self.gpu.as_mut().unwrap();
+        let data_slice: &[[f32; 4]] = if self.sdf_data.is_empty() {
+            &[[0.0; 4]]
+        } else {
+            &self.sdf_data
+        };
+
+        if self.sdf_data_dirty || g.sdf_data_ssbo.is_none() {
+            g.sdf_data_ssbo = Some(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vm-sdf-data-ssbo"),
+                    contents: bytemuck::cast_slice(data_slice),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                }),
+            );
+            self.sdf_data_dirty = false;
+        }
+    }
+
     /// Create a VM with a fixed-size atlas (atlas_w x atlas_h).
     pub fn new(atlas_w: u32, atlas_h: u32) -> Self {
         Self::new_with_shared_atlas(SharedAtlas::new(atlas_w, atlas_h))
@@ -1144,6 +1204,12 @@ impl VM {
         if let Some(bytes) = crate::Embedded::get("3d_body.wgsl") {
             if let Ok(source) = std::str::from_utf8(bytes.data.as_ref()) {
                 source3d = source.to_string();
+            }
+        }
+        let mut source_sdf = String::new();
+        if let Some(bytes) = crate::Embedded::get("sdf_body.wgsl") {
+            if let Ok(source) = std::str::from_utf8(bytes.data.as_ref()) {
+                source_sdf = source.to_string();
             }
         }
         Self {
@@ -1166,6 +1232,9 @@ impl VM {
             gp9: Vec4::new(0.0, 0.0, 0.0, 0.0),
             source2d,
             source3d,
+            source_sdf,
+            sdf_data: Vec::new(),
+            sdf_data_dirty: true,
             transform2d: Mat3::identity(),
             transform3d: Mat4::identity(),
             lights: FxHashMap::default(),
@@ -1448,6 +1517,16 @@ impl VM {
                     g.compute3d_pipeline = None;
                 }
             }
+            Atom::SetSourceSdf(src) => {
+                self.source_sdf = src;
+                if let Some(g) = self.gpu.as_mut() {
+                    g.compute_sdf_pipeline = None;
+                }
+            }
+            Atom::SetSdfData(data) => {
+                self.sdf_data = data;
+                self.sdf_data_dirty = true;
+            }
             Atom::SetTransform2D(m) => {
                 if self.transform2d != m {
                     self.transform2d = m;
@@ -1471,6 +1550,8 @@ impl VM {
                 self.gp1 = Vec4::new(0.0, 0.0, 0.0, 0.0);
                 self.gp2 = Vec4::new(0.0, 0.0, 0.0, 0.0);
                 self.render_mode = RenderMode::Compute2D;
+                self.sdf_data.clear();
+                self.sdf_data_dirty = true;
                 self.mark_all_geometry_dirty();
                 self.dynamic_objects.clear();
             }
@@ -1666,12 +1747,16 @@ impl VM {
             sampler,
             compute2d_pipeline: None,
             compute3d_pipeline: None,
+            compute_sdf_pipeline: None,
             u2d_buf: None,
             u3d_buf: None,
+            u_sdf_buf: None,
             u2d_bgl: None,
             u3d_bgl: None,
+            u_sdf_bgl: None,
             u2d_bg: None,
             u3d_bg: None,
+            u_sdf_bg: None,
             v2d_ssbo: None,
             i2d_ssbo: None,
             v3d_ssbo: None,
@@ -1683,6 +1768,7 @@ impl VM {
             scene_data_ssbo: None,
             grid_hdr: None,
             grid_data: None,
+            sdf_data_ssbo: None,
         });
 
         Ok(())
@@ -2022,12 +2108,72 @@ impl VM {
             ],
         });
 
+        let sdf_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vm-sdf-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    // UBO
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // storage image (color)
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // SDF data buffer (array<vec4<f32>>)
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // atlas texture (sampled)
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // atlas sampler
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         // Pipelines (compile only if missing)
         if g.u2d_bgl.is_none() {
             g.u2d_bgl = Some(u2d_bgl);
         }
         if g.u3d_bgl.is_none() {
             g.u3d_bgl = Some(u3d_bgl);
+        }
+        if g.u_sdf_bgl.is_none() {
+            g.u_sdf_bgl = Some(sdf_bgl);
         }
 
         if g.compute2d_pipeline.is_none() {
@@ -2089,6 +2235,36 @@ impl VM {
             g.compute3d_pipeline = Some(pl3d);
         }
 
+        if g.compute_sdf_pipeline.is_none() {
+            let mut header_sdf = String::new();
+            if let Some(bytes) = crate::Embedded::get("sdf_header.wgsl") {
+                if let Ok(source) = std::str::from_utf8(bytes.data.as_ref()) {
+                    header_sdf = source.to_string();
+                }
+            }
+
+            let src_sdf = [header_sdf.as_str(), &self.source_sdf].concat();
+            let cs_sdf = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("vm-sdf-cs"),
+                source: wgpu::ShaderSource::Wgsl(src_sdf.into()),
+            });
+            let pl_sdf = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("vm-sdf-cs-pipeline"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("vm-sdf-cs-layout"),
+                        bind_group_layouts: &[g.u_sdf_bgl.as_ref().unwrap()],
+                        push_constant_ranges: &[],
+                    }),
+                ),
+                module: &cs_sdf,
+                entry_point: Some("cs_main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            g.compute_sdf_pipeline = Some(pl_sdf);
+        }
+
         // UBOs
         if g.u2d_buf.is_none() {
             let u2d_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2108,8 +2284,18 @@ impl VM {
             });
             g.u3d_buf = Some(u3d_buf);
         }
+        if g.u_sdf_buf.is_none() {
+            let u_sdf_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vm-u-sdf"),
+                size: std::mem::size_of::<ComputeSdfUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            g.u_sdf_buf = Some(u_sdf_buf);
+        }
         g.u2d_bg = None;
         g.u3d_bg = None;
+        g.u_sdf_bg = None;
 
         Ok(())
     }
@@ -2738,6 +2924,99 @@ impl VM {
         Ok(())
     }
 
+    /// Dispatches the SDF compute pipeline into a storage-capable surface.
+    pub fn compute_draw_sdf_into(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: &mut Texture,
+        fb_w: u32,
+        fb_h: u32,
+    ) -> crate::SceneVMResult<()> {
+        if self.gpu.is_none() {
+            self.init_gpu(device)?;
+        }
+        self.init_compute(device)?;
+        surface.ensure_gpu_with(device);
+        self.upload_atlas_to_gpu_with(device, queue);
+
+        let u = ComputeSdfUniforms {
+            background: self.background.into_array(),
+            fb_size: [fb_w, fb_h],
+            _pad0: [0, 0],
+            gp0: self.gp0.into_array(),
+            gp1: self.gp1.into_array(),
+            gp2: self.gp2.into_array(),
+            gp3: self.gp3.into_array(),
+            gp4: self.gp4.into_array(),
+            gp5: self.gp5.into_array(),
+            gp6: self.gp6.into_array(),
+            gp7: self.gp7.into_array(),
+            gp8: self.gp8.into_array(),
+            gp9: self.gp9.into_array(),
+            data_len: (self.sdf_data.len().min(u32::MAX as usize)) as u32,
+            vm_flags: self.vm_flags(),
+            anim_counter: self.animation_counter as u32,
+            _pad_tail: 0,
+        };
+        if let Some(g) = self.gpu.as_ref() {
+            queue.write_buffer(g.u_sdf_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
+        }
+
+        self.upload_sdf_data_to_gpu(device);
+
+        let g = self.gpu.as_mut().unwrap();
+        let view = &surface.gpu.as_ref().unwrap().view;
+        let (atlas_tex_view, _atlas_mat_tex_view) = self
+            .shared_atlas
+            .texture_views()
+            .expect("atlas GPU resources missing");
+        g.u_sdf_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vm-sdf-bg"),
+            layout: g.u_sdf_bgl.as_ref().unwrap(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: g.u_sdf_buf.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: g.sdf_data_ssbo.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&atlas_tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&g.sampler),
+                },
+            ],
+        }));
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("vm-sdf-cs-enc"),
+        });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("vm-sdf-cs-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(g.compute_sdf_pipeline.as_ref().unwrap());
+            cpass.set_bind_group(0, g.u_sdf_bg.as_ref().unwrap(), &[]);
+            let gx = (fb_w + 7) / 8;
+            let gy = (fb_h + 7) / 8;
+            cpass.dispatch_workgroups(gx, gy, 1);
+        }
+        queue.submit(Some(encoder.finish()));
+
+        Ok(())
+    }
+
     /// Cast a CPU-side ray through a normalized screen UV and return the hit GeoId (if any).
     /// Uses the same camera model and 3D transforms as the GPU compute path.
     /// Returns the GeoId, world-space hit position, and the distance along the ray.
@@ -3200,6 +3479,13 @@ impl VM {
 
                 if self.activity_logging {
                     self.log_layer("3D compute draw completed".to_string());
+                }
+            }
+            RenderMode::Sdf => {
+                self.compute_draw_sdf_into(device, queue, surface, fb_w, fb_h)?;
+
+                if self.activity_logging {
+                    self.log_layer("SDF compute draw completed".to_string());
                 }
             }
         }

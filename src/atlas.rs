@@ -218,6 +218,30 @@ impl SharedAtlas {
         true
     }
 
+    /// Return a normalized atlas rect (ofs.xy, scale.xy) for a tile, suitable for SDF data packing.
+    pub fn sdf_uv4(&self, id: &Uuid, anim_frame: u32) -> Option<[f32; 4]> {
+        let mut guard = self.inner.lock().unwrap();
+        if guard.layout_dirty {
+            build_atlas_inner(&mut guard);
+            guard.layout_dirty = false;
+        }
+
+        let rects = guard.atlas_map.get(id)?;
+        if rects.is_empty() {
+            return None;
+        }
+        let idx = (anim_frame as usize) % rects.len();
+        let rect = rects.get(idx)?;
+        let w = guard.atlas.width.max(1) as f32;
+        let h = guard.atlas.height.max(1) as f32;
+        Some([
+            rect.x as f32 / w,
+            rect.y as f32 / h,
+            rect.w as f32 / w,
+            rect.h as f32 / h,
+        ])
+    }
+
     pub fn tiles_map_len(&self) -> usize {
         let guard = self.inner.lock().unwrap();
         guard.tiles_map.len()
