@@ -3,13 +3,13 @@ import QuartzCore
 
 // C FFI imported directly via @_silgen_name to avoid a bridging header.
 @_silgen_name("unified_app_runner_create")
-func unified_app_runner_create(_ layer_ptr: UnsafeMutableRawPointer?, _ width: UInt32, _ height: UInt32) -> UnsafeMutableRawPointer?
+func unified_app_runner_create(_ layer_ptr: UnsafeMutableRawPointer?, _ width: UInt32, _ height: UInt32, _ scale: Float) -> UnsafeMutableRawPointer?
 
 @_silgen_name("unified_app_runner_destroy")
 func unified_app_runner_destroy(_ vm: UnsafeMutableRawPointer?)
 
 @_silgen_name("unified_app_runner_resize")
-func unified_app_runner_resize(_ vm: UnsafeMutableRawPointer?, _ width: UInt32, _ height: UInt32)
+func unified_app_runner_resize(_ vm: UnsafeMutableRawPointer?, _ width: UInt32, _ height: UInt32, _ scale: Float)
 
 @_silgen_name("unified_app_runner_render")
 func unified_app_runner_render(_ vm: UnsafeMutableRawPointer?) -> Int32
@@ -33,12 +33,14 @@ func unified_app_runner_pinch(_ vm: UnsafeMutableRawPointer?, _ scale: Float, _ 
 final class SceneVMHandle {
     private var vm: UnsafeMutableRawPointer?
     private weak var layer: CAMetalLayer?
+    private var scale: CGFloat
 
     init?(layer: CAMetalLayer, size: CGSize, scale: CGFloat) {
+        self.scale = scale
         let ptr = Unmanaged.passUnretained(layer).toOpaque()
         let w = UInt32(max(max(layer.drawableSize.width, size.width * scale), 1))
         let h = UInt32(max(max(layer.drawableSize.height, size.height * scale), 1))
-        guard let handle = unified_app_runner_create(ptr, w, h) else {
+        guard let handle = unified_app_runner_create(ptr, w, h, Float(scale)) else {
             return nil
         }
         self.layer = layer
@@ -47,10 +49,11 @@ final class SceneVMHandle {
 
     func resize(to size: CGSize, scale: CGFloat) {
         guard let vm else { return }
+        self.scale = scale
         let drawable = layer?.drawableSize ?? CGSize(width: size.width * scale, height: size.height * scale)
         let w = UInt32(max(drawable.width, 1))
         let h = UInt32(max(drawable.height, 1))
-        unified_app_runner_resize(vm, w, h)
+        unified_app_runner_resize(vm, w, h, Float(scale))
     }
 
     func render() {

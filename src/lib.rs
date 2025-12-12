@@ -502,6 +502,22 @@ impl SceneVM {
         self.active_vm().pick_geo_id_at_uv(fb_w, fb_h, screen_uv)
     }
 
+    /// Build a world-space ray from screen uv (0..1) using the active VM's camera and a provided framebuffer size.
+    pub fn ray_from_uv_with_size(
+        &self,
+        fb_w: u32,
+        fb_h: u32,
+        screen_uv: [f32; 2],
+    ) -> Option<(vek::Vec3<f32>, vek::Vec3<f32>)> {
+        self.active_vm().ray_from_uv(fb_w, fb_h, screen_uv)
+    }
+
+    /// Build a world-space ray from screen uv (0..1) using the active VM's camera and the current SceneVM size.
+    pub fn ray_from_uv(&self, screen_uv: [f32; 2]) -> Option<(vek::Vec3<f32>, vek::Vec3<f32>)> {
+        let (w, h) = self.size;
+        self.active_vm().ray_from_uv(w, h, screen_uv)
+    }
+
     /// Prints statistics about 2D and 3D polygons currently loaded in all chunks.
     pub fn print_geometry_stats(&self) {
         let mut total_2d = 0usize;
@@ -1586,9 +1602,12 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                 .create_window(attrs)
                 .expect("failed to create window");
             let size = win.inner_size();
+            let scale = win.scale_factor();
+            let logical = size.to_logical::<f64>(scale);
+            let logical_size = (logical.width.round() as u32, logical.height.round() as u32);
             let mut new_vm = SceneVM::new_with_window(&win);
-            let new_ctx = NativeRenderCtx::new((size.width, size.height));
-            app.init(&mut new_vm, new_ctx.size);
+            let new_ctx = NativeRenderCtx::new(logical_size);
+            app.init(&mut new_vm, logical_size);
             window = Some(win);
             vm = Some(new_vm);
             ctx = Some(new_ctx);
@@ -1602,19 +1621,26 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                     match event {
                         WindowEvent::CloseRequested => target.exit(),
                         WindowEvent::Resized(size) => {
-                            ctx_ref.size = (size.width, size.height);
+                            let scale = win.scale_factor();
+                            let logical = size.to_logical::<f64>(scale);
+                            let logical_size =
+                                (logical.width.round() as u32, logical.height.round() as u32);
+                            ctx_ref.size = logical_size;
                             vm_ref.resize_window_surface(size.width, size.height);
-                            app.resize(vm_ref, ctx_ref.size);
+                            app.resize(vm_ref, logical_size);
                         }
                         WindowEvent::ScaleFactorChanged {
-                            scale_factor: _,
+                            scale_factor,
                             mut inner_size_writer,
                         } => {
                             let size = win.inner_size();
                             let _ = inner_size_writer.request_inner_size(size);
-                            ctx_ref.size = (size.width, size.height);
+                            let logical = size.to_logical::<f64>(scale_factor);
+                            let logical_size =
+                                (logical.width.round() as u32, logical.height.round() as u32);
+                            ctx_ref.size = logical_size;
                             vm_ref.resize_window_surface(size.width, size.height);
-                            app.resize(vm_ref, ctx_ref.size);
+                            app.resize(vm_ref, logical_size);
                         }
                         WindowEvent::CursorMoved { position, .. } => {
                             cursor_pos = position;

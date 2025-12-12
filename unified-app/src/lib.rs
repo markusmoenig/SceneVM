@@ -204,6 +204,7 @@ pub struct SceneVMAppRunner {
     app: TemplateApp,
     vm: SceneVM,
     ctx: FfiRenderCtx,
+    scale: f32,
 }
 
 #[cfg(all(
@@ -215,15 +216,23 @@ pub unsafe extern "C" fn unified_app_runner_create(
     layer_ptr: *mut c_void,
     width: u32,
     height: u32,
+    scale: f32,
 ) -> *mut SceneVMAppRunner {
     if layer_ptr.is_null() {
         return std::ptr::null_mut();
     }
     let mut vm = SceneVM::new_with_metal_layer(layer_ptr, width, height);
     let mut app = TemplateApp::new();
-    let ctx = FfiRenderCtx::new((width, height));
+    let logical_w = ((width as f32) / scale.max(0.0001)).round().max(1.0) as u32;
+    let logical_h = ((height as f32) / scale.max(0.0001)).round().max(1.0) as u32;
+    let ctx = FfiRenderCtx::new((logical_w, logical_h));
     app.init(&mut vm, ctx.size);
-    Box::into_raw(Box::new(SceneVMAppRunner { app, vm, ctx }))
+    Box::into_raw(Box::new(SceneVMAppRunner {
+        app,
+        vm,
+        ctx,
+        scale,
+    }))
 }
 
 #[cfg(all(
@@ -249,11 +258,15 @@ pub unsafe extern "C" fn unified_app_runner_resize(
     ptr: *mut SceneVMAppRunner,
     width: u32,
     height: u32,
+    scale: f32,
 ) {
     if let Some(r) = unsafe { ptr.as_mut() } {
+        r.scale = scale;
         r.vm.resize_window_surface(width, height);
-        r.app.resize(&mut r.vm, (width, height));
-        r.ctx.size = (width, height);
+        let logical_w = ((width as f32) / scale.max(0.0001)).round().max(1.0) as u32;
+        let logical_h = ((height as f32) / scale.max(0.0001)).round().max(1.0) as u32;
+        r.app.resize(&mut r.vm, (logical_w, logical_h));
+        r.ctx.size = (logical_w, logical_h);
         r.ctx.presented = false; // force a new present on next render
     }
 }
@@ -296,7 +309,8 @@ pub unsafe extern "C" fn unified_app_runner_render(ptr: *mut SceneVMAppRunner) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unified_app_runner_mouse_down(ptr: *mut SceneVMAppRunner, x: f32, y: f32) {
     if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.mouse_down(&mut r.vm, x, y);
+        let s = r.scale.max(0.0001);
+        r.app.mouse_down(&mut r.vm, x / s, y / s);
     }
 }
 
@@ -307,7 +321,8 @@ pub unsafe extern "C" fn unified_app_runner_mouse_down(ptr: *mut SceneVMAppRunne
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unified_app_runner_mouse_up(ptr: *mut SceneVMAppRunner, x: f32, y: f32) {
     if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.mouse_up(&mut r.vm, x, y);
+        let s = r.scale.max(0.0001);
+        r.app.mouse_up(&mut r.vm, x / s, y / s);
     }
 }
 
@@ -318,7 +333,8 @@ pub unsafe extern "C" fn unified_app_runner_mouse_up(ptr: *mut SceneVMAppRunner,
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unified_app_runner_mouse_move(ptr: *mut SceneVMAppRunner, x: f32, y: f32) {
     if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.mouse_move(&mut r.vm, x, y);
+        let s = r.scale.max(0.0001);
+        r.app.mouse_move(&mut r.vm, x / s, y / s);
     }
 }
 
@@ -329,7 +345,8 @@ pub unsafe extern "C" fn unified_app_runner_mouse_move(ptr: *mut SceneVMAppRunne
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unified_app_runner_scroll(ptr: *mut SceneVMAppRunner, dx: f32, dy: f32) {
     if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.scroll(&mut r.vm, dx, dy);
+        let s = r.scale.max(0.0001);
+        r.app.scroll(&mut r.vm, dx / s, dy / s);
     }
 }
 
@@ -345,6 +362,7 @@ pub unsafe extern "C" fn unified_app_runner_pinch(
     center_y: f32,
 ) {
     if let Some(r) = unsafe { ptr.as_mut() } {
-        r.app.pinch(&mut r.vm, scale, (center_x, center_y));
+        let s = r.scale.max(0.0001);
+        r.app.pinch(&mut r.vm, scale, (center_x / s, center_y / s));
     }
 }

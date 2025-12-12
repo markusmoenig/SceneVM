@@ -475,6 +475,18 @@ pub struct ComputeSdfUniforms {
     pub gp7: [f32; 4],
     pub gp8: [f32; 4],
     pub gp9: [f32; 4],
+    // Camera (matches Compute3DUniforms layout to keep alignment safe)
+    pub cam_pos: [f32; 4],
+    pub cam_fwd: [f32; 4],
+    pub cam_right: [f32; 4],
+    pub cam_up: [f32; 4],
+    pub cam_vfov_deg: f32,
+    pub cam_ortho_half_h: f32,
+    pub cam_near: f32,
+    pub cam_far: f32,
+    pub cam_kind: u32,            // 0=OrthoIso, 1=OrbitPersp, 2=FirstPersonPersp
+    pub _pad_cam_align: [u32; 3], // keep vec3<u32> slot aligned to 16 bytes (std140)
+    pub _pad_cam: [u32; 4],
     pub data_len: u32, // number of vec4 entries
     pub vm_flags: u32,
     pub anim_counter: u32,
@@ -2939,6 +2951,7 @@ impl VM {
         self.init_compute(device)?;
         surface.ensure_gpu_with(device);
         self.upload_atlas_to_gpu_with(device, queue);
+        let c = self.camera3d;
 
         let u = ComputeSdfUniforms {
             background: self.background.into_array(),
@@ -2954,6 +2967,21 @@ impl VM {
             gp7: self.gp7.into_array(),
             gp8: self.gp8.into_array(),
             gp9: self.gp9.into_array(),
+            cam_pos: [c.pos.x, c.pos.y, c.pos.z, 0.0],
+            cam_fwd: [c.forward.x, c.forward.y, c.forward.z, 0.0],
+            cam_right: [c.right.x, c.right.y, c.right.z, 0.0],
+            cam_up: [c.up.x, c.up.y, c.up.z, 0.0],
+            cam_vfov_deg: c.vfov_deg,
+            cam_ortho_half_h: c.ortho_half_h,
+            cam_near: c.near,
+            cam_far: c.far,
+            cam_kind: match c.kind {
+                CameraKind::OrthoIso => 0,
+                CameraKind::OrbitPersp => 1,
+                CameraKind::FirstPersonPersp => 2,
+            },
+            _pad_cam_align: [0, 0, 0],
+            _pad_cam: [0, 0, 0, 0],
             data_len: (self.sdf_data.len().min(u32::MAX as usize)) as u32,
             vm_flags: self.vm_flags(),
             anim_counter: self.animation_counter as u32,
@@ -3074,6 +3102,19 @@ impl VM {
         }
 
         best_geo.map(|id| (id, best_pos, best_t))
+    }
+
+    /// Build a world-space ray from screen uv (0..1) using the current camera.
+    pub fn ray_from_uv(
+        &self,
+        fb_w: u32,
+        fb_h: u32,
+        screen_uv: [f32; 2],
+    ) -> Option<(Vec3<f32>, Vec3<f32>)> {
+        if fb_w == 0 || fb_h == 0 {
+            return None;
+        }
+        Some(camera_ray_from_uv(&self.camera3d, fb_w, fb_h, screen_uv))
     }
 
     fn build_scene_bvh_from(verts: &[Vert3DPod], indices: &[u32], leaf_size: u32) -> SceneBvhAccel {
@@ -3537,6 +3578,16 @@ fn mat3_inverse_f32(m: &Mat3<f32>) -> Option<Mat3<f32>> {
     out[(1, 2)] = m21;
     out[(2, 2)] = m22;
     Some(out)
+}
+
+/// Build a world-space ray from screen uv (0..1) using the current camera parameters.
+pub fn cpu_ray_from_uv(
+    cam: &Camera3D,
+    fb_w: u32,
+    fb_h: u32,
+    screen_uv: [f32; 2],
+) -> (Vec3<f32>, Vec3<f32>) {
+    camera_ray_from_uv(cam, fb_w, fb_h, screen_uv)
 }
 
 fn camera_ray_from_uv(
