@@ -61,10 +61,9 @@ final class MetalContainer: NSView {
     }
 
     private func toLogicalCoords(_ point: NSPoint) -> (CGFloat, CGFloat) {
-        let scale = window?.backingScaleFactor ?? metalLayer.contentsScale
-        // NSView origin is bottom-left; flip to top-left and convert to logical points.
-        let x = point.x / scale
-        let y = (bounds.height - point.y) / scale
+        // NSView event locations are already in logical points; flip to top-left.
+        let x = point.x
+        let y = bounds.height - point.y
         return (x, y)
     }
 
