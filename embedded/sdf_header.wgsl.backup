@@ -39,6 +39,8 @@ struct SdfDataBuffer {
 @group(0) @binding(4) var atlas_smp: sampler;
 
 fn sdf_data_len() -> u32 {
+  // Use runtime storage length (in bytes) and convert to vec4 count.
+fn sdf_data_len() -> u32 {
   // arrayLength returns the number of vec4<f32> elements, not bytes
   return arrayLength(&SDF_DATA.data);
 }
