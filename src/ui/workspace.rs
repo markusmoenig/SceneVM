@@ -1,4 +1,6 @@
-use crate::ui::{drawable::Drawable, event::UiAction, event::UiEvent, event::UiEventOutcome};
+use crate::ui::{
+    drawable::Drawable, event::UiAction, event::UiEvent, event::UiEventOutcome, text::TextCache,
+};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -16,6 +18,7 @@ impl NodeId {
 pub struct ViewContext<'a> {
     drawables: &'a mut Vec<Drawable>,
     current_layer: i32,
+    text_cache: &'a TextCache,
 }
 
 impl<'a> ViewContext<'a> {
@@ -27,11 +30,16 @@ impl<'a> ViewContext<'a> {
         ViewContext {
             drawables: self.drawables,
             current_layer: layer,
+            text_cache: self.text_cache,
         }
     }
 
     pub fn layer(&self) -> i32 {
         self.current_layer
+    }
+
+    pub fn text_cache(&self) -> &TextCache {
+        self.text_cache
     }
 }
 
@@ -99,27 +107,34 @@ impl Workspace {
     }
 
     /// Traverse roots and collect drawables.
-    pub fn build(&mut self) -> Vec<Drawable> {
+    pub fn build(&mut self, text_cache: &TextCache) -> Vec<Drawable> {
         let mut drawables = Vec::new();
         let roots = self.roots.clone();
         for root in roots {
-            self.build_node(root, &mut drawables, 0);
+            self.build_node(root, &mut drawables, 0, text_cache);
         }
         self.dirty = false;
         drawables
     }
 
-    fn build_node(&mut self, id: NodeId, out: &mut Vec<Drawable>, layer: i32) {
+    fn build_node(
+        &mut self,
+        id: NodeId,
+        out: &mut Vec<Drawable>,
+        layer: i32,
+        text_cache: &TextCache,
+    ) {
         let Some(node) = self.nodes.get_mut(&id) else {
             return;
         };
         let mut ctx = ViewContext {
             drawables: out,
             current_layer: layer,
+            text_cache,
         };
         node.view.build(&mut ctx);
         for child in node.children.clone() {
-            self.build_node(child, out, layer);
+            self.build_node(child, out, layer, text_cache);
         }
     }
 

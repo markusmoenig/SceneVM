@@ -23,6 +23,15 @@ pub enum Drawable {
         border_norm: f32,
         layer: i32,
     },
+    /// Text in logical coordinates (origin at top-left), size in logical pixels.
+    Text {
+        id: Uuid,
+        text: String,
+        origin: [f32; 2],
+        px_size: f32,
+        color: Vec4<f32>,
+        layer: i32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default)]

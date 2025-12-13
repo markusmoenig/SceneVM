@@ -7,6 +7,7 @@ mod drawable;
 mod event;
 mod renderer;
 mod style;
+mod text;
 mod widgets;
 mod workspace;
 
@@ -14,5 +15,6 @@ pub use drawable::{Drawable, UiColor, UiImage};
 pub use event::{UiAction, UiEvent, UiEventKind, UiEventOutcome};
 pub use renderer::UiRenderer;
 pub use style::{StyleId, StyleParams, StyleRegistry};
-pub use widgets::{Button, ButtonKind, ButtonStyle};
+pub use text::TextCache;
+pub use widgets::{Button, ButtonKind, ButtonStyle, HAlign, Label, LabelRect, VAlign};
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};

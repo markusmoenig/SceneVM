@@ -14,6 +14,7 @@ struct Style {
   border_norm: f32,
 };
 
+const STYLE_FLAG: f32 = 0.5; // params.b > 0.5 => style tile
 const VM_FLAG_SKIP_CLEAR: u32 = 1u;
 
 fn load_style(tile_index: u32) -> Style {
@@ -26,9 +27,40 @@ fn load_style(tile_index: u32) -> Style {
   let fill = textureSampleLevel(atlas_tex, atlas_smp, uv_fill, 0.0);
   let border = textureSampleLevel(atlas_tex, atlas_smp, uv_border, 0.0);
   let params = textureSampleLevel(atlas_mat_tex, atlas_smp, uv_params, 0.0);
-  let radius_norm = params.r; // 0..1
-  let border_norm = params.g; // 0..1
+  // params.r = widget_type (1=button), params.g = radius_norm, params.b = 255 (style flag), params.a = border_norm
+  let radius_norm = params.g; // 0..1
+  let border_norm = params.a; // 0..1
   return Style(fill, border, radius_norm, border_norm);
+}
+
+fn shade_style_px(tile_index: u32, local_uv: vec2<f32>, fb_size: vec2<u32>, background: vec4<f32>) -> vec4<f32> {
+  let style = load_style(tile_index);
+
+  // Standard rounded box SDF in UV space
+  let half = vec2<f32>(0.5, 0.5);
+  let r = style.radius_norm;
+
+  let p = abs(local_uv - half);
+  let shrink = half - vec2<f32>(r, r);
+  let d = p - shrink;
+  let dist = length(max(d, vec2<f32>(0.0, 0.0))) + min(max(d.x, d.y), 0.0) - r;
+
+  let border_w = style.border_norm;
+  let fw = max(1.0 / max(f32(fb_size.x), f32(fb_size.y)), 1e-3);
+  let body = 1.0 - smoothstep(0.0, fw, dist); // coverage mask 0..1
+
+  // Border should appear near the edge: when -border_w < dist < 0
+  // dist < -border_w: deep inside, use fill (border_band = 0)
+  // dist > -border_w: near edge or outside, use border (border_band = 1)
+  let border_band = 1.0 - smoothstep(-border_w - fw, -border_w + fw, dist);
+
+  let surf = mix(style.fill, style.border, border_band);
+
+  let cov = clamp(body, 0.0, 1.0);
+  let rgb = mix(background.rgb, surf.rgb, cov);
+  let a = mix(background.a, surf.a, cov);
+
+  return vec4<f32>(rgb, a);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -82,38 +114,29 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let uv2 = verts.data[i2].uv;
     let uv = w.x * uv0 + w.y * uv1 + w.z * uv2;
 
-    // Sample style (all verts of a tri share the same tile_index)
-    let style = load_style(verts.data[i0].tile_index);
+    let tile_idx = verts.data[i0].tile_index;
+    let frame = sv_tile_frame(tile_idx);
+    let atlas_uv = frame.ofs + uv * frame.scale;
+    let params = textureSampleLevel(atlas_mat_tex, atlas_smp, atlas_uv, 0.0);
+    let is_style = params.b > STYLE_FLAG;
 
-    // Local UV inside the quad (assumed normalized 0..1 from vertex UVs)
-    let local = uv;
-
-    // Rounded rect SDF in normalized space
-    let half = vec2<f32>(0.5, 0.5);
-    let r = style.radius_norm;
-    let shrink = half - vec2<f32>(r, r);
-    let d = abs(local - half) - shrink;
-    let dist = length(max(d, vec2<f32>(0.0, 0.0))) + min(max(d.x, d.y), 0.0) - r;
-
-    let border_w = style.border_norm;
-    let fw = max(1.0 / max(f32(U.fb_size.x), f32(U.fb_size.y)), 1e-3);
-    let body = 1.0 - smoothstep(0.0, fw, dist); // coverage mask 0..1
-    let border_band = smoothstep(-border_w - fw, -border_w, dist) - smoothstep(border_w, border_w + fw, dist);
-
-    let fill_col = style.fill;
-    let border_col = style.border;
-    let surf = mix(border_col, fill_col, border_band);
-
-    let cov = clamp(body, 0.0, 1.0);
-    let rgb = mix(U.background.rgb, surf.rgb, cov);
-    let a = mix(U.background.a, surf.a, cov);
-
-    out_col = vec4<f32>(rgb, a);
-    covered = true;
-    break;
+    if (is_style) {
+      let col = shade_style_px(tile_idx, uv, U.fb_size, U.background);
+      out_col = col;
+      covered = true;
+      break;
+    } else {
+      let col = textureSampleLevel(atlas_tex, atlas_smp, atlas_uv, 0.0);
+      if (col.a < 0.01) { continue; }
+      out_col = col;
+      covered = true;
+      break;
+    }
   }
 
   if (covered) {
     sv_write(px, py, out_col);
+  } else if (!skip_clear) {
+    sv_write(px, py, U.background);
   }
 }

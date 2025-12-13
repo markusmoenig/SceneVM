@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vek::Vec4;
 
-use super::{
+use crate::ui::{
     drawable::Drawable,
     event::{UiAction, UiEvent, UiEventKind, UiEventOutcome},
     workspace::{UiView, ViewContext},
@@ -20,8 +20,8 @@ pub struct ButtonStyle {
     pub border: Vec4<f32>,
     pub pressed_fill: Vec4<f32>,
     pub pressed_border: Vec4<f32>,
-    pub radius_norm: f32,
-    pub border_norm: f32,
+    pub radius_px: f32, // Corner radius in pixels
+    pub border_px: f32, // Border width in pixels
     pub layer: i32,
 }
 
@@ -33,8 +33,8 @@ impl Default for ButtonStyle {
             border: Vec4::new(0.0, 0.0, 0.0, 0.0),
             pressed_fill: Vec4::new(0.12, 0.12, 0.15, 1.0),
             pressed_border: Vec4::new(0.0, 0.0, 0.0, 0.0),
-            radius_norm: 0.1,
-            border_norm: 0.0,
+            radius_px: 4.0,
+            border_px: 0.0,
             layer: 10,
         }
     }
@@ -98,13 +98,15 @@ impl UiView for Button {
             }
             _ => (self.style.fill, self.style.border),
         };
+        let [_x, _y, w, h] = self.style.rect;
+        let min_dim = w.min(h);
         ctx.push(Drawable::Rect {
             id: self.id,
             rect: self.style.rect,
             fill,
             border,
-            radius_norm: self.style.radius_norm,
-            border_norm: self.style.border_norm,
+            radius_norm: self.style.radius_px / min_dim,
+            border_norm: self.style.border_px / min_dim,
             layer: self.style.layer,
         });
     }

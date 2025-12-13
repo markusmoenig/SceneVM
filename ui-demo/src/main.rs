@@ -2,7 +2,8 @@ use scenevm::Embedded;
 use scenevm::app_trait::{SceneVMApp, SceneVMRenderCtx};
 use scenevm::{Atom, RenderMode, SceneVM};
 use scenevm::{
-    Button, ButtonKind, ButtonStyle, UiAction, UiEvent, UiEventKind, UiRenderer, Workspace,
+    Button, ButtonKind, ButtonStyle, LabelRect, UiAction, UiEvent, UiEventKind, UiRenderer,
+    Workspace,
 };
 use vek::Vec4;
 
@@ -40,19 +41,31 @@ impl SceneVMApp for UiDemo {
         }
 
         // Add a basic button to the workspace
+        let button_rect = [40.0, 40.0, 180.0, 56.0];
         let button = Button::new(ButtonStyle {
-            rect: [40.0, 40.0, 180.0, 56.0],
+            rect: button_rect,
             fill: Vec4::new(0.20, 0.25, 0.35, 1.0),
             border: Vec4::new(0.05, 0.08, 0.12, 1.0),
             pressed_fill: Vec4::new(0.15, 0.18, 0.24, 1.0),
             pressed_border: Vec4::new(0.04, 0.07, 0.10, 1.0),
-            radius_norm: 0.15,
-            border_norm: 0.015,
+            radius_px: 4.0,
+            border_px: 1.0,
             layer: 10,
         })
         .with_kind(ButtonKind::Toggle);
         let node = self.workspace.add_view(button);
         self.workspace.add_root(node);
+
+        // Add a centered label inside the button
+        let label = LabelRect::new(
+            "Toggle Me",
+            button_rect,
+            18.0,
+            Vec4::new(0.9, 0.9, 0.95, 1.0),
+        )
+        .with_layer(11); // Layer above button
+        let label_node = self.workspace.add_view(label);
+        self.workspace.add_root(label_node);
     }
 
     fn needs_update(&mut self) -> bool {
@@ -60,7 +73,8 @@ impl SceneVMApp for UiDemo {
     }
 
     fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx) {
-        let drawables = self.workspace.build();
+        let text_cache = self.renderer.text_cache();
+        let drawables = self.workspace.build(text_cache);
         self.renderer.render(vm.active_vm_mut(), &drawables);
 
         for action in self.workspace.take_actions() {

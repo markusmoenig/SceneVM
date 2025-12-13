@@ -37,8 +37,8 @@ pub struct Embedded;
 
 #[cfg(feature = "ui")]
 pub use crate::ui::{
-    Button, ButtonKind, ButtonStyle, Drawable, NodeId, UiAction, UiEvent, UiEventKind, UiRenderer,
-    UiView, ViewContext, Workspace,
+    Button, ButtonKind, ButtonStyle, Drawable, HAlign, Label, LabelRect, NodeId, UiAction, UiEvent,
+    UiEventKind, UiRenderer, UiView, VAlign, ViewContext, Workspace,
 };
 pub use crate::{
     app_trait::{SceneVMApp, SceneVMRenderCtx},
@@ -1599,6 +1599,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
     let mut ctx: Option<NativeRenderCtx> = None;
     let mut cursor_pos: PhysicalPosition<f64> = PhysicalPosition { x: 0.0, y: 0.0 };
     let apply_logical_scale = |vm_ref: &mut SceneVM, scale: f64| {
+        // Scale logical coordinates into the framebuffer when hi-dpi.
         let s = scale as f32;
         let m = Mat3::<f32>::new(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 1.0);
         vm_ref.execute(Atom::SetTransform2D(m));

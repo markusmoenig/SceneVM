@@ -55,12 +55,15 @@ impl StyleRegistry {
         let mut color_pixels = Vec::from(fill);
         color_pixels.extend_from_slice(&border);
 
-        // material: texel0.r = radius_norm*255, texel0.g = border_norm*255
-        let r = (params.radius_norm.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let g = (params.border_norm.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let mat_tex0 = [r, g, 0, 0];
+        // material: texel0.r = widget_type (1=button), texel0.g = radius_norm*255,
+        //           texel0.b = 255 marks "style" tile, texel0.a = border_norm*255
+        let widget_type = 1u8; // 1 = button/rounded rect
+        let radius = (params.radius_norm.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let border = (params.border_norm.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let mat_tex0 = [widget_type, radius, 255, border];
+        let mat_tex1 = [widget_type, radius, 255, border]; // Both texels need same data
         let mut mat_pixels = Vec::from(mat_tex0);
-        mat_pixels.extend_from_slice(&[0, 0, 0, 0]); // second texel unused
+        mat_pixels.extend_from_slice(&mat_tex1);
 
         vm.execute(Atom::AddTile {
             id: tile_id,
