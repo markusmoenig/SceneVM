@@ -175,6 +175,11 @@ pub enum Atom {
     },
     /// Build the atlas for all frames
     BuildAtlas,
+    /// Override atlas dimensions (default is 4096x4096). Rebuilds atlas on next build/upload.
+    SetAtlasSize {
+        width: u32,
+        height: u32,
+    },
     /// Add a polygon (world coords) that references a tile by UUID into the CURRENT chunk; indices are local to the chunk.
     AddPoly {
         poly: Poly2D,
@@ -1397,6 +1402,13 @@ impl VM {
             }
             Atom::BuildAtlas => {
                 self.build_atlas();
+                self.mark_all_geometry_dirty();
+            }
+            Atom::SetAtlasSize { width, height } => {
+                let w = width.max(1);
+                let h = height.max(1);
+                self.shared_atlas.resize(w, h);
+                self.cached_atlas_layout_version = 0; // force metadata rebuild on next upload
                 self.mark_all_geometry_dirty();
             }
             Atom::AddPoly { poly } => {

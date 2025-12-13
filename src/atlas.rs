@@ -247,6 +247,20 @@ impl SharedAtlas {
         guard.tiles_map.len()
     }
 
+    pub fn resize(&self, width: u32, height: u32) {
+        let mut guard = self.inner.lock().unwrap();
+        if guard.atlas.width == width && guard.atlas.height == height {
+            return;
+        }
+        guard.atlas = Texture::new(width, height);
+        guard.atlas_material = Texture::new(width, height);
+        guard.atlas_dirty = true;
+        guard.layout_dirty = true;
+        guard.atlas_map.clear();
+        guard.tiles_index_map.clear();
+        guard.layout_version = guard.layout_version.wrapping_add(1);
+    }
+
     pub fn inner_arc(&self) -> Arc<Mutex<SharedAtlasInner>> {
         Arc::clone(&self.inner)
     }
