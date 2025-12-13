@@ -22,3 +22,9 @@ pub use widgets::{
     Button, ButtonKind, ButtonStyle, HAlign, Label, LabelRect, Slider, SliderStyle, VAlign,
 };
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};
+
+/// Helper function to create empty material data for non-style tiles.
+/// Use this when adding image tiles that don't need style rendering.
+pub fn create_tile_material(width: u32, height: u32) -> Vec<u8> {
+    vec![0u8; (width * height * 4) as usize]
+}

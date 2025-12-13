@@ -58,7 +58,7 @@ pub mod prelude {
     pub use crate::ui::{
         Alignment, Button, ButtonKind, ButtonStyle, Drawable, HAlign, HStack, Label, LabelRect,
         NodeId, Slider, SliderStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView, VAlign,
-        VStack, ViewContext, Workspace,
+        VStack, ViewContext, Workspace, create_tile_material,
     };
 
     pub use vek::{Mat3, Mat4, Vec2, Vec3, Vec4};

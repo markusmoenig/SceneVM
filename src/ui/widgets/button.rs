@@ -60,6 +60,9 @@ pub struct Button {
     render_id: Uuid, // For drawable tracking
     pub style: ButtonStyle,
     pub kind: ButtonKind,
+    pub tile_id: Option<Uuid>, // Optional texture tile for normal state
+    pub pressed_tile_id: Option<Uuid>, // Optional texture tile for pressed/selected state
+    pub tile_offset: f32,      // Offset in pixels for the tile inside the button
     toggled: bool,
     state: ButtonState,
     active_pointer: Option<u32>,
@@ -72,6 +75,9 @@ impl Button {
             render_id: Uuid::new_v4(),
             style,
             kind: ButtonKind::Momentary,
+            tile_id: None,
+            pressed_tile_id: None,
+            tile_offset: 0.0,
             toggled: false,
             state: ButtonState::Idle,
             active_pointer: None,
@@ -86,6 +92,36 @@ impl Button {
     pub fn with_kind(mut self, kind: ButtonKind) -> Self {
         self.kind = kind;
         self
+    }
+
+    pub fn with_tile(mut self, tile_id: Uuid) -> Self {
+        self.tile_id = Some(tile_id);
+        self
+    }
+
+    pub fn with_pressed_tile(mut self, tile_id: Uuid) -> Self {
+        self.pressed_tile_id = Some(tile_id);
+        self
+    }
+
+    pub fn with_tile_offset(mut self, offset: f32) -> Self {
+        self.tile_offset = offset;
+        self
+    }
+
+    pub fn set_toggled(&mut self, toggled: bool) {
+        if self.kind == ButtonKind::Toggle {
+            self.toggled = toggled;
+            self.state = if toggled {
+                ButtonState::On
+            } else {
+                ButtonState::Idle
+            };
+        }
+    }
+
+    pub fn is_toggled(&self) -> bool {
+        self.toggled
     }
 
     fn hit(&self, pos: [f32; 2]) -> bool {
@@ -111,6 +147,8 @@ impl UiView for Button {
             }
             _ => (self.style.fill, self.style.border),
         };
+
+        // Draw background
         ctx.push(Drawable::Rect {
             id: self.render_id,
             rect: self.style.rect,
@@ -120,6 +158,30 @@ impl UiView for Button {
             border_px: self.style.border_px,
             layer: self.style.layer,
         });
+
+        // Choose tile based on state
+        let tile_to_render = match self.state {
+            ButtonState::Pressed | ButtonState::On => self.pressed_tile_id.or(self.tile_id),
+            _ => self.tile_id,
+        };
+
+        // Draw texture/tile if provided
+        if let Some(tile_id) = tile_to_render {
+            let [x, y, w, h] = self.style.rect;
+            let offset = self.tile_offset;
+
+            // Apply offset to the tile rect
+            let tile_rect = [x + offset, y + offset, w - offset * 2.0, h - offset * 2.0];
+
+            ctx.push(Drawable::Quad {
+                id: Uuid::new_v4(),
+                tile_id,
+                rect: tile_rect,
+                uv: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                layer: self.style.layer + 1,
+                tint: Vec4::new(1.0, 1.0, 1.0, 1.0),
+            });
+        }
     }
 
     fn handle_event(&mut self, evt: &UiEvent) -> UiEventOutcome {

@@ -35,6 +35,68 @@ impl SceneVMApp for UiDemo {
             }
         }
 
+        // Create a test tile with a gradient pattern to test offset
+        let test_tile_id = uuid::Uuid::new_v4();
+        let tile_size = 64;
+        let mut pixels = vec![0u8; tile_size * tile_size * 4];
+        for y in 0..tile_size {
+            for x in 0..tile_size {
+                let idx = (y * tile_size + x) * 4;
+                // Create a gradient pattern - red to blue gradient
+                pixels[idx] = ((x as f32 / tile_size as f32) * 255.0) as u8; // R
+                pixels[idx + 1] = 128; // G
+                pixels[idx + 2] = ((y as f32 / tile_size as f32) * 255.0) as u8; // B
+                pixels[idx + 3] = 255; // A
+
+                // Add a white border to see the edges clearly
+                if x == 0 || x == tile_size - 1 || y == 0 || y == tile_size - 1 {
+                    pixels[idx] = 255;
+                    pixels[idx + 1] = 255;
+                    pixels[idx + 2] = 255;
+                }
+            }
+        }
+        // Create material frame with zeros (non-style tile)
+        let mat_pixels = vec![0u8; tile_size * tile_size * 4];
+
+        vm.execute(Atom::AddTile {
+            id: test_tile_id,
+            width: tile_size as u32,
+            height: tile_size as u32,
+            frames: vec![pixels],
+            material_frames: Some(vec![mat_pixels.clone()]),
+        });
+
+        // Create a pressed state tile with inverted gradient
+        let pressed_tile_id = uuid::Uuid::new_v4();
+        let mut pressed_pixels = vec![0u8; tile_size * tile_size * 4];
+        for y in 0..tile_size {
+            for x in 0..tile_size {
+                let idx = (y * tile_size + x) * 4;
+                // Inverted gradient - blue to red
+                pressed_pixels[idx] = ((y as f32 / tile_size as f32) * 255.0) as u8; // R
+                pressed_pixels[idx + 1] = 200; // G
+                pressed_pixels[idx + 2] = ((x as f32 / tile_size as f32) * 255.0) as u8; // B
+                pressed_pixels[idx + 3] = 255; // A
+
+                // Add a yellow border for pressed state
+                if x == 0 || x == tile_size - 1 || y == 0 || y == tile_size - 1 {
+                    pressed_pixels[idx] = 255;
+                    pressed_pixels[idx + 1] = 255;
+                    pressed_pixels[idx + 2] = 0;
+                }
+            }
+        }
+        vm.execute(Atom::AddTile {
+            id: pressed_tile_id,
+            width: tile_size as u32,
+            height: tile_size as u32,
+            frames: vec![pressed_pixels],
+            material_frames: Some(vec![mat_pixels]),
+        });
+
+        vm.execute(Atom::BuildAtlas);
+
         // Add a basic button to the workspace
         let button_rect = [40.0, 40.0, 180.0, 56.0];
         let button = Button::new(ButtonStyle {
@@ -62,6 +124,25 @@ impl SceneVMApp for UiDemo {
         .with_layer(11); // Layer above button
         let label_node = self.workspace.add_view(label);
         self.workspace.add_root(label_node);
+
+        // Add an image button with the test tile and offset
+        let image_button = Button::new(ButtonStyle {
+            rect: [250.0, 40.0, 64.0, 64.0],
+            fill: Vec4::new(0.2, 0.2, 0.25, 1.0),
+            border: Vec4::new(0.4, 0.5, 0.7, 1.0),
+            pressed_fill: Vec4::new(0.3, 0.4, 0.5, 1.0),
+            pressed_border: Vec4::new(0.6, 0.7, 0.9, 1.0),
+            radius_px: 8.0,
+            border_px: 2.0,
+            layer: 10,
+        })
+        .with_id("image_button")
+        .with_kind(ButtonKind::Toggle)
+        .with_tile(test_tile_id)
+        .with_pressed_tile(pressed_tile_id) // Different tile when toggled
+        .with_tile_offset(4.0); // 4px offset inside the button
+        let image_button_node = self.workspace.add_view(image_button);
+        self.workspace.add_root(image_button_node);
 
         // Add a slider below the button
         let slider = Slider::new(
@@ -104,7 +185,18 @@ impl SceneVMApp for UiDemo {
         for action in self.workspace.take_actions() {
             match action {
                 UiAction::ButtonPressed(id) => println!("Button pressed: {id}"),
-                UiAction::ButtonToggled(id, on) => println!("Button toggled: {id} -> {on}"),
+                UiAction::ButtonToggled(id, on) => {
+                    println!("Button toggled: {id} -> {on}");
+
+                    // Example: sync image_button state with toggle_button
+                    if id == "toggle_button" {
+                        if let Some(img_btn) =
+                            self.workspace.find_view_mut::<Button>("image_button")
+                        {
+                            img_btn.set_toggled(on);
+                        }
+                    }
+                }
                 UiAction::SliderChanged(id, value) => {
                     if id == "main_slider" {
                         self.slider_value = value;
