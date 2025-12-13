@@ -5,6 +5,7 @@
 
 mod drawable;
 mod event;
+pub mod layouts;
 mod renderer;
 mod style;
 mod text;
@@ -13,11 +14,11 @@ mod workspace;
 
 pub use drawable::{Drawable, UiColor, UiImage};
 pub use event::{UiAction, UiEvent, UiEventKind, UiEventOutcome};
+pub use layouts::{Alignment, HStack, VStack};
 pub use renderer::UiRenderer;
 pub use style::{StyleId, StyleParams, StyleRegistry};
 pub use text::TextCache;
 pub use widgets::{
-    Alignment, Button, ButtonKind, ButtonStyle, HAlign, HStack, Label, LabelRect, Slider,
-    SliderStyle, VAlign, VStack,
+    Button, ButtonKind, ButtonStyle, HAlign, Label, LabelRect, Slider, SliderStyle, VAlign,
 };
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};

@@ -34,7 +34,8 @@ impl Default for SliderStyle {
 
 #[derive(Debug, Clone)]
 pub struct Slider {
-    pub id: Uuid,
+    pub id: String,
+    render_id: Uuid, // For drawable tracking
     pub style: SliderStyle,
     pub value: f32, // 0.0 to 1.0
     pub min: f32,
@@ -46,7 +47,8 @@ pub struct Slider {
 impl Slider {
     pub fn new(style: SliderStyle, min: f32, max: f32) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: String::new(),
+            render_id: Uuid::new_v4(),
             style,
             value: 0.5,
             min,
@@ -54,6 +56,11 @@ impl Slider {
             dragging: false,
             active_pointer: None,
         }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
     }
 
     pub fn with_value(mut self, value: f32) -> Self {
@@ -136,7 +143,7 @@ impl UiView for Slider {
         let r = self.style.thumb_radius;
         let thumb_size = r * 2.0;
         ctx.push(Drawable::Rect {
-            id: self.id,
+            id: self.render_id,
             rect: [tx - r, ty - r, thumb_size, thumb_size],
             fill: self.style.thumb_color,
             border: Vec4::new(0.0, 0.0, 0.0, 0.0),
@@ -156,7 +163,7 @@ impl UiView for Slider {
                     let mut outcome = UiEventOutcome::dirty();
                     if changed {
                         outcome.merge(UiEventOutcome::with_action(UiAction::SliderChanged(
-                            self.id,
+                            self.id.clone(),
                             self.get_value(),
                         )));
                     }
@@ -169,7 +176,7 @@ impl UiView for Slider {
                     if changed {
                         let mut outcome = UiEventOutcome::dirty();
                         outcome.merge(UiEventOutcome::with_action(UiAction::SliderChanged(
-                            self.id,
+                            self.id.clone(),
                             self.get_value(),
                         )));
                         return outcome;
@@ -184,5 +191,13 @@ impl UiView for Slider {
             }
         }
         UiEventOutcome::none()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn view_id(&self) -> &str {
+        &self.id
     }
 }

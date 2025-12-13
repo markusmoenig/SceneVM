@@ -25,6 +25,12 @@ pub struct ButtonStyle {
     pub layer: i32,
 }
 
+impl ButtonStyle {
+    pub fn with_id(self, id: impl Into<String>) -> Button {
+        Button::new(self).with_id(id)
+    }
+}
+
 impl Default for ButtonStyle {
     fn default() -> Self {
         Self {
@@ -50,7 +56,8 @@ enum ButtonState {
 
 #[derive(Debug, Clone)]
 pub struct Button {
-    pub id: Uuid,
+    pub id: String,
+    render_id: Uuid, // For drawable tracking
     pub style: ButtonStyle,
     pub kind: ButtonKind,
     toggled: bool,
@@ -61,13 +68,19 @@ pub struct Button {
 impl Button {
     pub fn new(style: ButtonStyle) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: String::new(),
+            render_id: Uuid::new_v4(),
             style,
             kind: ButtonKind::Momentary,
             toggled: false,
             state: ButtonState::Idle,
             active_pointer: None,
         }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
     }
 
     pub fn with_kind(mut self, kind: ButtonKind) -> Self {
@@ -99,7 +112,7 @@ impl UiView for Button {
             _ => (self.style.fill, self.style.border),
         };
         ctx.push(Drawable::Rect {
-            id: self.id,
+            id: self.render_id,
             rect: self.style.rect,
             fill,
             border,
@@ -131,7 +144,7 @@ impl UiView for Button {
                             });
                             if inside {
                                 outcome.merge(UiEventOutcome::with_action(
-                                    UiAction::ButtonPressed(self.id),
+                                    UiAction::ButtonPressed(self.id.clone()),
                                 ));
                             }
                             return outcome;
@@ -145,7 +158,7 @@ impl UiView for Button {
                                     ButtonState::Hover
                                 });
                                 outcome.merge(UiEventOutcome::with_action(
-                                    UiAction::ButtonToggled(self.id, self.toggled),
+                                    UiAction::ButtonToggled(self.id.clone(), self.toggled),
                                 ));
                                 return outcome;
                             } else {
@@ -185,5 +198,13 @@ impl UiView for Button {
             }
         }
         UiEventOutcome::none()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn view_id(&self) -> &str {
+        &self.id
     }
 }

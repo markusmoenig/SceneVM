@@ -52,6 +52,10 @@ impl UiView for VStack {
         // VStack doesn't draw anything itself, it just arranges children
         // Child layout is handled by the workspace when building the tree
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,5 +102,9 @@ impl UiView for HStack {
     fn build(&mut self, _ctx: &mut ViewContext) {
         // HStack doesn't draw anything itself, it just arranges children
         // Child layout is handled by the workspace when building the tree
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }

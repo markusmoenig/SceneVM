@@ -35,6 +35,35 @@ use rust_embed::RustEmbed;
 #[exclude = "*.DS_Store"]
 pub struct Embedded;
 
+pub mod prelude {
+    //! Prelude module with commonly used types for SceneVM applications
+
+    pub use crate::{
+        Embedded, SceneVM, SceneVMError, SceneVMResult,
+        app_trait::{SceneVMApp, SceneVMRenderCtx},
+        atlas::{AtlasEntry, SharedAtlas},
+        bbox2d::BBox2D,
+        camera3d::{Camera3D, CameraKind},
+        chunk::Chunk,
+        dynamic::{DynamicKind, DynamicObject, RepeatMode},
+        intodata::IntoDataInput,
+        light::{Light, LightType},
+        poly2d::Poly2D,
+        poly3d::Poly3D,
+        texture::Texture,
+        vm::{Atom, GeoId, LineStrip2D, RenderMode, VM},
+    };
+
+    #[cfg(feature = "ui")]
+    pub use crate::ui::{
+        Alignment, Button, ButtonKind, ButtonStyle, Drawable, HAlign, HStack, Label, LabelRect,
+        NodeId, Slider, SliderStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView, VAlign,
+        VStack, ViewContext, Workspace,
+    };
+
+    pub use vek::{Mat3, Mat4, Vec2, Vec3, Vec4};
+}
+
 #[cfg(feature = "ui")]
 pub use crate::ui::{
     Alignment, Button, ButtonKind, ButtonStyle, Drawable, HAlign, HStack, Label, LabelRect, NodeId,

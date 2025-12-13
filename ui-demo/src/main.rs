@@ -1,18 +1,8 @@
-use scenevm::Embedded;
-use scenevm::app_trait::{SceneVMApp, SceneVMRenderCtx};
-use scenevm::{Atom, RenderMode, SceneVM};
-use scenevm::{
-    Button, ButtonKind, ButtonStyle, Label, LabelRect, NodeId, Slider, SliderStyle, UiAction,
-    UiEvent, UiEventKind, UiRenderer, Workspace,
-};
-use uuid::Uuid;
-use vek::Vec4;
+use scenevm::prelude::*;
 
 struct UiDemo {
     workspace: Workspace,
     renderer: UiRenderer,
-    slider_id: Option<Uuid>,
-    slider_label_node: Option<NodeId>,
     slider_value: f32,
 }
 
@@ -21,8 +11,6 @@ impl UiDemo {
         Self {
             workspace: Workspace::new(),
             renderer: UiRenderer::new(),
-            slider_id: None,
-            slider_label_node: None,
             slider_value: 50.0,
         }
     }
@@ -59,6 +47,7 @@ impl SceneVMApp for UiDemo {
             border_px: 1.0,
             layer: 10,
         })
+        .with_id("toggle_button")
         .with_kind(ButtonKind::Toggle);
         let node = self.workspace.add_view(button);
         self.workspace.add_root(node);
@@ -88,8 +77,8 @@ impl SceneVMApp for UiDemo {
             0.0,
             100.0,
         )
+        .with_id("main_slider")
         .with_value(self.slider_value);
-        self.slider_id = Some(slider.id);
         let slider_node = self.workspace.add_view(slider);
         self.workspace.add_root(slider_node);
 
@@ -100,9 +89,9 @@ impl SceneVMApp for UiDemo {
             16.0,
             Vec4::new(0.9, 0.9, 0.95, 1.0),
         )
+        .with_id("slider_label")
         .with_layer(10);
         let slider_label_node = self.workspace.add_view(slider_label);
-        self.slider_label_node = Some(slider_label_node);
         self.workspace.add_root(slider_label_node);
     }
 
@@ -117,18 +106,11 @@ impl SceneVMApp for UiDemo {
                 UiAction::ButtonPressed(id) => println!("Button pressed: {id}"),
                 UiAction::ButtonToggled(id, on) => println!("Button toggled: {id} -> {on}"),
                 UiAction::SliderChanged(id, value) => {
-                    if Some(id) == self.slider_id {
+                    if id == "main_slider" {
                         self.slider_value = value;
-                        // Update just the label node with new text
-                        if let Some(label_node) = self.slider_label_node {
-                            let updated_label = Label::new(
-                                format!("Value: {:.1}", self.slider_value),
-                                [250.0, 126.0],
-                                16.0,
-                                Vec4::new(0.9, 0.9, 0.95, 1.0),
-                            )
-                            .with_layer(10);
-                            self.workspace.update_view(label_node, updated_label);
+                        // Update just the label text using its string ID
+                        if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
+                            label.set_text(format!("Value: {:.1}", self.slider_value));
                         }
                     }
                 }

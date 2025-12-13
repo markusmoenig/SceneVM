@@ -1,5 +1,3 @@
-use uuid::Uuid;
-
 /// Pointer/mouse/touch events in logical coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UiEventKind {
@@ -29,9 +27,9 @@ impl UiEvent {
 /// Actions emitted by UI elements.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
-    ButtonPressed(Uuid),
-    ButtonToggled(Uuid, bool),
-    SliderChanged(Uuid, f32),
+    ButtonPressed(String),
+    ButtonToggled(String, bool),
+    SliderChanged(String, f32),
 }
 
 /// Result of handling an event: whether a view dirtied itself and any actions.

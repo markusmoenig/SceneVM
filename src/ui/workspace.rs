@@ -2,6 +2,7 @@ use crate::ui::{
     drawable::Drawable, event::UiAction, event::UiEvent, event::UiEventOutcome, text::TextCache,
 };
 use rustc_hash::FxHashMap;
+use std::any::Any;
 use uuid::Uuid;
 
 /// Identifier for nodes in the UI workspace.
@@ -44,10 +45,14 @@ impl<'a> ViewContext<'a> {
 }
 
 /// Trait implemented by UI views to emit drawables.
-pub trait UiView {
+pub trait UiView: Any {
     fn build(&mut self, ctx: &mut ViewContext);
     fn handle_event(&mut self, _evt: &UiEvent) -> UiEventOutcome {
         UiEventOutcome::none()
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn view_id(&self) -> &str {
+        ""
     }
 }
 
@@ -181,5 +186,28 @@ impl Workspace {
             node.view = Box::new(view);
             self.dirty = true;
         }
+    }
+
+    /// Get mutable access to a view and mark workspace as dirty.
+    /// Returns None if the node doesn't exist or the type doesn't match.
+    pub fn get_view_mut<V: UiView + 'static>(&mut self, id: NodeId) -> Option<&mut V> {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            self.dirty = true;
+            node.view.as_any_mut().downcast_mut::<V>()
+        } else {
+            None
+        }
+    }
+
+    /// Find a view by its string ID and return mutable access.
+    /// Returns None if no view with that ID exists or the type doesn't match.
+    pub fn find_view_mut<V: UiView + 'static>(&mut self, id: &str) -> Option<&mut V> {
+        for node in self.nodes.values_mut() {
+            if node.view.view_id() == id {
+                self.dirty = true;
+                return node.view.as_any_mut().downcast_mut::<V>();
+            }
+        }
+        None
     }
 }
