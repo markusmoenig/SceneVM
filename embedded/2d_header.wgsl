@@ -16,6 +16,7 @@ struct U2D {
   vm_flags: u32,
   anim_counter: u32,
   _pad_lights: u32,
+  palette: array<vec4<f32>, 256>,
 };
 
 @group(0) @binding(0) var<uniform> U: U2D;

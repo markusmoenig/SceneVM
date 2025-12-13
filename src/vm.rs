@@ -242,6 +242,8 @@ pub enum Atom {
     SetGP9(Vec4<f32>),
     /// Switch between 2D/3D/SDF compute drawing
     SetRenderMode(RenderMode),
+    /// Set a 256-entry color palette available in shaders (vec4<f32> entries).
+    SetPalette(Vec<Vec4<f32>>),
     /// Set a 2D transform (Mat3) applied on CPU to polygon vertices before 2D compute draw
     SetTransform2D(Mat3<f32>),
     /// Set a 3D transform (Mat4) applied on CPU to polygon vertices before 3D compute draw
@@ -419,6 +421,7 @@ pub struct Compute2DUniforms {
     pub vm_flags: u32,
     pub anim_counter: u32,
     pub _pad_lights: u32,
+    pub palette: [[f32; 4]; 256],
 }
 
 #[repr(C)]
@@ -462,6 +465,7 @@ pub struct Compute3DUniforms {
     _pad_cam: [u32; 3],
 
     pub _pad_tail: [u32; 4],
+    pub palette: [[f32; 4]; 256],
 }
 
 #[repr(C)]
@@ -496,6 +500,7 @@ pub struct ComputeSdfUniforms {
     pub vm_flags: u32,
     pub anim_counter: u32,
     pub _pad_tail: u32,
+    pub palette: [[f32; 4]; 256],
 }
 
 #[repr(C)]
@@ -572,6 +577,8 @@ pub struct VM {
     pub source_sdf: String,
     pub sdf_data: Vec<[f32; 4]>,
     pub sdf_data_dirty: bool,
+    pub palette: [[f32; 4]; 256],
+    pub palette_dirty: bool,
 
     pub transform2d: Mat3<f32>,
     pub transform3d: Mat4<f32>,
@@ -1237,6 +1244,8 @@ impl VM {
             render_mode: RenderMode::Compute2D,
             gpu: None,
             background: Vec4::new(1.0, 0.8, 0.2, 1.0),
+            palette: [[0.0; 4]; 256],
+            palette_dirty: true,
             gp0: Vec4::new(0.0, 0.0, 0.0, 0.0),
             gp1: Vec4::new(0.0, 0.0, 0.0, 0.0),
             gp2: Vec4::new(0.0, 0.0, 0.0, 0.0),
@@ -1403,6 +1412,14 @@ impl VM {
             Atom::BuildAtlas => {
                 self.build_atlas();
                 self.mark_all_geometry_dirty();
+            }
+            Atom::SetPalette(p) => {
+                let mut out = [[0.0f32; 4]; 256];
+                for (dst, src) in out.iter_mut().zip(p.iter().take(256)) {
+                    *dst = src.into_array();
+                }
+                self.palette = out;
+                self.palette_dirty = true;
             }
             Atom::SetAtlasSize { width, height } => {
                 let w = width.max(1);
@@ -2368,6 +2385,7 @@ impl VM {
             vm_flags: self.vm_flags(),
             anim_counter: self.animation_counter as u32,
             _pad_lights: 0,
+            palette: self.palette,
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u2d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
@@ -2637,6 +2655,7 @@ impl VM {
             },
             _pad_cam: [0, 0, 0],
             _pad_tail: [0, 0, 0, 0],
+            palette: self.palette,
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u3d_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
@@ -2998,6 +3017,7 @@ impl VM {
             vm_flags: self.vm_flags(),
             anim_counter: self.animation_counter as u32,
             _pad_tail: 0,
+            palette: self.palette,
         };
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u_sdf_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));

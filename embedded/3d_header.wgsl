@@ -26,6 +26,7 @@ struct U3D {
   cam_far:          f32,
   cam_kind: u32,         // 0=OrthoIso, 1=OrbitPersp, 2=FirstPersonPersp
   _pad_cam: vec3<u32>,
+  palette: array<vec4<f32>, 256>,
 };
 @group(0) @binding(0) var<uniform> U: U3D;
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
