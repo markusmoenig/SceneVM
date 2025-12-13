@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = [".", "scenegen", "run-wasm", "cornell", "unified-app"]
+members = [".", "scenegen", "run-wasm", "cornell", "unified-app", "ui-demo"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -54,9 +54,9 @@ web-sys = { version = "0.3", features = [
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [features]
-parallel = ["rayon"]
+ui = []
 
-default = ["parallel"]
+default = []
 
 [lib]
 crate-type = ["rlib", "staticlib"]

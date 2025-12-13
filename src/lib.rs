@@ -10,6 +10,8 @@ pub mod light;
 pub mod poly2d;
 pub mod poly3d;
 pub mod texture;
+#[cfg(feature = "ui")]
+pub mod ui;
 pub mod vm;
 
 /// Error types for SceneVM operations
@@ -33,6 +35,11 @@ use rust_embed::RustEmbed;
 #[exclude = "*.DS_Store"]
 pub struct Embedded;
 
+#[cfg(feature = "ui")]
+pub use crate::ui::{
+    Button, ButtonKind, ButtonStyle, Drawable, NodeId, UiAction, UiEvent, UiEventKind, UiRenderer,
+    UiView, ViewContext, Workspace,
+};
 pub use crate::{
     app_trait::{SceneVMApp, SceneVMRenderCtx},
     atlas::{AtlasEntry, SharedAtlas},
@@ -63,6 +70,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use vek::Mat3;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
@@ -1590,6 +1598,11 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
     let mut vm: Option<SceneVM> = None;
     let mut ctx: Option<NativeRenderCtx> = None;
     let mut cursor_pos: PhysicalPosition<f64> = PhysicalPosition { x: 0.0, y: 0.0 };
+    let apply_logical_scale = |vm_ref: &mut SceneVM, scale: f64| {
+        let s = scale as f32;
+        let m = Mat3::<f32>::new(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 1.0);
+        vm_ref.execute(Atom::SetTransform2D(m));
+    };
     #[allow(deprecated)]
     event_loop.run(move |event, target| match event {
         Event::NewEvents(StartCause::Init) => {
@@ -1606,6 +1619,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
             let logical = size.to_logical::<f64>(scale);
             let logical_size = (logical.width.round() as u32, logical.height.round() as u32);
             let mut new_vm = SceneVM::new_with_window(&win);
+            apply_logical_scale(&mut new_vm, scale);
             let new_ctx = NativeRenderCtx::new(logical_size);
             app.init(&mut new_vm, logical_size);
             window = Some(win);
@@ -1627,6 +1641,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                                 (logical.width.round() as u32, logical.height.round() as u32);
                             ctx_ref.size = logical_size;
                             vm_ref.resize_window_surface(size.width, size.height);
+                            apply_logical_scale(vm_ref, scale);
                             app.resize(vm_ref, logical_size);
                         }
                         WindowEvent::ScaleFactorChanged {
@@ -1640,6 +1655,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                                 (logical.width.round() as u32, logical.height.round() as u32);
                             ctx_ref.size = logical_size;
                             vm_ref.resize_window_surface(size.width, size.height);
+                            apply_logical_scale(vm_ref, scale_factor);
                             app.resize(vm_ref, logical_size);
                         }
                         WindowEvent::CursorMoved { position, .. } => {

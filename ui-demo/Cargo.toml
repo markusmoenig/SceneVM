@@ -1,0 +1,8 @@
+[package]
+name = "ui-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scenevm = { path = "..", features = ["ui"] }
+vek = "0.17"
