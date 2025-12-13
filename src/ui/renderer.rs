@@ -63,8 +63,8 @@ impl UiRenderer {
                     rect,
                     fill,
                     border,
-                    radius_norm,
-                    border_norm,
+                    radius_px,
+                    border_px,
                     layer,
                     ..
                 } => {
@@ -72,8 +72,8 @@ impl UiRenderer {
                     let style = StyleParams {
                         fill: *fill,
                         border: *border,
-                        radius_norm: *radius_norm,
-                        border_norm: *border_norm,
+                        radius_px: *radius_px,
+                        border_px: *border_px,
                     };
                     let style_id = self.styles.ensure_style(vm, style);
                     let tile_id = self.styles.tile_id(style_id).expect("missing style tile");

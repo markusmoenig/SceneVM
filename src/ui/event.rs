@@ -31,6 +31,7 @@ impl UiEvent {
 pub enum UiAction {
     ButtonPressed(Uuid),
     ButtonToggled(Uuid, bool),
+    SliderChanged(Uuid, f32),
 }
 
 /// Result of handling an event: whether a view dirtied itself and any actions.

@@ -37,8 +37,9 @@ pub struct Embedded;
 
 #[cfg(feature = "ui")]
 pub use crate::ui::{
-    Button, ButtonKind, ButtonStyle, Drawable, HAlign, Label, LabelRect, NodeId, UiAction, UiEvent,
-    UiEventKind, UiRenderer, UiView, VAlign, ViewContext, Workspace,
+    Alignment, Button, ButtonKind, ButtonStyle, Drawable, HAlign, HStack, Label, LabelRect, NodeId,
+    Slider, SliderStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView, VAlign, VStack,
+    ViewContext, Workspace,
 };
 pub use crate::{
     app_trait::{SceneVMApp, SceneVMRenderCtx},

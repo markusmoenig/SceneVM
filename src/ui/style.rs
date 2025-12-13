@@ -5,13 +5,13 @@ use vek::Vec4;
 use crate::{Atom, VM};
 
 /// Style parameters packed into a tiny atlas tile (2x1).
-/// `radius_norm` and `border_norm` are fractions of the min(rect_w, rect_h) in [0, 1].
+/// `radius_px` and `border_px` are in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StyleParams {
     pub fill: Vec4<f32>,
     pub border: Vec4<f32>,
-    pub radius_norm: f32,
-    pub border_norm: f32,
+    pub radius_px: f32,
+    pub border_px: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,11 +55,11 @@ impl StyleRegistry {
         let mut color_pixels = Vec::from(fill);
         color_pixels.extend_from_slice(&border);
 
-        // material: texel0.r = widget_type (1=button), texel0.g = radius_norm*255,
-        //           texel0.b = 255 marks "style" tile, texel0.a = border_norm*255
+        // material: texel0.r = widget_type (1=button), texel0.g = radius_px (clamped to 0-255),
+        //           texel0.b = 255 marks "style" tile, texel0.a = border_px (clamped to 0-255)
         let widget_type = 1u8; // 1 = button/rounded rect
-        let radius = (params.radius_norm.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let border = (params.border_norm.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let radius = params.radius_px.clamp(0.0, 255.0).round() as u8;
+        let border = params.border_px.clamp(0.0, 255.0).round() as u8;
         let mat_tex0 = [widget_type, radius, 255, border];
         let mat_tex1 = [widget_type, radius, 255, border]; // Both texels need same data
         let mut mat_pixels = Vec::from(mat_tex0);
@@ -102,7 +102,7 @@ fn to_key(p: StyleParams) -> StyleKey {
     StyleKey {
         fill: to_u8(p.fill),
         border: to_u8(p.border),
-        radius_q: (p.radius_norm.clamp(0.0, 1.0) * 255.0).round() as u8,
-        border_q: (p.border_norm.clamp(0.0, 1.0) * 255.0).round() as u8,
+        radius_q: p.radius_px.clamp(0.0, 255.0).round() as u8,
+        border_q: p.border_px.clamp(0.0, 255.0).round() as u8,
     }
 }

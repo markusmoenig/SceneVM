@@ -2,14 +2,18 @@ use scenevm::Embedded;
 use scenevm::app_trait::{SceneVMApp, SceneVMRenderCtx};
 use scenevm::{Atom, RenderMode, SceneVM};
 use scenevm::{
-    Button, ButtonKind, ButtonStyle, LabelRect, UiAction, UiEvent, UiEventKind, UiRenderer,
-    Workspace,
+    Button, ButtonKind, ButtonStyle, Label, LabelRect, NodeId, Slider, SliderStyle, UiAction,
+    UiEvent, UiEventKind, UiRenderer, Workspace,
 };
+use uuid::Uuid;
 use vek::Vec4;
 
 struct UiDemo {
     workspace: Workspace,
     renderer: UiRenderer,
+    slider_id: Option<Uuid>,
+    slider_label_node: Option<NodeId>,
+    slider_value: f32,
 }
 
 impl UiDemo {
@@ -17,6 +21,9 @@ impl UiDemo {
         Self {
             workspace: Workspace::new(),
             renderer: UiRenderer::new(),
+            slider_id: None,
+            slider_label_node: None,
+            slider_value: 50.0,
         }
     }
 }
@@ -48,7 +55,7 @@ impl SceneVMApp for UiDemo {
             border: Vec4::new(0.05, 0.08, 0.12, 1.0),
             pressed_fill: Vec4::new(0.15, 0.18, 0.24, 1.0),
             pressed_border: Vec4::new(0.04, 0.07, 0.10, 1.0),
-            radius_px: 4.0,
+            radius_px: 12.0,
             border_px: 1.0,
             layer: 10,
         })
@@ -66,6 +73,37 @@ impl SceneVMApp for UiDemo {
         .with_layer(11); // Layer above button
         let label_node = self.workspace.add_view(label);
         self.workspace.add_root(label_node);
+
+        // Add a slider below the button
+        let slider = Slider::new(
+            SliderStyle {
+                rect: [40.0, 120.0, 200.0, 32.0],
+                track_color: Vec4::new(0.15, 0.15, 0.18, 1.0),
+                fill_color: Vec4::new(0.3, 0.5, 0.8, 1.0),
+                thumb_color: Vec4::new(0.4, 0.6, 0.9, 1.0), // Blue color for thumb
+                thumb_radius: 12.0,
+                track_height: 6.0,
+                layer: 10,
+            },
+            0.0,
+            100.0,
+        )
+        .with_value(self.slider_value);
+        self.slider_id = Some(slider.id);
+        let slider_node = self.workspace.add_view(slider);
+        self.workspace.add_root(slider_node);
+
+        // Add a label for the slider (using fixed position Label, not LabelRect)
+        let slider_label = Label::new(
+            format!("Value: {:.1}", self.slider_value),
+            [250.0, 126.0],
+            16.0,
+            Vec4::new(0.9, 0.9, 0.95, 1.0),
+        )
+        .with_layer(10);
+        let slider_label_node = self.workspace.add_view(slider_label);
+        self.slider_label_node = Some(slider_label_node);
+        self.workspace.add_root(slider_label_node);
     }
 
     fn needs_update(&mut self) -> bool {
@@ -73,16 +111,34 @@ impl SceneVMApp for UiDemo {
     }
 
     fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx) {
-        let text_cache = self.renderer.text_cache();
-        let drawables = self.workspace.build(text_cache);
-        self.renderer.render(vm.active_vm_mut(), &drawables);
-
+        // Handle actions and update state
         for action in self.workspace.take_actions() {
             match action {
                 UiAction::ButtonPressed(id) => println!("Button pressed: {id}"),
                 UiAction::ButtonToggled(id, on) => println!("Button toggled: {id} -> {on}"),
+                UiAction::SliderChanged(id, value) => {
+                    if Some(id) == self.slider_id {
+                        self.slider_value = value;
+                        // Update just the label node with new text
+                        if let Some(label_node) = self.slider_label_node {
+                            let updated_label = Label::new(
+                                format!("Value: {:.1}", self.slider_value),
+                                [250.0, 126.0],
+                                16.0,
+                                Vec4::new(0.9, 0.9, 0.95, 1.0),
+                            )
+                            .with_layer(10);
+                            self.workspace.update_view(label_node, updated_label);
+                        }
+                    }
+                }
             }
         }
+
+        // Build drawables from workspace
+        let text_cache = self.renderer.text_cache();
+        let drawables = self.workspace.build(text_cache);
+        self.renderer.render(vm.active_vm_mut(), &drawables);
         let _ = ctx.present(vm);
     }
 

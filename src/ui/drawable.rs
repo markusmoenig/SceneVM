@@ -19,8 +19,8 @@ pub enum Drawable {
         rect: [f32; 4],
         fill: Vec4<f32>,
         border: Vec4<f32>,
-        radius_norm: f32,
-        border_norm: f32,
+        radius_px: f32,
+        border_px: f32,
         layer: i32,
     },
     /// Text in logical coordinates (origin at top-left), size in logical pixels.

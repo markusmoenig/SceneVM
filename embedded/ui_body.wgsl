@@ -2,7 +2,7 @@
 // Expects:
 // - atlas texel 0: fill color (rgba8)
 // - atlas texel 1: border color (rgba8)
-// - material texel 0: radius_norm (r), border_norm (g) in 0..1 (normalized to min dimension)
+// - material texel 0: radius_px, border_px in pixels
 
 // Uses bindings/types from 2d_header.wgsl (U2D, verts, tile_bins, tile_tris, atlas_tex, atlas_mat_tex, etc.).
 // Note: relies on the tiled 2D pipeline bindings already defined in the header; no bindings are re-declared here.
@@ -10,8 +10,8 @@
 struct Style {
   fill: vec4<f32>,
   border: vec4<f32>,
-  radius_norm: f32,
-  border_norm: f32,
+  radius_px: f32,
+  border_px: f32,
 };
 
 const STYLE_FLAG: f32 = 0.5; // params.b > 0.5 => style tile
@@ -27,34 +27,38 @@ fn load_style(tile_index: u32) -> Style {
   let fill = textureSampleLevel(atlas_tex, atlas_smp, uv_fill, 0.0);
   let border = textureSampleLevel(atlas_tex, atlas_smp, uv_border, 0.0);
   let params = textureSampleLevel(atlas_mat_tex, atlas_smp, uv_params, 0.0);
-  // params.r = widget_type (1=button), params.g = radius_norm, params.b = 255 (style flag), params.a = border_norm
-  let radius_norm = params.g; // 0..1
-  let border_norm = params.a; // 0..1
-  return Style(fill, border, radius_norm, border_norm);
+  // params.r = widget_type (1=button), params.g = radius_px (0-255), params.b = 255 (style flag), params.a = border_px (0-255)
+  let radius_px = params.g * 255.0; // Convert back from 0-1 to pixels
+  let border_px = params.a * 255.0; // Convert back from 0-1 to pixels
+  return Style(fill, border, radius_px, border_px);
 }
 
-fn shade_style_px(tile_index: u32, local_uv: vec2<f32>, fb_size: vec2<u32>, background: vec4<f32>) -> vec4<f32> {
+fn shade_style_px(tile_index: u32, local_uv: vec2<f32>, rect_size: vec2<f32>, fb_size: vec2<u32>, background: vec4<f32>) -> vec4<f32> {
   let style = load_style(tile_index);
 
-  // Standard rounded box SDF in UV space
-  let half = vec2<f32>(0.5, 0.5);
-  let r = style.radius_norm;
+  let radius_px = style.radius_px;
+  let border_px = style.border_px;
 
-  let p = abs(local_uv - half);
-  let shrink = half - vec2<f32>(r, r);
+  // Work in pixel space - convert UV to pixel position within rect
+  let pixel_pos = local_uv * rect_size;
+  let half_size = rect_size * 0.5;
+
+  // Rounded box SDF in pixel space
+  let p = abs(pixel_pos - half_size);
+  let shrink = half_size - vec2<f32>(radius_px, radius_px);
   let d = p - shrink;
-  let dist = length(max(d, vec2<f32>(0.0, 0.0))) + min(max(d.x, d.y), 0.0) - r;
+  let dist = length(max(d, vec2<f32>(0.0, 0.0))) + min(max(d.x, d.y), 0.0) - radius_px;
 
-  let border_w = style.border_norm;
-  let fw = max(1.0 / max(f32(fb_size.x), f32(fb_size.y)), 1e-3);
-  let body = 1.0 - smoothstep(0.0, fw, dist); // coverage mask 0..1
+  // Antialiasing in pixels
+  let fw = 1.0;
+  let body = 1.0 - smoothstep(0.0, fw, dist);
 
-  // Border should appear near the edge: when -border_w < dist < 0
-  // dist < -border_w: deep inside, use fill (border_band = 0)
-  // dist > -border_w: near edge or outside, use border (border_band = 1)
-  let border_band = 1.0 - smoothstep(-border_w - fw, -border_w + fw, dist);
-
-  let surf = mix(style.fill, style.border, border_band);
+  // Border calculation in pixel space - only apply if border_px > 0
+  var surf = style.fill;
+  if (border_px > 0.01) {
+    let border_band = 1.0 - smoothstep(-border_px - fw, -border_px + fw, dist);
+    surf = mix(style.fill, style.border, border_band);
+  }
 
   let cov = clamp(body, 0.0, 1.0);
   let rgb = mix(background.rgb, surf.rgb, cov);
@@ -121,7 +125,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let is_style = params.b > STYLE_FLAG;
 
     if (is_style) {
-      let col = shade_style_px(tile_idx, uv, U.fb_size, U.background);
+      // Calculate rect size from vertices (assumes axis-aligned quad)
+      let min_pos = min(min(p0, p1), p2);
+      let max_pos = max(max(p0, p1), p2);
+      let rect_size = max_pos - min_pos;
+
+      let col = shade_style_px(tile_idx, uv, rect_size, U.fb_size, U.background);
       out_col = col;
       covered = true;
       break;

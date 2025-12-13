@@ -98,15 +98,13 @@ impl UiView for Button {
             }
             _ => (self.style.fill, self.style.border),
         };
-        let [_x, _y, w, h] = self.style.rect;
-        let min_dim = w.min(h);
         ctx.push(Drawable::Rect {
             id: self.id,
             rect: self.style.rect,
             fill,
             border,
-            radius_norm: self.style.radius_px / min_dim,
-            border_norm: self.style.border_px / min_dim,
+            radius_px: self.style.radius_px,
+            border_px: self.style.border_px,
             layer: self.style.layer,
         });
     }

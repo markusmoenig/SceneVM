@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 scenevm = { path = "..", features = ["ui"] }
 vek = "0.17"
+uuid = "1.0"

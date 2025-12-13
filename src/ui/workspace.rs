@@ -174,4 +174,12 @@ impl Workspace {
     pub fn take_actions(&mut self) -> Vec<UiAction> {
         std::mem::take(&mut self.pending_actions)
     }
+
+    /// Replace a node's view with a new one and mark workspace as dirty.
+    pub fn update_view<V: UiView + 'static>(&mut self, id: NodeId, view: V) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.view = Box::new(view);
+            self.dirty = true;
+        }
+    }
 }

@@ -16,5 +16,8 @@ pub use event::{UiAction, UiEvent, UiEventKind, UiEventOutcome};
 pub use renderer::UiRenderer;
 pub use style::{StyleId, StyleParams, StyleRegistry};
 pub use text::TextCache;
-pub use widgets::{Button, ButtonKind, ButtonStyle, HAlign, Label, LabelRect, VAlign};
+pub use widgets::{
+    Alignment, Button, ButtonKind, ButtonStyle, HAlign, HStack, Label, LabelRect, Slider,
+    SliderStyle, VAlign, VStack,
+};
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};
