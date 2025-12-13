@@ -56,9 +56,11 @@ pub mod prelude {
 
     #[cfg(feature = "ui")]
     pub use crate::ui::{
-        Alignment, Button, ButtonKind, ButtonStyle, Drawable, HAlign, HStack, Label, LabelRect,
-        NodeId, Slider, SliderStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView, VAlign,
-        VStack, ViewContext, Workspace, create_tile_material,
+        Alignment, Button, ButtonKind, ButtonStyle, Drawable, HAlign, HStack, Image, ImageStyle,
+        Label, LabelRect, NodeId, ParamList, ParamListStyle, PopupAlignment, Slider, SliderStyle,
+        Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle, UiAction, UiEvent,
+        UiEventKind, UiRenderer, UiView, VAlign, VStack, ViewContext, Workspace,
+        create_tile_material,
     };
 
     pub use vek::{Mat3, Mat4, Vec2, Vec3, Vec4};
@@ -66,9 +68,10 @@ pub mod prelude {
 
 #[cfg(feature = "ui")]
 pub use crate::ui::{
-    Alignment, Button, ButtonKind, ButtonStyle, Drawable, HAlign, HStack, Label, LabelRect, NodeId,
-    Slider, SliderStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView, VAlign, VStack,
-    ViewContext, Workspace,
+    Alignment, Button, ButtonKind, ButtonStyle, Drawable, HAlign, HStack, Image, ImageStyle, Label,
+    LabelRect, NodeId, ParamList, ParamListStyle, PopupAlignment, Slider, SliderStyle, Toolbar,
+    ToolbarOrientation, ToolbarSeparator, ToolbarStyle, UiAction, UiEvent, UiEventKind, UiRenderer,
+    UiView, VAlign, VStack, ViewContext, Workspace,
 };
 pub use crate::{
     app_trait::{SceneVMApp, SceneVMRenderCtx},

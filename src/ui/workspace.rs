@@ -51,6 +51,7 @@ pub trait UiView: Any {
         UiEventOutcome::none()
     }
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn as_any(&self) -> &dyn Any;
     fn view_id(&self) -> &str {
         ""
     }
@@ -118,6 +119,10 @@ impl Workspace {
         for root in roots {
             self.build_node(root, &mut drawables, 0, text_cache);
         }
+
+        // After rendering all normal views, render popups on top
+        self.build_popups(&mut drawables, text_cache);
+
         self.dirty = false;
         drawables
     }
@@ -150,6 +155,13 @@ impl Workspace {
         for root in roots {
             outcome.merge(self.dispatch_node(root, evt));
         }
+
+        // Also dispatch events to visible popup contents
+        let popup_nodes = self.get_visible_popup_nodes();
+        for popup_id in popup_nodes {
+            outcome.merge(self.dispatch_node(popup_id, evt));
+        }
+
         if outcome.dirty {
             self.dirty = true;
         }
@@ -209,5 +221,169 @@ impl Workspace {
             }
         }
         None
+    }
+
+    /// Check if a point is inside any button with an open popup
+    /// Returns true if the point is inside a button with popup or inside the popup itself
+    pub fn is_inside_popup_area(&self, pos: [f32; 2], popup_rect: [f32; 4]) -> bool {
+        let [px, py, pw, ph] = popup_rect;
+        pos[0] >= px && pos[0] <= px + pw && pos[1] >= py && pos[1] <= py + ph
+    }
+
+    /// Get list of visible popup node IDs
+    fn get_visible_popup_nodes(&self) -> Vec<NodeId> {
+        use crate::ui::Button;
+
+        let mut popup_nodes = Vec::new();
+        for node in self.nodes.values() {
+            if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
+                if button.is_popup_visible() {
+                    if let Some(popup_id) = button.popup_content {
+                        popup_nodes.push(popup_id);
+                    }
+                }
+            }
+        }
+        popup_nodes
+    }
+
+    /// Build popups for all buttons that have visible popups
+    fn build_popups(&mut self, out: &mut Vec<Drawable>, text_cache: &TextCache) {
+        use crate::ui::Button;
+
+        // Collect popup info first to avoid borrow checker issues
+        let mut popups_to_render = Vec::new();
+
+        for (_node_id, node) in &self.nodes {
+            if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
+                if button.is_popup_visible() {
+                    if let Some(popup_content_id) = button.popup_content {
+                        // We need the popup size to calculate position
+                        // For now, use a placeholder - in real implementation,
+                        // the popup widget should provide its size
+                        // For ParamList, we can estimate from its rect
+                        if self.nodes.contains_key(&popup_content_id) {
+                            // Try to get size from the popup view
+                            // This is a simplified approach - ideally views would report their size
+                            popups_to_render.push((
+                                popup_content_id,
+                                button.style.rect,
+                                button.popup_alignment,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now position and render the popups
+        for (popup_id, button_rect, alignment) in popups_to_render {
+            // Collect widget update info in a separate scope
+            let widget_updates = {
+                let Some(popup_node) = self.nodes.get_mut(&popup_id) else {
+                    continue;
+                };
+
+                // Try to get size from ParamList
+                let Some(param_list) = popup_node
+                    .view
+                    .as_any_mut()
+                    .downcast_mut::<crate::ui::ParamList>()
+                else {
+                    continue;
+                };
+
+                let popup_size = param_list.get_size();
+
+                // Calculate position (simplified bounds checking - assumes screen is large enough)
+                let [btn_x, btn_y, btn_w, btn_h] = button_rect;
+                let gap = 4.0;
+
+                let (x, y) = match alignment {
+                    crate::ui::PopupAlignment::Right => (btn_x + btn_w + gap, btn_y),
+                    crate::ui::PopupAlignment::Left => (btn_x - popup_size[0] - gap, btn_y),
+                    crate::ui::PopupAlignment::Bottom => (btn_x, btn_y + btn_h + gap),
+                    crate::ui::PopupAlignment::Top => (btn_x, btn_y - popup_size[1] - gap),
+                };
+
+                param_list.set_position(x, y);
+
+                // Collect child widget rects
+                let mut updates = Vec::new();
+                let children = popup_node.children.clone();
+                for (index, child_id) in children.iter().enumerate() {
+                    let widget_rect = param_list.get_widget_rect(index, 180.0);
+                    updates.push((*child_id, widget_rect));
+                }
+                updates
+            }; // Borrow of popup_node ends here
+
+            // Now update child widgets
+            for (child_id, widget_rect) in widget_updates {
+                if let Some(child_node) = self.nodes.get_mut(&child_id) {
+                    if let Some(slider) = child_node
+                        .view
+                        .as_any_mut()
+                        .downcast_mut::<crate::ui::Slider>()
+                    {
+                        slider.set_rect(widget_rect);
+                    }
+                }
+            }
+
+            self.build_node(popup_id, out, 100, text_cache); // High layer for popups
+        }
+    }
+
+    /// Close all open popups (call this when clicking outside)
+    pub fn close_all_popups(&mut self) {
+        use crate::ui::Button;
+
+        for node in self.nodes.values_mut() {
+            if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
+                if button.is_popup_visible() {
+                    button.hide_popup();
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Check if a click is inside any button with a popup or its popup content
+    /// Returns true if inside, false if outside (should close popups)
+    pub fn is_click_inside_popup_system(&self, pos: [f32; 2]) -> bool {
+        use crate::ui::{Button, ParamList};
+
+        for node in self.nodes.values() {
+            if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
+                if button.is_popup_visible() {
+                    // Check if click is on the button itself
+                    let [bx, by, bw, bh] = button.style.rect;
+                    if pos[0] >= bx && pos[0] <= bx + bw && pos[1] >= by && pos[1] <= by + bh {
+                        return true;
+                    }
+
+                    // Check if click is inside the popup content
+                    if let Some(popup_id) = button.popup_content {
+                        if let Some(popup_node) = self.nodes.get(&popup_id) {
+                            // Check if it's a ParamList and if click is inside
+                            if let Some(param_list) =
+                                popup_node.view.as_any().downcast_ref::<ParamList>()
+                            {
+                                let [px, py, pw, ph] = param_list.style.rect;
+                                if pos[0] >= px
+                                    && pos[0] <= px + pw
+                                    && pos[1] >= py
+                                    && pos[1] <= py + ph
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 }

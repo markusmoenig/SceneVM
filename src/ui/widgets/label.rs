@@ -61,6 +61,10 @@ impl UiView for Label {
         self
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn view_id(&self) -> &str {
         &self.id
     }

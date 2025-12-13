@@ -93,8 +93,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let p = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
 
+  // Process all triangles in this tile bin in REVERSE order (front to back)
+  // Triangles are sorted by layer, highest first, so we process backwards
   for (var k: u32 = 0u; k < bin.count; k = k + 1u) {
-    let tri_idx = bin.offset + k;
+    let tri_idx = bin.offset + (bin.count - 1u - k);
     if (tri_idx >= tris_len) { break; }
 
     let t = tile_tris.data[tri_idx];
@@ -130,16 +132,19 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let max_pos = max(max(p0, p1), p2);
       let rect_size = max_pos - min_pos;
 
-      let col = shade_style_px(tile_idx, uv, rect_size, U.fb_size, U.background);
+      // Shade this style layer, using current accumulated color as background
+      let col = shade_style_px(tile_idx, uv, rect_size, U.fb_size, out_col);
       out_col = col;
       covered = true;
-      break;
     } else {
       let col = textureSampleLevel(atlas_tex, atlas_smp, atlas_uv, 0.0);
       if (col.a < 0.01) { continue; }
-      out_col = col;
+      // Alpha blend this texture layer over the accumulated color
+      out_col = vec4<f32>(
+        mix(out_col.rgb, col.rgb, col.a),
+        1.0
+      );
       covered = true;
-      break;
     }
   }
 

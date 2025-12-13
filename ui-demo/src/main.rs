@@ -56,15 +56,15 @@ impl SceneVMApp for UiDemo {
                 }
             }
         }
-        // Create material frame with zeros (non-style tile)
-        let mat_pixels = vec![0u8; tile_size * tile_size * 4];
-
         vm.execute(Atom::AddTile {
             id: test_tile_id,
             width: tile_size as u32,
             height: tile_size as u32,
             frames: vec![pixels],
-            material_frames: Some(vec![mat_pixels.clone()]),
+            material_frames: Some(vec![create_tile_material(
+                tile_size as u32,
+                tile_size as u32,
+            )]),
         });
 
         // Create a pressed state tile with inverted gradient
@@ -92,7 +92,10 @@ impl SceneVMApp for UiDemo {
             width: tile_size as u32,
             height: tile_size as u32,
             frames: vec![pressed_pixels],
-            material_frames: Some(vec![mat_pixels]),
+            material_frames: Some(vec![create_tile_material(
+                tile_size as u32,
+                tile_size as u32,
+            )]),
         });
 
         vm.execute(Atom::BuildAtlas);
@@ -144,6 +147,18 @@ impl SceneVMApp for UiDemo {
         let image_button_node = self.workspace.add_view(image_button);
         self.workspace.add_root(image_button_node);
 
+        // Add a plain image widget (no border, just the texture)
+        let plain_image = Image::new(
+            ImageStyle {
+                rect: [350.0, 40.0, 64.0, 64.0],
+                layer: 10,
+            },
+            test_tile_id,
+        )
+        .with_id("plain_image");
+        let plain_image_node = self.workspace.add_view(plain_image);
+        self.workspace.add_root(plain_image_node);
+
         // Add a slider below the button
         let slider = Slider::new(
             SliderStyle {
@@ -151,7 +166,7 @@ impl SceneVMApp for UiDemo {
                 track_color: Vec4::new(0.15, 0.15, 0.18, 1.0),
                 fill_color: Vec4::new(0.3, 0.5, 0.8, 1.0),
                 thumb_color: Vec4::new(0.4, 0.6, 0.9, 1.0), // Blue color for thumb
-                thumb_radius: 12.0,
+                thumb_radius: 8.0,
                 track_height: 6.0,
                 layer: 10,
             },
@@ -174,6 +189,216 @@ impl SceneVMApp for UiDemo {
         .with_layer(10);
         let slider_label_node = self.workspace.add_view(slider_label);
         self.workspace.add_root(slider_label_node);
+
+        // Add a toolbar with image buttons
+        let toolbar = Toolbar::new(
+            ToolbarStyle {
+                rect: [40.0, 180.0, 600.0, 48.0],
+                fill: Vec4::new(0.15, 0.15, 0.18, 1.0),
+                border: Vec4::new(0.25, 0.25, 0.28, 1.0),
+                radius_px: 6.0,
+                border_px: 1.0,
+                layer: 10,
+            },
+            ToolbarOrientation::Horizontal,
+        )
+        .with_id("main_toolbar")
+        .with_spacing(4.0)
+        .with_offset(8.0);
+
+        let toolbar_node = self.workspace.add_view(toolbar.clone());
+        self.workspace.add_root(toolbar_node);
+
+        // Add 8 image buttons to the toolbar with manual positioning
+        let button_size = 32.0;
+        let toolbar_x = 40.0;
+        let toolbar_y = 180.0;
+        let spacing = 4.0;
+        let offset = 8.0;
+        let extra_gap = 16.0; // Extra spacing after 4th button
+
+        for i in 0..8 {
+            // Calculate x position with extra spacing after 4th button
+            let x_pos = toolbar_x
+                + offset
+                + (i as f32 * (button_size + spacing))
+                + if i >= 4 { extra_gap } else { 0.0 };
+            let y_pos = toolbar_y + 8.0; // Center vertically in toolbar (48px tall, button 32px)
+
+            let btn = Button::new(ButtonStyle {
+                rect: [x_pos, y_pos, button_size, button_size],
+                fill: Vec4::new(0.2, 0.2, 0.25, 1.0),
+                border: Vec4::new(0.3, 0.3, 0.35, 1.0),
+                pressed_fill: Vec4::new(0.3, 0.4, 0.5, 1.0),
+                pressed_border: Vec4::new(0.4, 0.5, 0.6, 1.0),
+                radius_px: 4.0,
+                border_px: 1.0,
+                layer: 11,
+            })
+            .with_id(format!("toolbar_btn_{}", i))
+            .with_kind(ButtonKind::Momentary)
+            .with_tile(test_tile_id)
+            .with_tile_offset(2.0);
+
+            let btn_node = self.workspace.add_view(btn);
+            self.workspace.add_root(btn_node);
+        }
+
+        // Add a separator after the 4th button
+        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+            // Calculate separator position (after 4th button, in the middle of the extra gap)
+            let separator_x =
+                toolbar_x + offset + (4.0 * (button_size + spacing)) + (extra_gap / 2.0);
+            toolbar_view.add_separator_at(separator_x, None);
+        }
+
+        // Add a parameter list below the toolbar
+        let mut param_list = ParamList::new(ParamListStyle {
+            rect: [40.0, 250.0, 350.0, 200.0], // Widened from 300 to 350 to fit value text
+            fill: Vec4::new(0.12, 0.12, 0.15, 1.0),
+            border: Vec4::new(0.25, 0.25, 0.28, 1.0),
+            radius_px: 6.0,
+            border_px: 1.0,
+            layer: 10,
+        })
+        .with_id("param_list")
+        .with_item_height(32.0)
+        .with_label_width(80.0)
+        .with_spacing(8.0)
+        .with_label_size(14.0);
+
+        // Create sliders and labels for the parameter list
+        let param_slider_width = 180.0; // Slider width, value text appears 8px to the right
+
+        for i in 0..4 {
+            let label_text = match i {
+                0 => "Speed",
+                1 => "Volume",
+                2 => "Opacity",
+                3 => "Scale",
+                _ => "Unknown",
+            };
+
+            // Get the position for this widget from the param list
+            let widget_rect = param_list.get_widget_rect(i, param_slider_width);
+
+            let slider = Slider::new(
+                SliderStyle {
+                    rect: widget_rect,
+                    track_color: Vec4::new(0.15, 0.15, 0.18, 1.0),
+                    fill_color: Vec4::new(0.3, 0.5, 0.8, 1.0),
+                    thumb_color: Vec4::new(0.4, 0.6, 0.9, 1.0),
+                    thumb_radius: 6.0,
+                    track_height: 4.0,
+                    layer: 11,
+                },
+                0.0,
+                100.0,
+            )
+            .with_id(format!("param_slider_{}", i))
+            .with_value(50.0 + (i as f32 * 10.0))
+            .with_show_value(true)
+            .with_value_precision(1)
+            .with_value_color(Vec4::new(0.6, 0.6, 0.65, 1.0))
+            .with_value_size(12.0);
+
+            let slider_node = self.workspace.add_view(slider);
+            param_list.add_item(label_text, slider_node);
+            self.workspace.add_root(slider_node);
+        }
+
+        let param_list_node = self.workspace.add_view(param_list);
+        self.workspace.add_root(param_list_node);
+
+        // Create a popup ParamList for a button
+        let mut popup_param_list = ParamList::new(ParamListStyle {
+            rect: [0.0, 0.0, 250.0, 150.0], // Position will be set by popup system
+            fill: Vec4::new(0.12, 0.12, 0.15, 1.0),
+            border: Vec4::new(0.4, 0.5, 0.7, 1.0),
+            radius_px: 6.0,
+            border_px: 2.0,
+            layer: 100, // High layer for popup
+        })
+        .with_id("popup_param_list")
+        .with_item_height(28.0)
+        .with_label_width(70.0)
+        .with_spacing(6.0)
+        .with_label_size(13.0);
+
+        // Add sliders to the popup
+        // Width accounts for: label_width (80) + slider (90) + gap (8) + value text (~30) + padding (16)
+        let popup_slider_width = 90.0;
+        let mut slider_nodes = Vec::new();
+        for i in 0..3 {
+            let label_text = match i {
+                0 => "Red",
+                1 => "Green",
+                2 => "Blue",
+                _ => "Unknown",
+            };
+
+            let widget_rect = popup_param_list.get_widget_rect(i, popup_slider_width);
+
+            let slider = Slider::new(
+                SliderStyle {
+                    rect: widget_rect,
+                    track_color: Vec4::new(0.15, 0.15, 0.18, 1.0),
+                    fill_color: Vec4::new(0.3, 0.5, 0.8, 1.0),
+                    thumb_color: Vec4::new(0.4, 0.6, 0.9, 1.0),
+                    thumb_radius: 5.0,
+                    track_height: 3.0,
+                    layer: 101,
+                },
+                0.0,
+                255.0,
+            )
+            .with_id(format!("popup_slider_{}", i))
+            .with_value(128.0 + (i as f32 * 20.0))
+            .with_show_value(true)
+            .with_value_precision(0)
+            .with_value_color(Vec4::new(0.7, 0.7, 0.75, 1.0))
+            .with_value_size(11.0);
+
+            let slider_node = self.workspace.add_view(slider);
+            popup_param_list.add_item(label_text, slider_node);
+            slider_nodes.push(slider_node);
+        }
+
+        let popup_param_list_node = self.workspace.add_view(popup_param_list);
+
+        // Attach sliders as children of the popup ParamList
+        for slider_node in slider_nodes {
+            self.workspace.attach(popup_param_list_node, slider_node);
+        }
+
+        // Create a button that opens the popup
+        let popup_button = Button::new(ButtonStyle {
+            rect: [450.0, 250.0, 120.0, 44.0],
+            fill: Vec4::new(0.25, 0.35, 0.5, 1.0),
+            border: Vec4::new(0.4, 0.5, 0.7, 1.0),
+            pressed_fill: Vec4::new(0.2, 0.28, 0.4, 1.0),
+            pressed_border: Vec4::new(0.35, 0.45, 0.65, 1.0),
+            radius_px: 8.0,
+            border_px: 2.0,
+            layer: 10,
+        })
+        .with_id("popup_button")
+        .with_kind(ButtonKind::Momentary)
+        .with_popup(popup_param_list_node, PopupAlignment::Right);
+
+        let popup_button_node = self.workspace.add_view(popup_button);
+        self.workspace.add_root(popup_button_node);
+
+        // Add label for popup button
+        let popup_button_label = LabelRect::new(
+            "Colors",
+            [450.0, 250.0, 120.0, 44.0],
+            16.0,
+            Vec4::new(0.9, 0.9, 0.95, 1.0),
+        )
+        .with_layer(11);
+        let popup_button_label_node = self.workspace.add_view(popup_button_label);
+        self.workspace.add_root(popup_button_label_node);
     }
 
     fn needs_update(&mut self) -> bool {
@@ -217,6 +442,11 @@ impl SceneVMApp for UiDemo {
     }
 
     fn mouse_down(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
+        // Check if click is outside popup system - close all popups if so
+        if !self.workspace.is_click_inside_popup_system([x, y]) {
+            self.workspace.close_all_popups();
+        }
+
         self.workspace.handle_event(&UiEvent {
             kind: UiEventKind::PointerDown,
             pos: [x, y],

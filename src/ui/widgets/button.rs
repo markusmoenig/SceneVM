@@ -4,13 +4,21 @@ use vek::Vec4;
 use crate::ui::{
     drawable::Drawable,
     event::{UiAction, UiEvent, UiEventKind, UiEventOutcome},
-    workspace::{UiView, ViewContext},
+    workspace::{NodeId, UiView, ViewContext},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonKind {
     Momentary,
     Toggle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupAlignment {
+    Right,
+    Left,
+    Top,
+    Bottom,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +74,9 @@ pub struct Button {
     toggled: bool,
     state: ButtonState,
     active_pointer: Option<u32>,
+    pub popup_content: Option<NodeId>, // Optional popup content (e.g., ParamList)
+    pub popup_alignment: PopupAlignment, // How to align the popup relative to button
+    pub popup_visible: bool,           // Whether the popup is currently shown
 }
 
 impl Button {
@@ -81,7 +92,32 @@ impl Button {
             toggled: false,
             state: ButtonState::Idle,
             active_pointer: None,
+            popup_content: None,
+            popup_alignment: PopupAlignment::Bottom,
+            popup_visible: false,
         }
+    }
+
+    pub fn with_popup(mut self, content: NodeId, alignment: PopupAlignment) -> Self {
+        self.popup_content = Some(content);
+        self.popup_alignment = alignment;
+        self
+    }
+
+    pub fn toggle_popup(&mut self) {
+        self.popup_visible = !self.popup_visible;
+    }
+
+    pub fn show_popup(&mut self) {
+        self.popup_visible = true;
+    }
+
+    pub fn hide_popup(&mut self) {
+        self.popup_visible = false;
+    }
+
+    pub fn is_popup_visible(&self) -> bool {
+        self.popup_visible
     }
 
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
@@ -122,6 +158,31 @@ impl Button {
 
     pub fn is_toggled(&self) -> bool {
         self.toggled
+    }
+
+    /// Calculate the position for the popup, ensuring it stays within screen bounds
+    pub fn calculate_popup_position(
+        &self,
+        popup_size: [f32; 2],
+        screen_size: [f32; 2],
+    ) -> [f32; 2] {
+        let [btn_x, btn_y, btn_w, btn_h] = self.style.rect;
+        let [popup_w, popup_h] = popup_size;
+        let [screen_w, screen_h] = screen_size;
+        let gap = 4.0; // Gap between button and popup
+
+        let (mut x, mut y) = match self.popup_alignment {
+            PopupAlignment::Right => (btn_x + btn_w + gap, btn_y),
+            PopupAlignment::Left => (btn_x - popup_w - gap, btn_y),
+            PopupAlignment::Bottom => (btn_x, btn_y + btn_h + gap),
+            PopupAlignment::Top => (btn_x, btn_y - popup_h - gap),
+        };
+
+        // Ensure popup stays within screen bounds
+        x = x.max(0.0).min(screen_w - popup_w);
+        y = y.max(0.0).min(screen_h - popup_h);
+
+        [x, y]
     }
 
     fn hit(&self, pos: [f32; 2]) -> bool {
@@ -205,6 +266,10 @@ impl UiView for Button {
                                 ButtonState::Idle
                             });
                             if inside {
+                                // Toggle popup if button has one
+                                if self.popup_content.is_some() {
+                                    self.toggle_popup();
+                                }
                                 outcome.merge(UiEventOutcome::with_action(
                                     UiAction::ButtonPressed(self.id.clone()),
                                 ));
@@ -263,6 +328,10 @@ impl UiView for Button {
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 

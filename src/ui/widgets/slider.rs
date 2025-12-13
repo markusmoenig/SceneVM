@@ -42,6 +42,10 @@ pub struct Slider {
     pub max: f32,
     dragging: bool,
     active_pointer: Option<u32>,
+    pub show_value: bool,       // Whether to show value text
+    pub value_color: Vec4<f32>, // Color for value text
+    pub value_size: f32,        // Font size for value text
+    pub value_precision: usize, // Decimal places for value display
 }
 
 impl Slider {
@@ -55,7 +59,31 @@ impl Slider {
             max,
             dragging: false,
             active_pointer: None,
+            show_value: false,
+            value_color: Vec4::new(0.6, 0.6, 0.65, 1.0),
+            value_size: 12.0,
+            value_precision: 1,
         }
+    }
+
+    pub fn with_show_value(mut self, show: bool) -> Self {
+        self.show_value = show;
+        self
+    }
+
+    pub fn with_value_precision(mut self, precision: usize) -> Self {
+        self.value_precision = precision;
+        self
+    }
+
+    pub fn with_value_color(mut self, color: Vec4<f32>) -> Self {
+        self.value_color = color;
+        self
+    }
+
+    pub fn with_value_size(mut self, size: f32) -> Self {
+        self.value_size = size;
+        self
     }
 
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
@@ -73,9 +101,14 @@ impl Slider {
         self.min + self.value * (self.max - self.min)
     }
 
+    pub fn set_rect(&mut self, rect: [f32; 4]) {
+        self.style.rect = rect;
+    }
+
     fn thumb_position(&self) -> [f32; 2] {
         let [x, y, w, h] = self.style.rect;
-        let center_y = y + h * 0.5;
+        // Use same center adjustment as in build() for consistency
+        let center_y = y + h * 0.5 + (h * 0.075);
         let thumb_x = x + self.value * w;
         [thumb_x, center_y]
     }
@@ -108,9 +141,30 @@ impl Slider {
 impl UiView for Slider {
     fn build(&mut self, ctx: &mut ViewContext) {
         let [x, y, w, h] = self.style.rect;
-        let center_y = y + h * 0.5;
+        // Align track with text center (text baseline is lower than mathematical center)
+        // Moving center down slightly to align track with visual text center
+        let center_y = y + h * 0.5 + (h * 0.075);
         let track_h = self.style.track_height;
         let half_track = track_h * 0.5;
+
+        // Draw value text if enabled (positioned to the right of the slider track)
+        if self.show_value {
+            let value_text = format!("{:.prec$}", self.get_value(), prec = self.value_precision);
+            // Position to the right of the slider track
+            let text_x = x + w + 8.0; // 8px to the right of the track
+            // Center text vertically - need to use original mathematical center for text
+            // since text positioning is different from track positioning
+            let text_center_y = y + h * 0.5;
+            let text_y = text_center_y - (self.value_size / 2.0);
+            ctx.push(Drawable::Text {
+                id: Uuid::new_v4(),
+                text: value_text,
+                origin: [text_x, text_y],
+                px_size: self.value_size,
+                color: self.value_color,
+                layer: self.style.layer, // Same layer as track background
+            });
+        }
 
         // Draw background track (pill shape - radius = half height in pixels)
         let track_radius_px = track_h * 0.5;
@@ -194,6 +248,10 @@ impl UiView for Slider {
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
