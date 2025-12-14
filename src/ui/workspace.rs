@@ -137,6 +137,19 @@ impl Workspace {
         let Some(node) = self.nodes.get_mut(&id) else {
             return;
         };
+
+        // Check if this is a Canvas and if it's visible
+        let is_visible_canvas =
+            if let Some(canvas) = node.view.as_any().downcast_ref::<crate::ui::Canvas>() {
+                canvas.is_visible()
+            } else {
+                true // Not a canvas, always visible
+            };
+
+        if !is_visible_canvas {
+            return; // Skip this canvas and its children
+        }
+
         let mut ctx = ViewContext {
             drawables: out,
             current_layer: layer,
@@ -173,6 +186,18 @@ impl Workspace {
     fn dispatch_node(&mut self, id: NodeId, evt: &UiEvent) -> UiEventOutcome {
         let mut merged = UiEventOutcome::none();
         if let Some(node) = self.nodes.get_mut(&id) {
+            // Check if this is a Canvas and if it's visible
+            let is_visible_canvas =
+                if let Some(canvas) = node.view.as_any().downcast_ref::<crate::ui::Canvas>() {
+                    canvas.is_visible()
+                } else {
+                    true // Not a canvas, always visible
+                };
+
+            if !is_visible_canvas {
+                return merged; // Skip event dispatch for invisible canvas and its children
+            }
+
             merged.merge(node.view.handle_event(evt));
             let children = node.children.clone();
             for child in children {

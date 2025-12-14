@@ -19,9 +19,9 @@ pub use renderer::UiRenderer;
 pub use style::{StyleId, StyleParams, StyleRegistry};
 pub use text::TextCache;
 pub use widgets::{
-    Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, HAlign, Image, ImageStyle,
-    Label, LabelRect, ParamList, ParamListStyle, PopupAlignment, Slider, SliderStyle, Toolbar,
-    ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
+    Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas, HAlign, Image,
+    ImageStyle, Label, LabelRect, ParamList, ParamListStyle, PopupAlignment, Slider, SliderStyle,
+    TextButton, Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
 };
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};
 

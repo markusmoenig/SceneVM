@@ -458,6 +458,80 @@ impl SceneVMApp for UiDemo {
         let toolbar_group_node = self.workspace.add_view(toolbar_button_group);
         self.workspace.add_root(toolbar_group_node);
 
+        // === Canvas Demo: Two modes that can be toggled ===
+
+        // Create Main Canvas
+        let main_canvas = Canvas::new().with_id("main_canvas").with_visible(true);
+        let main_canvas_node = self.workspace.add_view(main_canvas);
+        self.workspace.add_root(main_canvas_node);
+
+        // Add widgets to main canvas
+        let main_label = LabelRect::new(
+            "Main Mode - Press button below to switch",
+            [40.0, 520.0, 400.0, 30.0],
+            16.0,
+            Vec4::new(0.9, 0.9, 0.95, 1.0),
+        )
+        .with_layer(10);
+        let main_label_node = self.workspace.add_view(main_label);
+        self.workspace.attach(main_canvas_node, main_label_node);
+
+        // Create Settings Canvas (initially hidden)
+        let settings_canvas = Canvas::new().with_id("settings_canvas").with_visible(false);
+        let settings_canvas_node = self.workspace.add_view(settings_canvas);
+        self.workspace.add_root(settings_canvas_node);
+
+        // Add widgets to settings canvas
+        let settings_label = LabelRect::new(
+            "Settings Mode - Press button below to switch back",
+            [40.0, 520.0, 400.0, 30.0],
+            16.0,
+            Vec4::new(0.9, 0.9, 0.5, 1.0),
+        )
+        .with_layer(10);
+        let settings_label_node = self.workspace.add_view(settings_label);
+        self.workspace
+            .attach(settings_canvas_node, settings_label_node);
+
+        let settings_slider = Slider::new(
+            SliderStyle {
+                rect: [40.0, 560.0, 300.0, 40.0],
+                track_color: Vec4::new(0.2, 0.2, 0.25, 1.0),
+                fill_color: Vec4::new(0.4, 0.5, 0.6, 1.0),
+                thumb_color: Vec4::new(0.5, 0.6, 0.7, 1.0),
+                thumb_radius: 12.0,
+                track_height: 4.0,
+                layer: 10,
+            },
+            0.0,
+            100.0,
+        )
+        .with_id("settings_slider")
+        .with_value(75.0)
+        .with_show_value(true);
+        let settings_slider_node = self.workspace.add_view(settings_slider);
+        self.workspace
+            .attach(settings_canvas_node, settings_slider_node);
+
+        // Add a button to toggle between canvases (using TextButton)
+        let canvas_toggle_button = TextButton::new(
+            ButtonStyle {
+                rect: [450.0, 510.0, 150.0, 44.0],
+                fill: Vec4::new(0.25, 0.35, 0.5, 1.0),
+                border: Vec4::new(0.4, 0.5, 0.7, 1.0),
+                pressed_fill: Vec4::new(0.2, 0.28, 0.4, 1.0),
+                pressed_border: Vec4::new(0.35, 0.45, 0.65, 1.0),
+                radius_px: 8.0,
+                border_px: 2.0,
+                layer: 10,
+            },
+            "Switch Mode",
+        )
+        .with_id("canvas_toggle")
+        .with_text_size(14.0);
+        let canvas_toggle_node = self.workspace.add_view(canvas_toggle_button);
+        self.workspace.add_root(canvas_toggle_node);
+
         // Create a new VM layer for procedural noise shader
         self.noise_layer = vm.add_vm_layer();
         vm.set_active_vm(self.noise_layer);
@@ -489,7 +563,25 @@ impl SceneVMApp for UiDemo {
         // Handle actions and update state
         for action in self.workspace.take_actions() {
             match action {
-                UiAction::ButtonPressed(id) => println!("Button pressed: {id}"),
+                UiAction::ButtonPressed(id) => {
+                    println!("Button pressed: {id}");
+
+                    // Toggle between canvases
+                    if id == "canvas_toggle" {
+                        if let Some(main_canvas) =
+                            self.workspace.find_view_mut::<Canvas>("main_canvas")
+                        {
+                            let is_visible = main_canvas.is_visible();
+                            main_canvas.set_visible(!is_visible);
+                        }
+                        if let Some(settings_canvas) =
+                            self.workspace.find_view_mut::<Canvas>("settings_canvas")
+                        {
+                            let is_visible = settings_canvas.is_visible();
+                            settings_canvas.set_visible(!is_visible);
+                        }
+                    }
+                }
                 UiAction::ButtonToggled(id, on) => {
                     println!("Button toggled: {id} -> {on}");
 
