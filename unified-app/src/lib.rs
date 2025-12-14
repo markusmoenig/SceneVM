@@ -361,3 +361,227 @@ pub unsafe extern "C" fn unified_app_runner_pinch(
         r.app.pinch(&mut r.vm, scale, (center_x, center_y));
     }
 }
+
+// ---------- Project Management FFI ----------
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_save_project(
+    ptr: *mut SceneVMAppRunner,
+    out_json: *mut *const u8,
+    out_len: *mut usize,
+) -> i32 {
+    #[cfg(feature = "ui")]
+    {
+        if let Some(r) = unsafe { ptr.as_mut() } {
+            if let Some(json) = r.app.save_to_json(&mut r.vm) {
+                let json_bytes = json.into_bytes();
+                let len = json_bytes.len();
+                let boxed = json_bytes.into_boxed_slice();
+                let ptr = Box::into_raw(boxed) as *const u8;
+
+                if !out_json.is_null() {
+                    unsafe {
+                        *out_json = ptr;
+                    }
+                }
+                if !out_len.is_null() {
+                    unsafe {
+                        *out_len = len;
+                    }
+                }
+                return 0; // Success
+            }
+            return -2; // save_to_json returned None
+        }
+        return -1; // Invalid pointer
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        let _ = (ptr, out_json, out_len);
+        -4 // Feature not enabled
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_load_project(
+    ptr: *mut SceneVMAppRunner,
+    json_data: *const u8,
+    json_len: usize,
+) -> i32 {
+    #[cfg(feature = "ui")]
+    {
+        if json_data.is_null() || json_len == 0 {
+            return -2; // Invalid input
+        }
+
+        if let Some(r) = unsafe { ptr.as_mut() } {
+            let json_slice = unsafe { std::slice::from_raw_parts(json_data, json_len) };
+            if let Ok(json_str) = std::str::from_utf8(json_slice) {
+                if r.app.load_from_json(&mut r.vm, json_str) {
+                    return 0; // Success
+                }
+                return -3; // load_from_json returned false
+            }
+            return -2; // Invalid UTF-8
+        }
+        return -1; // Invalid pointer
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        let _ = (ptr, json_data, json_len);
+        -5 // Feature not enabled
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_free_json(json_ptr: *const u8, json_len: usize) {
+    if !json_ptr.is_null() && json_len > 0 {
+        unsafe {
+            let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+                json_ptr as *mut u8,
+                json_len,
+            ));
+        }
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_has_unsaved_changes(ptr: *mut SceneVMAppRunner) -> i32 {
+    #[cfg(feature = "ui")]
+    {
+        if let Some(r) = unsafe { ptr.as_ref() } {
+            return if r.app.has_unsaved_changes() { 1 } else { 0 };
+        }
+        return -1; // Invalid pointer
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        let _ = ptr;
+        0 // No unsaved changes if feature disabled
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_export_data(
+    ptr: *mut SceneVMAppRunner,
+    format: *const u8,
+    format_len: usize,
+    out_data: *mut *const u8,
+    out_len: *mut usize,
+) -> i32 {
+    #[cfg(feature = "ui")]
+    {
+        if format.is_null() || format_len == 0 {
+            return -2; // Invalid format
+        }
+
+        if let Some(r) = unsafe { ptr.as_mut() } {
+            let format_slice = unsafe { std::slice::from_raw_parts(format, format_len) };
+            if let Ok(_format_str) = std::str::from_utf8(format_slice) {
+                // For now, just export as JSON regardless of format
+                // Apps can override this to support multiple formats
+                if let Some(json) = r.app.save_to_json(&mut r.vm) {
+                    let data_bytes = json.into_bytes();
+                    let len = data_bytes.len();
+                    let boxed = data_bytes.into_boxed_slice();
+                    let ptr = Box::into_raw(boxed) as *const u8;
+
+                    if !out_data.is_null() {
+                        unsafe {
+                            *out_data = ptr;
+                        }
+                    }
+                    if !out_len.is_null() {
+                        unsafe {
+                            *out_len = len;
+                        }
+                    }
+                    return 0; // Success
+                }
+                return -3; // Export failed
+            }
+            return -2; // Invalid UTF-8 in format
+        }
+        return -1; // Invalid pointer
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        let _ = (ptr, format, format_len, out_data, out_len);
+        -4 // Feature not enabled
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_import_data(
+    ptr: *mut SceneVMAppRunner,
+    data: *const u8,
+    data_len: usize,
+    _file_type: *const u8,
+    _file_type_len: usize,
+) -> i32 {
+    #[cfg(feature = "ui")]
+    {
+        if data.is_null() || data_len == 0 {
+            return -2; // Invalid data
+        }
+
+        if let Some(r) = unsafe { ptr.as_mut() } {
+            let data_slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+
+            // Try to import as JSON (apps can override for other formats)
+            if let Ok(json_str) = std::str::from_utf8(data_slice) {
+                if r.app.load_from_json(&mut r.vm, json_str) {
+                    return 0; // Success
+                }
+                return -3; // Import failed
+            }
+            return -2; // Invalid UTF-8
+        }
+        return -1; // Invalid pointer
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        let _ = (ptr, data, data_len, _file_type, _file_type_len);
+        -4 // Feature not enabled
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_free_data(data_ptr: *const u8, data_len: usize) {
+    if !data_ptr.is_null() && data_len > 0 {
+        unsafe {
+            let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+                data_ptr as *mut u8,
+                data_len,
+            ));
+        }
+    }
+}

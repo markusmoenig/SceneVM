@@ -12,6 +12,11 @@ mod text;
 mod widgets;
 mod workspace;
 
+// Project management (part of UI system)
+mod file_dialog;
+mod project;
+mod project_browser;
+
 pub use drawable::{Drawable, UiColor, UiImage};
 pub use event::{UiAction, UiEvent, UiEventKind, UiEventOutcome};
 pub use layouts::{Alignment, HStack, VStack};
@@ -20,10 +25,16 @@ pub use style::{StyleId, StyleParams, StyleRegistry};
 pub use text::TextCache;
 pub use widgets::{
     Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas, HAlign, Image,
-    ImageStyle, Label, LabelRect, ParamList, ParamListStyle, PopupAlignment, Slider, SliderStyle,
-    TextButton, Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
+    ImageStyle, Label, LabelRect, ParamList, ParamListStyle, PopupAlignment, ProjectBrowser,
+    ProjectBrowserItem, ProjectBrowserStyle, Slider, SliderStyle, TextButton, Toolbar,
+    ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
 };
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};
+
+// Project management
+pub use file_dialog::FileDialog;
+pub use project::{Project, ProjectError, ProjectMetadata};
+pub use project_browser::{RecentProject, RecentProjects};
 
 /// Helper function to create empty material data for non-style tiles.
 /// Use this when adding image tiles that don't need style rendering.

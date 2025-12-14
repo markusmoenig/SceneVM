@@ -4,6 +4,7 @@ pub enum UiEventKind {
     PointerDown,
     PointerUp,
     PointerMove,
+    Scroll { delta: [f32; 2] }, // [dx, dy] in logical units
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,6 +32,7 @@ pub enum UiAction {
     ButtonToggled(String, bool),
     SliderChanged(String, f32),
     ButtonGroupChanged(String, usize), // (group_name, active_index)
+    Custom { source_id: String, action: String }, // For custom widgets like ProjectBrowser
 }
 
 /// Result of handling an event: whether a view dirtied itself and any actions.
@@ -60,6 +62,14 @@ impl UiEventOutcome {
             dirty: true,
             actions: vec![action],
         }
+    }
+
+    pub fn action(action: UiAction) -> Self {
+        Self::with_action(action)
+    }
+
+    pub fn redraw() -> Self {
+        Self::dirty()
     }
 
     pub fn merge(&mut self, other: UiEventOutcome) {

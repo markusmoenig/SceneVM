@@ -323,6 +323,7 @@ impl UiView for Button {
                     });
                 }
             }
+            _ => {}
         }
         UiEventOutcome::none()
     }

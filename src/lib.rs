@@ -1,4 +1,6 @@
 // pub mod app;
+#[cfg(feature = "ui")]
+pub mod app_event;
 pub mod app_trait;
 pub mod atlas;
 pub mod bbox2d;
@@ -55,12 +57,17 @@ pub mod prelude {
     };
 
     #[cfg(feature = "ui")]
-    pub use crate::ui::{
-        Alignment, Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
-        Drawable, HAlign, HStack, Image, ImageStyle, Label, LabelRect, NodeId, ParamList,
-        ParamListStyle, PopupAlignment, Slider, SliderStyle, TextButton, Toolbar,
-        ToolbarOrientation, ToolbarSeparator, ToolbarStyle, UiAction, UiEvent, UiEventKind,
-        UiRenderer, UiView, VAlign, VStack, ViewContext, Workspace, create_tile_material,
+    pub use crate::{
+        app_event::{AppEvent, AppEventQueue},
+        ui::{
+            Alignment, Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
+            Drawable, FileDialog, HAlign, HStack, Image, ImageStyle, Label, LabelRect, NodeId,
+            ParamList, ParamListStyle, PopupAlignment, Project, ProjectBrowser, ProjectBrowserItem,
+            ProjectBrowserStyle, ProjectError, ProjectMetadata, RecentProject, RecentProjects,
+            Slider, SliderStyle, TextButton, Toolbar, ToolbarOrientation, ToolbarSeparator,
+            ToolbarStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView, VAlign, VStack,
+            ViewContext, Workspace, create_tile_material,
+        },
     };
 
     pub use vek::{Mat3, Mat4, Vec2, Vec3, Vec4};

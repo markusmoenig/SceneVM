@@ -243,6 +243,7 @@ impl UiView for ButtonGroup {
                     return UiEventOutcome::dirty();
                 }
             }
+            _ => {}
         }
         UiEventOutcome::none()
     }

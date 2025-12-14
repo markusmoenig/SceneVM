@@ -29,6 +29,28 @@ func unified_app_runner_scroll(_ vm: UnsafeMutableRawPointer?, _ dx: Float, _ dy
 @_silgen_name("unified_app_runner_pinch")
 func unified_app_runner_pinch(_ vm: UnsafeMutableRawPointer?, _ scale: Float, _ center_x: Float, _ center_y: Float)
 
+// Project Management
+@_silgen_name("unified_app_runner_save_project")
+func unified_app_runner_save_project(_ vm: UnsafeMutableRawPointer?, _ out_json: UnsafeMutablePointer<UnsafePointer<UInt8>?>?, _ out_len: UnsafeMutablePointer<Int>?) -> Int32
+
+@_silgen_name("unified_app_runner_load_project")
+func unified_app_runner_load_project(_ vm: UnsafeMutableRawPointer?, _ json_data: UnsafePointer<UInt8>?, _ json_len: Int) -> Int32
+
+@_silgen_name("unified_app_runner_free_json")
+func unified_app_runner_free_json(_ json_ptr: UnsafePointer<UInt8>?, _ json_len: Int)
+
+@_silgen_name("unified_app_runner_has_unsaved_changes")
+func unified_app_runner_has_unsaved_changes(_ vm: UnsafeMutableRawPointer?) -> Int32
+
+@_silgen_name("unified_app_runner_export_data")
+func unified_app_runner_export_data(_ vm: UnsafeMutableRawPointer?, _ format: UnsafePointer<UInt8>?, _ format_len: Int, _ out_data: UnsafeMutablePointer<UnsafePointer<UInt8>?>?, _ out_len: UnsafeMutablePointer<Int>?) -> Int32
+
+@_silgen_name("unified_app_runner_import_data")
+func unified_app_runner_import_data(_ vm: UnsafeMutableRawPointer?, _ data: UnsafePointer<UInt8>?, _ data_len: Int, _ file_type: UnsafePointer<UInt8>?, _ file_type_len: Int) -> Int32
+
+@_silgen_name("unified_app_runner_free_data")
+func unified_app_runner_free_data(_ data_ptr: UnsafePointer<UInt8>?, _ data_len: Int)
+
 /// Thin Swift wrapper around the SceneVM FFI for CAMetalLayer presentation.
 final class SceneVMHandle {
     private var vm: UnsafeMutableRawPointer?
@@ -89,6 +111,108 @@ final class SceneVMHandle {
     deinit {
         if let vm {
             unified_app_runner_destroy(vm)
+        }
+    }
+
+    // MARK: - Project Management
+
+    /// Save the current project state to JSON string
+    /// Returns nil if save fails or app doesn't implement save_project
+    func saveProject() -> String? {
+        guard let vm else { return nil }
+
+        var jsonPtr: UnsafePointer<UInt8>? = nil
+        var jsonLen: Int = 0
+
+        let result = unified_app_runner_save_project(vm, &jsonPtr, &jsonLen)
+
+        guard result == 0, let ptr = jsonPtr, jsonLen > 0 else {
+            return nil
+        }
+
+        defer {
+            unified_app_runner_free_json(ptr, jsonLen)
+        }
+
+        let data = Data(bytes: ptr, count: jsonLen)
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Load project state from JSON string
+    /// Returns true if load was successful
+    func loadProject(json: String) -> Bool {
+        guard let vm else { return false }
+
+        guard let data = json.data(using: .utf8) else {
+            return false
+        }
+
+        return data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> Bool in
+            guard let baseAddress = buffer.baseAddress else {
+                return false
+            }
+
+            let ptr = baseAddress.assumingMemoryBound(to: UInt8.self)
+            let result = unified_app_runner_load_project(vm, ptr, buffer.count)
+            return result == 0
+        }
+    }
+
+    /// Check if the app has unsaved changes
+    func hasUnsavedChanges() -> Bool {
+        guard let vm else { return false }
+        return unified_app_runner_has_unsaved_changes(vm) > 0
+    }
+
+    /// Export project data in the specified format
+    /// Returns exported data as Data, or nil if export fails
+    func exportData(format: String) -> Data? {
+        guard let vm else { return nil }
+        guard let formatData = format.data(using: .utf8) else { return nil }
+
+        var dataPtr: UnsafePointer<UInt8>? = nil
+        var dataLen: Int = 0
+
+        let result = formatData.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> Int32 in
+            guard let baseAddress = buffer.baseAddress else {
+                return -2
+            }
+            let ptr = baseAddress.assumingMemoryBound(to: UInt8.self)
+            return unified_app_runner_export_data(vm, ptr, buffer.count, &dataPtr, &dataLen)
+        }
+
+        guard result == 0, let ptr = dataPtr, dataLen > 0 else {
+            return nil
+        }
+
+        defer {
+            unified_app_runner_free_data(ptr, dataLen)
+        }
+
+        return Data(bytes: ptr, count: dataLen)
+    }
+
+    /// Import data into the project
+    /// Returns true if import was successful
+    func importData(_ data: Data, fileType: String) -> Bool {
+        guard let vm else { return false }
+        guard let fileTypeData = fileType.data(using: .utf8) else { return false }
+
+        return data.withUnsafeBytes { (dataBuffer: UnsafeRawBufferPointer) -> Bool in
+            guard let dataAddress = dataBuffer.baseAddress else {
+                return false
+            }
+
+            return fileTypeData.withUnsafeBytes { (typeBuffer: UnsafeRawBufferPointer) -> Bool in
+                guard let typeAddress = typeBuffer.baseAddress else {
+                    return false
+                }
+
+                let dataPtr = dataAddress.assumingMemoryBound(to: UInt8.self)
+                let typePtr = typeAddress.assumingMemoryBound(to: UInt8.self)
+                let result = unified_app_runner_import_data(vm, dataPtr, dataBuffer.count, typePtr, typeBuffer.count)
+                return result == 0
+            }
         }
     }
 }

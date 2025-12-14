@@ -104,6 +104,10 @@ impl Slider {
         self.min + self.value * (self.max - self.min)
     }
 
+    pub fn set_value(&mut self, value: f32) {
+        self.value = ((value - self.min) / (self.max - self.min)).clamp(0.0, 1.0);
+    }
+
     pub fn set_rect(&mut self, rect: [f32; 4]) {
         self.style.rect = rect;
     }
@@ -251,6 +255,7 @@ impl UiView for Slider {
                     self.active_pointer = None;
                 }
             }
+            _ => {}
         }
         UiEventOutcome::none()
     }

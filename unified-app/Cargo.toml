@@ -6,6 +6,10 @@ edition = "2024"
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+default = ["ui"]
+ui = ["scenevm/ui"]
+
 [dependencies]
 scenevm = { path = ".." }
 uuid = { version = "1.18.1", features = ["v4", "js"] }

@@ -20,6 +20,12 @@ pub trait SceneVMApp {
     fn update(&mut self, _vm: &mut SceneVM) {}
     /// Render hook: call `ctx.present(vm)` to display.
     fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx);
+    /// Collect app events to be handled by the host (file operations, etc.)
+    /// The host calls this after render to get events like RequestSave, RequestOpen, etc.
+    #[cfg(feature = "ui")]
+    fn take_app_events(&mut self) -> Vec<crate::app_event::AppEvent> {
+        Vec::new()
+    }
     /// Return `true` if the app wants an update/render this tick. Default is always true.
     fn needs_update(&mut self) -> bool {
         true
@@ -36,6 +42,49 @@ pub trait SceneVMApp {
     fn scroll(&mut self, _vm: &mut SceneVM, _dx: f32, _dy: f32) {}
     /// Pinch gesture: scale factor and center in logical coordinates.
     fn pinch(&mut self, _vm: &mut SceneVM, _scale: f32, _center: (f32, f32)) {}
+
+    // Project Management (optional, only available with 'project' feature)
+    // File paths are handled by the wrapper layer (Swift/native runners)
+    // These methods only deal with JSON serialization/deserialization
+
+    /// Serialize current app state to JSON string
+    /// Called during File->Save or auto-save operations
+    /// Returns JSON string representing the current state
+    #[cfg(feature = "ui")]
+    fn save_to_json(&mut self, _vm: &mut SceneVM) -> Option<String> {
+        None
+    }
+
+    /// Deserialize and apply JSON state to app
+    /// Called during File->Open or app launch with document
+    /// Return true if load was successful
+    #[cfg(feature = "ui")]
+    fn load_from_json(&mut self, _vm: &mut SceneVM, _json: &str) -> bool {
+        false
+    }
+
+    /// Create a new/empty project state
+    /// Called when user selects File->New
+    /// Should reset app to default state
+    #[cfg(feature = "ui")]
+    fn new_project(&mut self, _vm: &mut SceneVM) {
+        // Default: do nothing
+    }
+
+    /// Check if project has unsaved changes
+    /// Used to prompt user before closing or creating new project
+    #[cfg(feature = "ui")]
+    fn has_unsaved_changes(&self) -> bool {
+        false
+    }
+
+    /// Generate a thumbnail for the current project
+    /// Returns RGBA pixel data (width, height, pixels)
+    /// Thumbnail should be small (e.g., 256x256) for efficient storage
+    #[cfg(feature = "ui")]
+    fn generate_thumbnail(&mut self, _vm: &mut SceneVM) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
 }
 
 /// Rendering context supplied to `SceneVMApp::render`.

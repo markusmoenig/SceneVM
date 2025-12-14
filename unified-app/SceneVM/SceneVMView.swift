@@ -3,15 +3,21 @@ import QuartzCore
 import Metal
 
 struct SceneVMView: View {
+    @ObservedObject var document: SceneVMDocument
+    
     var body: some View {
-        PlatformView()
+        PlatformView(document: document)
     }
 }
 
 #if os(macOS)
 struct PlatformView: NSViewRepresentable {
+    @ObservedObject var document: SceneVMDocument
+    
     func makeNSView(context: Context) -> MetalContainer {
-        MetalContainer()
+        let container = MetalContainer()
+        container.document = document
+        return container
     }
 
     func updateNSView(_ nsView: MetalContainer, context: Context) {}
@@ -22,6 +28,11 @@ final class MetalContainer: NSView {
     private var handle: SceneVMHandle?
     private var displayLink: CVDisplayLink?
     private var pinchScaleAccumulator: CGFloat = 1.0
+    weak var document: SceneVMDocument? {
+        didSet {
+            loadProjectIfNeeded()
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -49,10 +60,20 @@ final class MetalContainer: NSView {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         metalLayer.contentsScale = scale
         metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        
         if handle == nil && bounds.width > 0 && bounds.height > 0 {
             handle = SceneVMHandle(layer: metalLayer, size: bounds.size, scale: scale)
+            document?.sceneVMHandle = handle
+            loadProjectIfNeeded()
         } else {
             handle?.resize(to: bounds.size, scale: scale)
+        }
+    }
+    
+    private func loadProjectIfNeeded() {
+        guard let handle = handle, let document = document else { return }
+        if !document.projectJSON.isEmpty && document.projectJSON != "{}" {
+            _ = handle.loadProject(json: document.projectJSON)
         }
     }
 
@@ -61,7 +82,6 @@ final class MetalContainer: NSView {
     }
 
     private func toLogicalCoords(_ point: NSPoint) -> (CGFloat, CGFloat) {
-        // NSView event locations are already in logical points; flip to top-left.
         let x = point.x
         let y = bounds.height - point.y
         return (x, y)
@@ -119,8 +139,12 @@ final class MetalContainer: NSView {
 }
 #else
 struct PlatformView: UIViewRepresentable {
+    @ObservedObject var document: SceneVMDocument
+    
     func makeUIView(context: Context) -> MetalContainer {
-        MetalContainer()
+        let container = MetalContainer()
+        container.document = document
+        return container
     }
 
     func updateUIView(_ uiView: MetalContainer, context: Context) {}
@@ -131,6 +155,11 @@ final class MetalContainer: UIView {
     private var handle: SceneVMHandle?
     private var displayLink: CADisplayLink?
     private var pinchRecognizer: UIPinchGestureRecognizer?
+    weak var document: SceneVMDocument? {
+        didSet {
+            loadProjectIfNeeded()
+        }
+    }
 
     override class var layerClass: AnyClass { CAMetalLayer.self }
 
@@ -161,10 +190,20 @@ final class MetalContainer: UIView {
         let scale = window?.screen.scale ?? UIScreen.main.scale
         metalLayer.contentsScale = scale
         metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        
         if handle == nil && bounds.width > 0 && bounds.height > 0 {
             handle = SceneVMHandle(layer: metalLayer, size: bounds.size, scale: scale)
+            document?.sceneVMHandle = handle
+            loadProjectIfNeeded()
         } else {
             handle?.resize(to: bounds.size, scale: scale)
+        }
+    }
+    
+    private func loadProjectIfNeeded() {
+        guard let handle = handle, let document = document else { return }
+        if !document.projectJSON.isEmpty && document.projectJSON != "{}" {
+            _ = handle.loadProject(json: document.projectJSON)
         }
     }
 
@@ -173,7 +212,6 @@ final class MetalContainer: UIView {
     }
 
     private func toLogicalCoords(_ point: CGPoint) -> (CGFloat, CGFloat) {
-        // UIKit coordinates are already logical with origin top-left.
         return (point.x, point.y)
     }
 

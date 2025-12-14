@@ -1,19 +1,41 @@
 use scenevm::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UiDemoData {
+    slider_value: f32,
+    #[serde(default)]
+    param_sliders: Vec<f32>,
+}
+
+impl Default for UiDemoData {
+    fn default() -> Self {
+        Self {
+            slider_value: 50.0,
+            param_sliders: vec![50.0, 60.0, 70.0, 80.0],
+        }
+    }
+}
 
 struct UiDemo {
     workspace: Workspace,
     renderer: UiRenderer,
     slider_value: f32,
     noise_layer: usize,
+    param_sliders: Vec<f32>,
+    has_changes: bool,
 }
 
 impl UiDemo {
     fn new() -> Self {
+        let default = UiDemoData::default();
         Self {
             workspace: Workspace::new(),
             renderer: UiRenderer::new(),
-            slider_value: 50.0,
+            slider_value: default.slider_value,
             noise_layer: 0,
+            param_sliders: default.param_sliders,
+            has_changes: false,
         }
     }
 }
@@ -597,14 +619,28 @@ impl SceneVMApp for UiDemo {
                 UiAction::SliderChanged(id, value) => {
                     if id == "main_slider" {
                         self.slider_value = value;
+                        self.has_changes = true;
                         // Update just the label text using its string ID
                         if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
                             label.set_text(format!("Value: {:.1}", self.slider_value));
+                        }
+                    } else if id.starts_with("param_slider_") {
+                        // Update param sliders
+                        if let Some(idx_str) = id.strip_prefix("param_slider_") {
+                            if let Ok(idx) = idx_str.parse::<usize>() {
+                                if idx < self.param_sliders.len() {
+                                    self.param_sliders[idx] = value;
+                                    self.has_changes = true;
+                                }
+                            }
                         }
                     }
                 }
                 UiAction::ButtonGroupChanged(name, index) => {
                     println!("Button group '{}' changed to index {}", name, index);
+                }
+                UiAction::Custom { source_id, action } => {
+                    println!("Custom action from {}: {}", source_id, action);
                 }
             }
         }
@@ -650,6 +686,93 @@ impl SceneVMApp for UiDemo {
             pos: [x, y],
             pointer_id: 0,
         });
+    }
+
+    // Project Management Implementation
+
+    fn save_to_json(&mut self, _vm: &mut SceneVM) -> Option<String> {
+        let data = UiDemoData {
+            slider_value: self.slider_value,
+            param_sliders: self.param_sliders.clone(),
+        };
+
+        match serde_json::to_string_pretty(&data) {
+            Ok(json) => {
+                self.has_changes = false;
+                Some(json)
+            }
+            Err(e) => {
+                eprintln!("Failed to serialize project: {}", e);
+                None
+            }
+        }
+    }
+
+    fn load_from_json(&mut self, vm: &mut SceneVM, json: &str) -> bool {
+        match serde_json::from_str::<UiDemoData>(json) {
+            Ok(data) => {
+                self.slider_value = data.slider_value;
+                self.param_sliders = data.param_sliders;
+                self.has_changes = false;
+
+                // Update UI to reflect loaded values
+                if let Some(slider) = self.workspace.find_view_mut::<Slider>("main_slider") {
+                    slider.set_value(self.slider_value);
+                }
+                if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
+                    label.set_text(format!("Value: {:.1}", self.slider_value));
+                }
+
+                // Update parameter sliders
+                for (i, value) in self.param_sliders.iter().enumerate() {
+                    if let Some(slider) = self
+                        .workspace
+                        .find_view_mut::<Slider>(&format!("param_slider_{}", i))
+                    {
+                        slider.set_value(*value);
+                    }
+                }
+
+                // Rebuild the UI
+                vm.execute(Atom::SetBackground(Vec4::new(0.08, 0.08, 0.1, 1.0)));
+
+                true
+            }
+            Err(e) => {
+                eprintln!("Failed to deserialize project: {}", e);
+                false
+            }
+        }
+    }
+
+    fn new_project(&mut self, vm: &mut SceneVM) {
+        let default = UiDemoData::default();
+        self.slider_value = default.slider_value;
+        self.param_sliders = default.param_sliders;
+        self.has_changes = false;
+
+        // Reset UI
+        if let Some(slider) = self.workspace.find_view_mut::<Slider>("main_slider") {
+            slider.set_value(self.slider_value);
+        }
+        if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
+            label.set_text(format!("Value: {:.1}", self.slider_value));
+        }
+
+        for (i, value) in self.param_sliders.iter().enumerate() {
+            if let Some(slider) = self
+                .workspace
+                .find_view_mut::<Slider>(&format!("param_slider_{}", i))
+            {
+                slider.set_value(*value);
+            }
+        }
+
+        vm.execute(Atom::SetBackground(Vec4::new(0.08, 0.08, 0.1, 1.0)));
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.has_changes
     }
 }
 
