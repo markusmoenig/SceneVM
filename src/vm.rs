@@ -505,6 +505,7 @@ pub struct ComputeSdfUniforms {
     pub vm_flags: u32,
     pub anim_counter: u32,
     pub _pad_tail: u32,
+    pub viewport_rect: [f32; 4], // [x, y, width, height] in screen pixels. width=0 disables scissor.
     pub palette: [[f32; 4]; 256],
 }
 
@@ -3040,6 +3041,7 @@ impl VM {
             vm_flags: self.vm_flags(),
             anim_counter: self.animation_counter as u32,
             _pad_tail: 0,
+            viewport_rect: self.viewport_rect2d.unwrap_or([0.0, 0.0, 0.0, 0.0]),
             palette: self.palette,
         };
         if let Some(g) = self.gpu.as_ref() {
@@ -3091,8 +3093,18 @@ impl VM {
             });
             cpass.set_pipeline(g.compute_sdf_pipeline.as_ref().unwrap());
             cpass.set_bind_group(0, g.u_sdf_bg.as_ref().unwrap(), &[]);
-            let gx = (fb_w + 7) / 8;
-            let gy = (fb_h + 7) / 8;
+            let (dispatch_w, dispatch_h) = if let Some([_x, _y, w, h]) = self.viewport_rect2d {
+                if w > 0.0 && h > 0.0 {
+                    (w.ceil() as u32, h.ceil() as u32)
+                } else {
+                    (fb_w, fb_h)
+                }
+            } else {
+                (fb_w, fb_h)
+            };
+
+            let gx = (dispatch_w + 7) / 8;
+            let gy = (dispatch_h + 7) / 8;
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         queue.submit(Some(encoder.finish()));

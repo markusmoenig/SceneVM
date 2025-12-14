@@ -21,11 +21,13 @@ struct USdf {
   cam_near: f32,
   cam_far: f32,
   cam_kind: u32, // 0=OrthoIso, 1=OrbitPersp, 2=FirstPersonPersp
-  _pad_cam: vec3<u32>,
+  _pad_cam_align: vec3<u32>,
+  _pad_cam: vec4<u32>,
   data_len: u32,
   vm_flags: u32,
   anim_counter: u32,
   _pad_tail: u32,
+  viewport_rect: vec4<f32>, // [x, y, width, height] in screen pixels. width=0 means full screen.
   palette: array<vec4<f32>, 256>,
 };
 
@@ -49,12 +51,12 @@ fn sdf_data_at(i: u32) -> vec4<f32> {
   return SDF_DATA.data[i % len];
 }
 
-fn clear_if_needed(gid: vec3<u32>) {
+fn clear_if_needed(px: vec2<u32>) {
   // Host can set VM_FLAG_SKIP_CLEAR to keep previous frame alive.
   if (U.vm_flags & 1u) != 0u {
     return;
   }
-  textureStore(color_out, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(U.background.rgb, 1.0));
+  textureStore(color_out, vec2<i32>(i32(px.x), i32(px.y)), vec4<f32>(U.background.rgb, 1.0));
 }
 
 fn sdf_sample_atlas(rect: vec4<f32>, uv: vec2<f32>) -> vec4<f32> {

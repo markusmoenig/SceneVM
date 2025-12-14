@@ -37,20 +37,39 @@ fn render_scene(uv: vec2<f32>) -> vec4<f32> {
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x >= U.fb_size.x || gid.y >= U.fb_size.y) {
+  let use_viewport = (U.viewport_rect.z > 0.0) && (U.viewport_rect.w > 0.0);
+  let viewport_origin = vec2<u32>(
+    u32(max(U.viewport_rect.x, 0.0)),
+    u32(max(U.viewport_rect.y, 0.0))
+  );
+  let viewport_size = vec2<u32>(
+    u32(max(U.viewport_rect.z, 0.0)),
+    u32(max(U.viewport_rect.w, 0.0))
+  );
+
+  var px = gid.xy;
+  if (use_viewport) {
+    if (gid.x >= viewport_size.x || gid.y >= viewport_size.y) {
+      return;
+    }
+    let clamped_origin = min(viewport_origin, U.fb_size);
+    px = clamped_origin + gid.xy;
+  }
+
+  if (px.x >= U.fb_size.x || px.y >= U.fb_size.y) {
     return;
   }
 
   let uv = vec2<f32>(
-    f32(gid.x) / max(f32(U.fb_size.x), 1.0),
-    f32(gid.y) / max(f32(U.fb_size.y), 1.0)
+    f32(px.x) / max(f32(U.fb_size.x), 1.0),
+    f32(px.y) / max(f32(U.fb_size.y), 1.0)
   );
 
   if ((U.vm_flags & 1u) == 0u) {
     // Clear background when not preserving the surface.
-    clear_if_needed(gid);
+    clear_if_needed(px);
   }
 
   let color = render_scene(uv);
-  textureStore(color_out, vec2<i32>(i32(gid.x), i32(gid.y)), color);
+  textureStore(color_out, vec2<i32>(i32(px.x), i32(px.y)), color);
 }
