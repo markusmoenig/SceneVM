@@ -257,6 +257,9 @@ pub enum Atom {
     },
     /// Provide a custom WGSL body for the 2D compute shader. The VM will prepend a header and compile at runtime.
     SetSource2D(String),
+    /// Set the viewport rect for the 2D compute shader (x, y, width, height in screen pixels).
+    /// If None, uses full screen. The rect is passed to shader via uniforms.
+    SetViewportRect2D(Option<[f32; 4]>),
     /// Provide a custom WGSL body for the 3D compute shader. The VM will prepend a header and compile at runtime.
     SetSource3D(String),
     /// Provide a custom WGSL body for the SDF compute shader. The VM will prepend a header and compile at runtime.
@@ -421,6 +424,8 @@ pub struct Compute2DUniforms {
     pub vm_flags: u32,
     pub anim_counter: u32,
     pub _pad_lights: u32,
+    // Viewport rect: [x, y, width, height] in screen pixels. If width=0, use full screen.
+    pub viewport_rect: [f32; 4],
     pub palette: [[f32; 4]; 256],
 }
 
@@ -573,6 +578,7 @@ pub struct VM {
     pub gp9: Vec4<f32>,
     // --- Programmable compute shader sources
     pub source2d: String,
+    pub viewport_rect2d: Option<[f32; 4]>, // Optional viewport rect for 2D shader (x, y, w, h)
     pub source3d: String,
     pub source_sdf: String,
     pub sdf_data: Vec<[f32; 4]>,
@@ -1257,6 +1263,7 @@ impl VM {
             gp8: Vec4::new(0.0, 0.0, 0.0, 0.0),
             gp9: Vec4::new(0.0, 0.0, 0.0, 0.0),
             source2d,
+            viewport_rect2d: None,
             source3d,
             source_sdf,
             sdf_data: Vec::new(),
@@ -1551,6 +1558,9 @@ impl VM {
                 if let Some(g) = self.gpu.as_mut() {
                     g.compute2d_pipeline = None;
                 }
+            }
+            Atom::SetViewportRect2D(rect) => {
+                self.viewport_rect2d = rect;
             }
             Atom::SetSource3D(src) => {
                 self.source3d = src;
@@ -2385,6 +2395,7 @@ impl VM {
             vm_flags: self.vm_flags(),
             anim_counter: self.animation_counter as u32,
             _pad_lights: 0,
+            viewport_rect: self.viewport_rect2d.unwrap_or([0.0, 0.0, 0.0, 0.0]),
             palette: self.palette,
         };
         if let Some(g) = self.gpu.as_ref() {
@@ -2591,8 +2602,20 @@ impl VM {
             });
             cpass.set_pipeline(g.compute2d_pipeline.as_ref().unwrap());
             cpass.set_bind_group(0, g.u2d_bg.as_ref().unwrap(), &[]);
-            let gx = (fb_w + 7) / 8;
-            let gy = (fb_h + 7) / 8;
+
+            // Use viewport rect if set, otherwise use full framebuffer
+            let (dispatch_w, dispatch_h) = if let Some([_x, _y, w, h]) = self.viewport_rect2d {
+                if w > 0.0 && h > 0.0 {
+                    (w.ceil() as u32, h.ceil() as u32)
+                } else {
+                    (fb_w, fb_h)
+                }
+            } else {
+                (fb_w, fb_h)
+            };
+
+            let gx = (dispatch_w + 7) / 8;
+            let gy = (dispatch_h + 7) / 8;
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         queue.submit(Some(encoder.finish()));

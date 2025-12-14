@@ -4,6 +4,7 @@ struct UiDemo {
     workspace: Workspace,
     renderer: UiRenderer,
     slider_value: f32,
+    noise_layer: usize,
 }
 
 impl UiDemo {
@@ -12,6 +13,7 @@ impl UiDemo {
             workspace: Workspace::new(),
             renderer: UiRenderer::new(),
             slider_value: 50.0,
+            noise_layer: 0,
         }
     }
 }
@@ -455,10 +457,32 @@ impl SceneVMApp for UiDemo {
 
         let toolbar_group_node = self.workspace.add_view(toolbar_button_group);
         self.workspace.add_root(toolbar_group_node);
+
+        // Create a new VM layer for procedural noise shader
+        self.noise_layer = vm.add_vm_layer();
+        vm.set_active_vm(self.noise_layer);
+
+        // Load the noise shader on this layer
+        if let Some(bytes) = Embedded::get("noise_shader.wgsl") {
+            if let Ok(src) = std::str::from_utf8(bytes.data.as_ref()) {
+                vm.execute(Atom::SetSource2D(src.to_string()));
+            }
+        }
+
+        // Set viewport rect to a region in the top-right corner (400x300 box)
+        vm.execute(Atom::SetViewportRect2D(Some([900.0, 700.0, 400.0, 300.0])));
+
+        // Optional: set brightness via gp0
+        vm.execute(Atom::SetGP0(Vec4::new(0.1, 0.0, 0.0, 0.0)));
+
+        // Switch back to layer 0 for normal rendering
+        vm.set_active_vm(0);
     }
 
     fn needs_update(&mut self) -> bool {
-        self.workspace.is_dirty()
+        // Always update for animated noise layer
+        // self.workspace.is_dirty()
+        true
     }
 
     fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx) {
@@ -497,6 +521,13 @@ impl SceneVMApp for UiDemo {
         let text_cache = self.renderer.text_cache();
         let drawables = self.workspace.build(text_cache);
         self.renderer.render(vm.active_vm_mut(), &drawables);
+
+        // Animate the noise layer
+        vm.set_active_vm(self.noise_layer);
+        let counter = vm.active_vm().animation_counter;
+        vm.execute(Atom::SetAnimationCounter(counter + 1));
+        vm.set_active_vm(0);
+
         let _ = ctx.present(vm);
     }
 

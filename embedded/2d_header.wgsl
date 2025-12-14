@@ -16,6 +16,7 @@ struct U2D {
   vm_flags: u32,
   anim_counter: u32,
   _pad_lights: u32,
+  viewport_rect: vec4<f32>,  // [x, y, width, height] in screen pixels. width=0 means full screen.
   palette: array<vec4<f32>, 256>,
 };
 
