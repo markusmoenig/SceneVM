@@ -554,6 +554,29 @@ impl SceneVMApp for UiDemo {
         let canvas_toggle_node = self.workspace.add_view(canvas_toggle_button);
         self.workspace.add_root(canvas_toggle_node);
 
+        // === Color Wheel Demo ===
+        let color_wheel = ColorWheel::new(
+            [740.0, 40.0, 180.0, 180.0],   // Position in top-right area
+            Vec4::new(1.0, 0.5, 0.2, 1.0), // Initial orange color
+        )
+        .with_id("demo_color_wheel");
+
+        // Create the atlas tile for the color wheel
+        color_wheel.ensure_tile(vm.active_vm_mut());
+
+        let color_wheel_node = self.workspace.add_view(color_wheel);
+        self.workspace.add_root(color_wheel_node);
+
+        // Label for color wheel
+        let color_wheel_label = LabelRect::new(
+            "Color Wheel",
+            [740.0, 10.0, 180.0, 25.0],
+            14.0,
+            Vec4::new(0.7, 0.7, 0.75, 1.0),
+        );
+        let color_wheel_label_node = self.workspace.add_view(color_wheel_label);
+        self.workspace.add_root(color_wheel_label_node);
+
         // Create a new VM layer for procedural noise shader
         self.noise_layer = vm.add_vm_layer();
         vm.set_active_vm(self.noise_layer);
@@ -577,8 +600,8 @@ impl SceneVMApp for UiDemo {
 
     fn needs_update(&mut self) -> bool {
         // Always update for animated noise layer
-        // self.workspace.is_dirty()
-        true
+        self.workspace.is_dirty()
+        // true
     }
 
     fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx) {
@@ -639,10 +662,26 @@ impl SceneVMApp for UiDemo {
                 UiAction::ButtonGroupChanged(name, index) => {
                     println!("Button group '{}' changed to index {}", name, index);
                 }
+                UiAction::ColorChanged(id, color) => {
+                    println!(
+                        "Color changed from '{}': RGBA({:.3}, {:.3}, {:.3}, {:.3})",
+                        id, color[0], color[1], color[2], color[3]
+                    );
+                }
                 UiAction::Custom { source_id, action } => {
                     println!("Custom action from {}: {}", source_id, action);
                 }
             }
+        }
+
+        // Set GP0.z to the color wheel's HSV value for shader (ensure we're on layer 0)
+        vm.set_active_vm(0);
+        if let Some(color_wheel) = self
+            .workspace
+            .find_view_mut::<ColorWheel>("demo_color_wheel")
+        {
+            let hsv_value = color_wheel.hsv_value();
+            vm.execute(Atom::SetGP0(Vec4::new(0.0, 0.0, hsv_value, 0.0)));
         }
 
         // Build drawables from workspace

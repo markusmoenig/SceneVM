@@ -24,8 +24,8 @@ pub use renderer::UiRenderer;
 pub use style::{StyleId, StyleParams, StyleRegistry};
 pub use text::TextCache;
 pub use widgets::{
-    Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas, HAlign, Image,
-    ImageStyle, Label, LabelRect, ParamList, ParamListStyle, PopupAlignment, ProjectBrowser,
+    Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas, ColorWheel, HAlign,
+    Image, ImageStyle, Label, LabelRect, ParamList, ParamListStyle, PopupAlignment, ProjectBrowser,
     ProjectBrowserItem, ProjectBrowserStyle, Slider, SliderStyle, TextButton, Toolbar,
     ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
 };

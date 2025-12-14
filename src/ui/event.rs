@@ -32,6 +32,7 @@ pub enum UiAction {
     ButtonToggled(String, bool),
     SliderChanged(String, f32),
     ButtonGroupChanged(String, usize), // (group_name, active_index)
+    ColorChanged(String, [f32; 4]),    // (widget_id, RGBA color)
     Custom { source_id: String, action: String }, // For custom widgets like ProjectBrowser
 }
 
