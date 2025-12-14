@@ -1423,6 +1423,22 @@ impl SceneVM {
         }
     }
 
+    /// Fetch the source of a built-in shader body by name (e.g. "ui", "2d", "3d", "sdf", "noise").
+    pub fn default_shader_source(kind: &str) -> Option<String> {
+        let file_name = match kind {
+            "ui" => "ui_body.wgsl",
+            "2d" => "2d_body.wgsl",
+            "3d" => "3d_body.wgsl",
+            "sdf" => "sdf_body.wgsl",
+            _ => return None,
+        };
+
+        Embedded::get(file_name).map(|bytes| {
+            // Convert embedded bytes to owned string; avoids borrowing the embedded buffer.
+            String::from_utf8_lossy(bytes.data.as_ref()).into_owned()
+        })
+    }
+
     /// Internal shader compilation with diagnostics
     fn compile_shader_internal(
         &mut self,
