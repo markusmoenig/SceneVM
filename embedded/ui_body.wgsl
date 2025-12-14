@@ -56,7 +56,8 @@ fn shade_style_px(tile_index: u32, local_uv: vec2<f32>, rect_size: vec2<f32>, fb
   // Border calculation in pixel space - only apply if border_px > 0
   var surf = style.fill;
   if (border_px > 0.01) {
-    let border_band = 1.0 - smoothstep(-border_px - fw, -border_px + fw, dist);
+    // border_band = 1.0 at the edge, 0.0 in the center (inside border region)
+    let border_band = smoothstep(-border_px - fw, -border_px + fw, dist);
     surf = mix(style.fill, style.border, border_band);
   }
 

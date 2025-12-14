@@ -313,7 +313,7 @@ impl SceneVMApp for UiDemo {
         // Create a popup ParamList for a button
         let mut popup_param_list = ParamList::new(ParamListStyle {
             rect: [0.0, 0.0, 250.0, 150.0], // Position will be set by popup system
-            fill: Vec4::new(0.12, 0.12, 0.15, 1.0),
+            fill: Vec4::new(0.18, 0.18, 0.22, 1.0), // Slightly lighter for better visibility
             border: Vec4::new(0.4, 0.5, 0.7, 1.0),
             radius_px: 6.0,
             border_px: 2.0,
@@ -364,11 +364,39 @@ impl SceneVMApp for UiDemo {
             slider_nodes.push(slider_node);
         }
 
+        // Add a ButtonGroup to the popup ParamList
+        let popup_button_group = ButtonGroup::new(
+            "popup_group",
+            ButtonGroupStyle {
+                rect: [0.0, 0.0, 140.0, 28.0], // Will be positioned by ParamList
+                button_width: 44.0,
+                button_height: 28.0,
+                spacing: 2.0,
+                fill: Vec4::new(0.18, 0.18, 0.22, 1.0),
+                border: Vec4::new(0.3, 0.3, 0.35, 1.0),
+                active_fill: Vec4::new(0.4, 0.5, 0.7, 1.0),
+                active_border: Vec4::new(0.5, 0.6, 0.8, 1.0),
+                radius_px: 3.0,
+                border_px: 1.0,
+                layer: 101,
+            },
+        )
+        .with_id("popup_group")
+        .with_labels(vec![
+            "RGB".to_string(),
+            "HSV".to_string(),
+            "HEX".to_string(),
+        ]);
+
+        let popup_group_node = self.workspace.add_view(popup_button_group);
+        popup_param_list.add_item("Mode", popup_group_node);
+        slider_nodes.push(popup_group_node);
+
         let popup_param_list_node = self.workspace.add_view(popup_param_list);
 
-        // Attach sliders as children of the popup ParamList
-        for slider_node in slider_nodes {
-            self.workspace.attach(popup_param_list_node, slider_node);
+        // Attach all child widgets (sliders and button group) to the popup ParamList
+        for child_node in slider_nodes {
+            self.workspace.attach(popup_param_list_node, child_node);
         }
 
         // Create a button that opens the popup
@@ -399,6 +427,34 @@ impl SceneVMApp for UiDemo {
         .with_layer(11);
         let popup_button_label_node = self.workspace.add_view(popup_button_label);
         self.workspace.add_root(popup_button_label_node);
+
+        // Add a ButtonGroup to the toolbar area with textures
+        // Toolbar is at [40.0, 180.0, 600.0, 48.0]
+        let toolbar_button_group = ButtonGroup::new(
+            "toolbar_group",
+            ButtonGroupStyle {
+                rect: [420.0, 186.0, 200.0, 40.0], // Inside toolbar, right side, vertically centered
+                button_width: 60.0,
+                button_height: 36.0,
+                spacing: 4.0,
+                fill: Vec4::new(0.2, 0.2, 0.25, 1.0),
+                border: Vec4::new(0.3, 0.3, 0.35, 1.0),
+                active_fill: Vec4::new(0.3, 0.5, 0.7, 1.0),
+                active_border: Vec4::new(0.4, 0.6, 0.8, 1.0),
+                radius_px: 4.0,
+                border_px: 1.0,
+                layer: 11,
+            },
+        )
+        .with_id("toolbar_group")
+        .with_textures(vec![
+            Some(test_tile_id),
+            Some(pressed_tile_id),
+            Some(test_tile_id),
+        ]);
+
+        let toolbar_group_node = self.workspace.add_view(toolbar_button_group);
+        self.workspace.add_root(toolbar_group_node);
     }
 
     fn needs_update(&mut self) -> bool {
@@ -430,6 +486,9 @@ impl SceneVMApp for UiDemo {
                             label.set_text(format!("Value: {:.1}", self.slider_value));
                         }
                     }
+                }
+                UiAction::ButtonGroupChanged(name, index) => {
+                    println!("Button group '{}' changed to index {}", name, index);
                 }
             }
         }

@@ -30,6 +30,7 @@ pub enum UiAction {
     ButtonPressed(String),
     ButtonToggled(String, bool),
     SliderChanged(String, f32),
+    ButtonGroupChanged(String, usize), // (group_name, active_index)
 }
 
 /// Result of handling an event: whether a view dirtied itself and any actions.

@@ -309,24 +309,61 @@ impl Workspace {
                 param_list.set_position(x, y);
 
                 // Collect child widget rects
-                let mut updates = Vec::new();
                 let children = popup_node.children.clone();
+                let popup_x = param_list.style.rect[0];
+                let popup_y = param_list.style.rect[1];
+                let num_items = param_list.items.len();
+
+                // First N children match param_list.items - get their rects from ParamList
+                let mut updates = Vec::new();
                 for (index, child_id) in children.iter().enumerate() {
-                    let widget_rect = param_list.get_widget_rect(index, 180.0);
-                    updates.push((*child_id, widget_rect));
+                    if index < num_items {
+                        // This is a ParamList item - get its rect from ParamList
+                        let widget_rect = param_list.get_widget_rect(index, 180.0);
+                        updates.push((*child_id, Some(widget_rect), popup_x, popup_y));
+                    } else {
+                        // This is an additional child (not a ParamList item)
+                        updates.push((*child_id, None, popup_x, popup_y));
+                    }
                 }
                 updates
             }; // Borrow of popup_node ends here
 
             // Now update child widgets
-            for (child_id, widget_rect) in widget_updates {
+            for (child_id, widget_rect_opt, popup_x, popup_y) in widget_updates {
                 if let Some(child_node) = self.nodes.get_mut(&child_id) {
-                    if let Some(slider) = child_node
-                        .view
-                        .as_any_mut()
-                        .downcast_mut::<crate::ui::Slider>()
-                    {
-                        slider.set_rect(widget_rect);
+                    if let Some(widget_rect) = widget_rect_opt {
+                        // This is a ParamList item - position it using the rect from ParamList
+                        if let Some(slider) = child_node
+                            .view
+                            .as_any_mut()
+                            .downcast_mut::<crate::ui::Slider>()
+                        {
+                            slider.set_rect(widget_rect);
+                        } else if let Some(btn_group) = child_node
+                            .view
+                            .as_any_mut()
+                            .downcast_mut::<crate::ui::ButtonGroup>()
+                        {
+                            // ButtonGroup as ParamList item - use the rect from ParamList
+                            btn_group.style.rect = widget_rect;
+                        }
+                    } else {
+                        // This is an additional child (not a ParamList item)
+                        if let Some(btn_group) = child_node
+                            .view
+                            .as_any_mut()
+                            .downcast_mut::<crate::ui::ButtonGroup>()
+                        {
+                            // Store original relative position on first use
+                            if btn_group.original_rect.is_none() {
+                                btn_group.original_rect = Some(btn_group.style.rect);
+                            }
+
+                            // Position ButtonGroup relative to popup using original coordinates
+                            let [rel_x, rel_y, w, h] = btn_group.original_rect.unwrap();
+                            btn_group.style.rect = [popup_x + rel_x, popup_y + rel_y, w, h];
+                        }
                     }
                 }
             }

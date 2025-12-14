@@ -1,5 +1,6 @@
 mod align;
 mod button;
+mod button_group;
 mod image;
 mod label;
 mod label_rect;
@@ -9,6 +10,7 @@ mod toolbar;
 
 pub use align::{HAlign, VAlign};
 pub use button::{Button, ButtonKind, ButtonStyle, PopupAlignment};
+pub use button_group::{ButtonGroup, ButtonGroupStyle};
 pub use image::{Image, ImageStyle};
 pub use label::Label;
 pub use label_rect::LabelRect;

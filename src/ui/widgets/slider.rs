@@ -46,10 +46,12 @@ pub struct Slider {
     pub value_color: Vec4<f32>, // Color for value text
     pub value_size: f32,        // Font size for value text
     pub value_precision: usize, // Decimal places for value display
+    pub thumb_roundness: f32,   // Corner radius in pixels (defaults to thumb_radius for circle)
 }
 
 impl Slider {
     pub fn new(style: SliderStyle, min: f32, max: f32) -> Self {
+        let thumb_roundness = style.thumb_radius; // Default to circle
         Self {
             id: String::new(),
             render_id: Uuid::new_v4(),
@@ -63,6 +65,7 @@ impl Slider {
             value_color: Vec4::new(0.6, 0.6, 0.65, 1.0),
             value_size: 12.0,
             value_precision: 1,
+            thumb_roundness,
         }
     }
 
@@ -103,6 +106,11 @@ impl Slider {
 
     pub fn set_rect(&mut self, rect: [f32; 4]) {
         self.style.rect = rect;
+    }
+
+    pub fn with_thumb_roundness(mut self, roundness: f32) -> Self {
+        self.thumb_roundness = roundness;
+        self
     }
 
     fn thumb_position(&self) -> [f32; 2] {
@@ -192,7 +200,7 @@ impl UiView for Slider {
             });
         }
 
-        // Draw thumb (circle - radius in pixels)
+        // Draw thumb
         let [tx, ty] = self.thumb_position();
         let r = self.style.thumb_radius;
         let thumb_size = r * 2.0;
@@ -201,7 +209,7 @@ impl UiView for Slider {
             rect: [tx - r, ty - r, thumb_size, thumb_size],
             fill: self.style.thumb_color,
             border: Vec4::new(0.0, 0.0, 0.0, 0.0),
-            radius_px: r, // Pixel radius
+            radius_px: self.thumb_roundness, // Use roundness from slider instance
             border_px: 0.0,
             layer: self.style.layer + 2,
         });
