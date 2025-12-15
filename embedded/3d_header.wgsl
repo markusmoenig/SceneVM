@@ -183,6 +183,7 @@ struct Grid3DHeader {
   cell_size: vec4<f32>,  // xyz, pad
   dims: vec4<u32>,       // nx, ny, nz, pad
   ranges: vec4<u32>,     // nodes_start, tris_start, node_count, tri_count
+  visibility: vec4<u32>, // vis_start, vis_word_count, pad, pad
 };
 @group(0) @binding(7) var<uniform> gridH: Grid3DHeader;
 struct GridDataBuffer {
@@ -397,6 +398,30 @@ fn bvh_tri_id(offset: u32) -> u32 {
   return grid_data.data[bvh_tris_start() + offset];
 }
 
+// Check if a triangle is visible using the packed bitmask
+fn is_tri_visible(tri_idx: u32) -> bool {
+  let vis_start = gridH.visibility.x;
+  let vis_word_count = gridH.visibility.y;
+
+  // No visibility data means all triangles are visible
+  if (vis_word_count == 0u) {
+    return true;
+  }
+
+  // Calculate which word and bit this triangle's visibility is stored in
+  let word_idx = tri_idx / 32u;
+  let bit_idx = tri_idx % 32u;
+
+  // Out of bounds check
+  if (word_idx >= vis_word_count) {
+    return false;
+  }
+
+  // Read the visibility word and check the bit
+  let vis_word = grid_data.data[vis_start + word_idx];
+  return (vis_word & (1u << bit_idx)) != 0u;
+}
+
 // Legacy DDA API surface (kept for compatibility; no longer used internally)
 struct DDAState {
   tMax:   vec3<f32>,
@@ -470,6 +495,9 @@ fn sv_trace_grid(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> TraceHit
         let tri = bvh_tri_id(base + i);
         if (tri >= bvh_tri_count()) { continue; }
         if (tri * 3u + 2u >= arrayLength(&indices3d.data)) { continue; }
+
+        // Skip invisible triangles
+        if (!is_tri_visible(tri)) { continue; }
 
         let i0 = indices3d.data[3u*tri + 0u];
         let i1 = indices3d.data[3u*tri + 1u];

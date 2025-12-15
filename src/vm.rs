@@ -512,10 +512,11 @@ pub struct ComputeSdfUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Grid3DHeader {
-    pub origin: [f32; 4],    // xyz, pad
-    pub cell_size: [f32; 4], // xyz, pad
-    pub dims: [u32; 4],      // nx, ny, nz, pad
-    pub ranges: [u32; 4],
+    pub origin: [f32; 4],     // xyz, pad
+    pub cell_size: [f32; 4],  // xyz, pad
+    pub dims: [u32; 4],       // nx, ny, nz, pad
+    pub ranges: [u32; 4],     // nodes_start, tris_start, node_count, tri_count
+    pub visibility: [u32; 4], // vis_start, vis_word_count, pad, pad
 }
 
 pub const SCENEVM_2D_CS_WGSL: &str = r#"
@@ -601,6 +602,8 @@ pub struct VM {
     pub accel_dirty: bool,
     cached_v3: Vec<Vert3DPod>,
     cached_i3: Vec<u32>,
+    cached_tri_visibility: Vec<u32>, // Per-triangle visibility bitmask (1 bit per triangle)
+    visibility_dirty: bool,          // True when only visibility changed (no BVH rebuild needed)
     geometry2d_dirty: bool,
     skip_surface_clear: bool,
     cached_v2: Vec<Vert2DPod>,
@@ -1279,6 +1282,8 @@ impl VM {
             bvh_leaf_size: 8,
             cached_v3: Vec::new(),
             cached_i3: Vec::new(),
+            cached_tri_visibility: Vec::new(),
+            visibility_dirty: false,
             geometry2d_dirty: true,
             skip_surface_clear: false,
             cached_v2: Vec::new(),
@@ -1319,7 +1324,9 @@ impl VM {
                     self.mark_2d_dirty();
                 }
                 if dirty_3d {
-                    self.accel_dirty = true;
+                    // Only mark visibility dirty, NOT accel_dirty
+                    // This avoids rebuilding the BVH structure
+                    self.visibility_dirty = true;
                 }
             }
             Atom::AddTile {
@@ -2709,14 +2716,13 @@ impl VM {
         if self.accel_dirty || self.cached_v3.is_empty() {
             let mut v3: Vec<Vert3DPod> = Vec::new();
             let mut i3: Vec<u32> = Vec::new();
+            let mut tri_visibility: Vec<bool> = Vec::new();
 
             for (_cid, ch) in &self.chunks_map {
                 for poly_list in ch.polys3d_map.values() {
                     for poly in poly_list {
-                        if !poly.visible {
-                            continue;
-                        }
-
+                        // IMPORTANT: Include ALL geometry in BVH, not just visible
+                        // We'll track visibility separately
                         let tile_index = match self.shared_atlas.tile_index(&poly.tile_id) {
                             Some(idx) => idx,
                             None => continue,
@@ -2784,6 +2790,8 @@ impl VM {
                                 base + b as u32,
                                 base + c as u32,
                             ]);
+                            // Track visibility per triangle
+                            tri_visibility.push(poly.visible);
                         }
                     }
                 }
@@ -2805,11 +2813,62 @@ impl VM {
             if i3.is_empty() {
                 // AMD fix: Ensure minimum 16-byte buffer size
                 i3.extend_from_slice(&[0u32; 4]);
+                tri_visibility.push(false);
             }
 
             self.cached_v3 = v3;
             self.cached_i3 = i3;
+
+            // Convert bool visibility to packed u32 bitmask
+            let tri_count = tri_visibility.len();
+            let word_count = (tri_count + 31) / 32;
+            let mut visibility_bits = vec![0u32; word_count.max(1)];
+            for (tri_idx, &visible) in tri_visibility.iter().enumerate() {
+                if visible {
+                    let word_idx = tri_idx / 32;
+                    let bit_idx = tri_idx % 32;
+                    visibility_bits[word_idx] |= 1u32 << bit_idx;
+                }
+            }
+            self.cached_tri_visibility = visibility_bits;
+
             geometry_changed = true;
+            self.visibility_dirty = false; // Reset since we just rebuilt everything
+        }
+
+        // --- Update visibility buffer if only visibility changed (no geometry rebuild) ---
+        if self.visibility_dirty && !geometry_changed {
+            // Rebuild visibility bitmask from current chunk data
+            let mut tri_visibility: Vec<bool> = Vec::new();
+
+            for (_cid, ch) in &self.chunks_map {
+                for poly_list in ch.polys3d_map.values() {
+                    for poly in poly_list {
+                        // Count triangles for this poly
+                        for _ in &poly.indices {
+                            tri_visibility.push(poly.visible);
+                        }
+                    }
+                }
+            }
+
+            if tri_visibility.is_empty() {
+                tri_visibility.push(false);
+            }
+
+            // Convert to packed bitmask
+            let tri_count = tri_visibility.len();
+            let word_count = (tri_count + 31) / 32;
+            let mut visibility_bits = vec![0u32; word_count.max(1)];
+            for (tri_idx, &visible) in tri_visibility.iter().enumerate() {
+                if visible {
+                    let word_idx = tri_idx / 32;
+                    let bit_idx = tri_idx % 32;
+                    visibility_bits[word_idx] |= 1u32 << bit_idx;
+                }
+            }
+            self.cached_tri_visibility = visibility_bits;
+            self.visibility_dirty = false;
         }
 
         let mut grid_changed = false;
@@ -2840,15 +2899,28 @@ impl VM {
 
                 let nodes_start = 0u32;
                 let tris_start = nodes_start + node_data.len() as u32;
-                let mut combined: Vec<u32> = Vec::with_capacity(node_data.len() + tris_data.len());
+
+                // Append visibility bitmask to grid_data to avoid extra storage buffer
+                let visibility_data = if self.cached_tri_visibility.is_empty() {
+                    vec![0u32]
+                } else {
+                    self.cached_tri_visibility.clone()
+                };
+                let vis_start = tris_start + tris_data.len() as u32;
+                let vis_word_count = visibility_data.len() as u32;
+
+                let mut combined: Vec<u32> =
+                    Vec::with_capacity(node_data.len() + tris_data.len() + visibility_data.len());
                 combined.extend_from_slice(&node_data);
                 combined.extend_from_slice(&tris_data);
+                combined.extend_from_slice(&visibility_data);
 
                 let grid_hdr_data = Grid3DHeader {
                     origin: [gr.origin.x, gr.origin.y, gr.origin.z, 0.0],
                     cell_size: [gr.extent.x, gr.extent.y, gr.extent.z, 0.0],
                     dims: [1, 1, 1, 0],
                     ranges: [nodes_start, tris_start, gr.node_count, gr.tri_count],
+                    visibility: [vis_start, vis_word_count, 0, 0],
                 };
 
                 g.grid_hdr = Some(
@@ -3120,6 +3192,7 @@ impl VM {
         fb_w: u32,
         fb_h: u32,
         screen_uv: [f32; 2],
+        include_hidden: bool,
     ) -> Option<(GeoId, Vec3<f32>, f32)> {
         if fb_w == 0 || fb_h == 0 {
             return None;
@@ -3135,7 +3208,11 @@ impl VM {
         for chunk in self.chunks_map.values() {
             for poly_list in chunk.polys3d_map.values() {
                 for poly in poly_list {
-                    if !poly.visible || poly.indices.is_empty() || poly.vertices.is_empty() {
+                    if poly.indices.is_empty() || poly.vertices.is_empty() {
+                        continue;
+                    }
+
+                    if !poly.visible && !include_hidden {
                         continue;
                     }
 
