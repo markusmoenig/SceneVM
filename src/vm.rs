@@ -70,12 +70,13 @@ pub struct Vert3DPod {
     pub pos: [f32; 3],
     pub _pad_pos: f32,     // 16
     pub uv: [f32; 2],      // +8  = 24
-    pub _pad_uv: [f32; 2], // +8  = 32  <-- NEW: force 16-byte alignment before next vec4
-    pub tile_index: u32,
-    pub _pad_tile: u32,
-    pub _pad_tile2: [f32; 2],
+    pub _pad_uv: [f32; 2], // +8  = 32
+    pub tile_index: u32,   // Primary texture
+    pub tile_index2: u32,  // Secondary texture (for blending)
+    pub blend_factor: f32, // 0.0=all primary, 1.0=all secondary
+    pub _pad_blend: f32,   // Padding
     pub normal: [f32; 3],
-    pub _pad_n: f32, // +16 = 64 total
+    pub _pad_n: f32, // +16 = 64 total (SAME SIZE!)
 }
 
 #[repr(C)]
@@ -2768,17 +2769,35 @@ impl VM {
 
                         let base = v3.len() as u32;
 
+                        // Get blend texture index if available
+                        let tile_index2 = if let Some(tid2) = poly.tile_id2 {
+                            self.atlas.tile_to_index(tid2).unwrap_or(tile_index)
+                        } else {
+                            tile_index
+                        };
+
+                        // Validate blend_weights length matches vertices
+                        let has_valid_blend = poly.tile_id2.is_some()
+                            && poly.blend_weights.len() == poly.vertices.len();
+
                         for (i, p) in poly_pos.iter().enumerate() {
                             let uv0 = poly.uvs[i];
                             let n = poly_nrm[i];
+                            let blend_factor = if has_valid_blend {
+                                poly.blend_weights[i].clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+
                             v3.push(Vert3DPod {
                                 pos: [p[0], p[1], p[2]],
                                 _pad_pos: 0.0,
                                 uv: [uv0[0], uv0[1]],
                                 _pad_uv: [0.0, 0.0],
                                 tile_index,
-                                _pad_tile: 0,
-                                _pad_tile2: [0.0, 0.0],
+                                tile_index2,
+                                blend_factor,
+                                _pad_blend: 0.0,
                                 normal: [n[0], n[1], n[2]],
                                 _pad_n: 0.0,
                             });
@@ -2804,8 +2823,9 @@ impl VM {
                     uv: [0.0; 2],
                     _pad_uv: [0.0, 0.0],
                     tile_index: 0,
-                    _pad_tile: 0,
-                    _pad_tile2: [0.0, 0.0],
+                    tile_index2: 0,
+                    blend_factor: 0.0,
+                    _pad_blend: 0.0,
                     normal: [0.0, 0.0, 1.0],
                     _pad_n: 0.0,
                 });

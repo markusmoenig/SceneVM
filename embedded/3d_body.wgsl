@@ -401,10 +401,10 @@ fn trace_unified(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> UnifiedH
         var N = normalize(v0.normal * w + v1.normal * geo_hit.u + v2.normal * geo_hit.v);
 
         // Sample albedo and material
-        var albedo = sv_tri_sample_albedo(i0, i1, i2, geo_hit.u, geo_hit.v);
+        var albedo = sv_tri_sample_albedo_blended(i0, i1, i2, geo_hit.u, geo_hit.v);
         albedo = vec4<f32>(pow(albedo.rgb, vec3<f32>(2.2)), albedo.a);
 
-        let mat_data = sv_tri_sample_rmoe(i0, i1, i2, geo_hit.u, geo_hit.v);
+        let mat_data = sv_tri_sample_rmoe_blended(i0, i1, i2, geo_hit.u, geo_hit.v);
         let mat = unpack_material(mat_data);
 
         // Apply bump mapping
@@ -475,7 +475,7 @@ fn trace_shadow_unified(ro: vec3<f32>, rd: vec3<f32>, tmax: f32) -> f32 {
         let i0 = indices3d.data[3u * tri + 0u];
         let i1 = indices3d.data[3u * tri + 1u];
         let i2 = indices3d.data[3u * tri + 2u];
-        let mat_data = sv_tri_sample_rmoe(i0, i1, i2, geo_hit.u, geo_hit.v);
+        let mat_data = sv_tri_sample_rmoe_blended(i0, i1, i2, geo_hit.u, geo_hit.v);
         let mat = unpack_material(mat_data);
         return mat.opacity;
     }

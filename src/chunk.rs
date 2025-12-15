@@ -215,6 +215,34 @@ impl Chunk {
             indices,
             layer,
             visible,
+            tile_id2: None,
+            blend_weights: Vec::new(),
+        });
+    }
+
+    /// Add a 3D polygon with texture blending
+    pub fn add_poly_3d_blended(
+        &mut self,
+        id: GeoId,
+        tile_id: uuid::Uuid,
+        tile_id2: uuid::Uuid,
+        vertices: Vec<[f32; 4]>,
+        uvs: Vec<[f32; 2]>,
+        blend_weights: Vec<f32>,
+        indices: Vec<(usize, usize, usize)>,
+        layer: i32,
+        visible: bool,
+    ) {
+        self.polys3d_map.entry(id).or_default().push(Poly3D {
+            id,
+            tile_id,
+            vertices,
+            uvs,
+            indices,
+            layer,
+            visible,
+            tile_id2: Some(tile_id2),
+            blend_weights,
         });
     }
 
@@ -286,6 +314,8 @@ impl Chunk {
             indices,
             layer: 0,
             visible,
+            tile_id2: None,
+            blend_weights: Vec::new(),
         };
         self.polys3d_map.entry(id).or_default().push(poly);
     }
@@ -375,6 +405,8 @@ impl Chunk {
             indices,
             layer,
             visible: true,
+            tile_id2: None,
+            blend_weights: Vec::new(),
         };
         self.polys3d_map.entry(id).or_default().push(poly);
     }

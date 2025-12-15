@@ -11,6 +11,9 @@ pub struct Poly3D {
     pub indices: Vec<(usize, usize, usize)>,
     pub layer: i32, // for future (not used by ray depth)
     pub visible: bool,
+    // Vertex blending support (optional)
+    pub tile_id2: Option<uuid::Uuid>, // Secondary texture for blending
+    pub blend_weights: Vec<f32>,      // Per-vertex blend factor (0.0=primary, 1.0=secondary)
 }
 
 impl Poly3D {
@@ -31,6 +34,8 @@ impl Poly3D {
             indices,
             layer: 0,
             visible: true,
+            tile_id2: None,
+            blend_weights: Vec::new(),
         }
     }
 
@@ -98,6 +103,8 @@ impl Poly3D {
             indices,
             layer: 0,
             visible: true,
+            tile_id2: None,
+            blend_weights: Vec::new(),
         }
     }
 
@@ -175,6 +182,8 @@ impl Poly3D {
             indices,
             layer: 0,
             visible: true,
+            tile_id2: None,
+            blend_weights: Vec::new(),
         }
     }
 
@@ -232,6 +241,8 @@ impl Poly3D {
             indices,
             layer: 0,
             visible: true,
+            tile_id2: None,
+            blend_weights: Vec::new(),
         }
     }
 
@@ -268,6 +279,20 @@ impl Poly3D {
     #[inline]
     pub fn with_tile_id(mut self, tile_id: Uuid) -> Self {
         self.tile_id = tile_id;
+        self
+    }
+
+    /// Set the secondary texture for vertex blending
+    #[inline]
+    pub fn with_blend_texture(mut self, tile_id2: Uuid) -> Self {
+        self.tile_id2 = Some(tile_id2);
+        self
+    }
+
+    /// Set per-vertex blend weights (0.0 = primary texture, 1.0 = secondary texture)
+    #[inline]
+    pub fn with_blend_weights(mut self, blend_weights: Vec<f32>) -> Self {
+        self.blend_weights = blend_weights;
         self
     }
 }

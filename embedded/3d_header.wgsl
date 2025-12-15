@@ -165,10 +165,12 @@ fn sd_ray_billboard(ro: vec3<f32>, rd: vec3<f32>, cmd: DynBillboardCmd) -> DynBi
 // Vert3D layout (std430): Each member aligned to its natural alignment
 // - uv       : OBJECT UVs (not atlas-mapped). These can be any scale; we wrap in shader.
 struct Vert3D {
-  pos: vec3<f32>, _pad0: f32,               // offset 0, size 16 (vec3 needs 16-byte for vec4 slot)
-  uv: vec2<f32>, _pad_uv: vec2<f32>,        // offset 16, size 16 (two vec2s = 16 bytes)
-  tile_index: u32, _pad_tile: u32,          // offset 32, size 8
-  _pad_tile2: vec2<f32>,                    // offset 40, size 8 (vec2 aligned to 8)
+  pos: vec3<f32>, _pad0: f32,               // offset 0, size 16
+  uv: vec2<f32>, _pad_uv: vec2<f32>,        // offset 16, size 16
+  tile_index: u32,                          // offset 32, size 4 (primary texture)
+  tile_index2: u32,                         // offset 36, size 4 (secondary texture for blending)
+  blend_factor: f32,                        // offset 40, size 4 (0.0=primary, 1.0=secondary)
+  _pad_blend: f32,                          // offset 44, size 4
   normal: vec3<f32>, _pad2: f32             // offset 48, size 16
 };
 struct Verts3D { data: array<Vert3D> };
@@ -308,6 +310,94 @@ fn sv_tri_sample_albedo(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec4<f32
 fn sv_tri_sample_rmoe(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec4<f32> {
   let uv = sv_tri_atlas_uv_obj(i0, i1, i2, bu, bv);
   return textureSampleLevel(atlas_mat_tex, atlas_smp, uv, 0.0);
+}
+
+// ===== Vertex Blending Functions =====
+
+// Sample albedo for a specific tile (not triangle-based)
+fn sv_sample_tile_albedo(tile_index: u32, uv: vec2<f32>) -> vec4<f32> {
+  let frame = sv_tile_frame(tile_index);
+  var uv_wrapped = fract(uv);
+  uv_wrapped.y = fract(1.0 - uv_wrapped.y);
+  let uv_atlas = frame.ofs + uv_wrapped * frame.scale;
+
+  let atlas_dims = vec2<f32>(textureDimensions(atlas_tex, 0));
+  let pad_uv = vec2<f32>(0.5) / atlas_dims;
+  let uv_min = frame.ofs + pad_uv;
+  let uv_max = frame.ofs + frame.scale - pad_uv;
+  let uv_clamped = clamp(uv_atlas, uv_min, uv_max);
+
+  return textureSampleLevel(atlas_tex, atlas_smp, uv_clamped, 0.0);
+}
+
+// Sample material (RMOE) for a specific tile
+fn sv_sample_tile_rmoe(tile_index: u32, uv: vec2<f32>) -> vec4<f32> {
+  let frame = sv_tile_frame(tile_index);
+  var uv_wrapped = fract(uv);
+  uv_wrapped.y = fract(1.0 - uv_wrapped.y);
+  let uv_atlas = frame.ofs + uv_wrapped * frame.scale;
+
+  let atlas_dims = vec2<f32>(textureDimensions(atlas_mat_tex, 0));
+  let pad_uv = vec2<f32>(0.5) / atlas_dims;
+  let uv_min = frame.ofs + pad_uv;
+  let uv_max = frame.ofs + frame.scale - pad_uv;
+  let uv_clamped = clamp(uv_atlas, uv_min, uv_max);
+
+  return textureSampleLevel(atlas_mat_tex, atlas_smp, uv_clamped, 0.0);
+}
+
+// Blend albedo between two textures based on vertex blend factors
+fn sv_tri_sample_albedo_blended(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec4<f32> {
+  // Get interpolated blend factor from vertices
+  let blend0 = verts3d.data[i0].blend_factor;
+  let blend1 = verts3d.data[i1].blend_factor;
+  let blend2 = verts3d.data[i2].blend_factor;
+  let w = 1.0 - bu - bv;
+  let blend = blend0 * w + blend1 * bu + blend2 * bv;
+
+  // Get tile indices (assume all vertices share same tiles for now)
+  let tile1 = verts3d.data[i0].tile_index;
+  let tile2 = verts3d.data[i0].tile_index2;
+
+  // Get interpolated UV
+  let uv0 = verts3d.data[i0].uv;
+  let uv1 = verts3d.data[i1].uv;
+  let uv2 = verts3d.data[i2].uv;
+  let uv = uv0 * w + uv1 * bu + uv2 * bv;
+
+  // Sample both textures
+  let albedo1 = sv_sample_tile_albedo(tile1, uv);
+  let albedo2 = sv_sample_tile_albedo(tile2, uv);
+
+  // Blend between them
+  return mix(albedo1, albedo2, blend);
+}
+
+// Blend material (RMOE) between two textures based on vertex blend factors
+fn sv_tri_sample_rmoe_blended(i0: u32, i1: u32, i2: u32, bu: f32, bv: f32) -> vec4<f32> {
+  // Get interpolated blend factor from vertices
+  let blend0 = verts3d.data[i0].blend_factor;
+  let blend1 = verts3d.data[i1].blend_factor;
+  let blend2 = verts3d.data[i2].blend_factor;
+  let w = 1.0 - bu - bv;
+  let blend = blend0 * w + blend1 * bu + blend2 * bv;
+
+  // Get tile indices
+  let tile1 = verts3d.data[i0].tile_index;
+  let tile2 = verts3d.data[i0].tile_index2;
+
+  // Get interpolated UV
+  let uv0 = verts3d.data[i0].uv;
+  let uv1 = verts3d.data[i1].uv;
+  let uv2 = verts3d.data[i2].uv;
+  let uv = uv0 * w + uv1 * bu + uv2 * bv;
+
+  // Sample both material textures
+  let rmoe1 = sv_sample_tile_rmoe(tile1, uv);
+  let rmoe2 = sv_sample_tile_rmoe(tile2, uv);
+
+  // Blend between them
+  return mix(rmoe1, rmoe2, blend);
 }
 
 fn sv_interp3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, u: f32, v: f32) -> vec3<f32> {
