@@ -44,7 +44,7 @@ pub enum GeoId {
     Light(u32),
     ItemLight(u32),
     Triangle(u32),
-    Terrain(u32),
+    Terrain(i32, i32),
     Hole(u32, u32),
 }
 
@@ -2771,7 +2771,7 @@ impl VM {
 
                         // Get blend texture index if available
                         let tile_index2 = if let Some(tid2) = poly.tile_id2 {
-                            self.atlas.tile_to_index(tid2).unwrap_or(tile_index)
+                            self.shared_atlas.tile_index(&tid2).unwrap_or(tile_index)
                         } else {
                             tile_index
                         };
