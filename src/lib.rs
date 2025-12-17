@@ -150,6 +150,7 @@ struct CompositingPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    target_format: wgpu::TextureFormat,
 }
 
 impl CompositingPipeline {
@@ -262,6 +263,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             pipeline,
             bind_group_layout,
             sampler,
+            target_format,
         }
     }
 }
@@ -569,8 +571,9 @@ impl SceneVM {
         h: u32,
         log_errors: bool,
         compositing_pipeline: &mut Option<CompositingPipeline>,
-        surface_format: wgpu::TextureFormat,
     ) {
+        // The surface texture is always created with Rgba8Unorm in `Texture::ensure_gpu_with`
+        let target_format = wgpu::TextureFormat::Rgba8Unorm;
         // Render each VM to its own layer texture
         // Explicitly clear base layer texture before rendering
         base_vm.ensure_layer_texture(device, w, h);
@@ -655,8 +658,12 @@ impl SceneVM {
         surface.ensure_gpu_with(device);
 
         // Initialize compositing pipeline if needed
-        if compositing_pipeline.is_none() {
-            *compositing_pipeline = Some(CompositingPipeline::new(device, surface_format));
+        if compositing_pipeline
+            .as_ref()
+            .map(|p| p.target_format != target_format)
+            .unwrap_or(true)
+        {
+            *compositing_pipeline = Some(CompositingPipeline::new(device, target_format));
         }
 
         let pipeline = compositing_pipeline.as_ref().unwrap();
@@ -744,7 +751,9 @@ impl SceneVM {
 
     /// Append a new VM layer that will render on top of the existing ones. Returns its layer index.
     pub fn add_vm_layer(&mut self) -> usize {
-        let vm = VM::new_with_shared_atlas(self.atlas.clone());
+        // Overlays default to transparent so they don't hide layers below unless drawn into.
+        let mut vm = VM::new_with_shared_atlas(self.atlas.clone());
+        vm.background = vek::Vec4::new(0.0, 0.0, 0.0, 0.0);
         self.overlay_vms.push(vm);
         self.refresh_layer_metadata();
         self.total_vm_count() - 1
@@ -1347,7 +1356,6 @@ impl SceneVM {
             h,
             self.log_layer_activity,
             &mut self.compositing_pipeline,
-            ws.format,
         );
 
         let frame = match ws.surface.get_current_texture() {
@@ -1462,7 +1470,6 @@ impl SceneVM {
             h,
             self.log_layer_activity,
             &mut self.compositing_pipeline,
-            wgpu::TextureFormat::Rgba8Unorm,
         );
 
         // Readback into the surface's CPU memory (blocking on native, non-blocking noop on wasm)
@@ -1503,7 +1510,6 @@ impl SceneVM {
             h,
             self.log_layer_activity,
             &mut self.compositing_pipeline,
-            wgpu::TextureFormat::Rgba8Unorm,
         );
 
         // Start readback and await readiness
@@ -1628,7 +1634,6 @@ impl SceneVM {
                     h,
                     self.log_layer_activity,
                     &mut self.compositing_pipeline,
-                    wgpu::TextureFormat::Rgba8Unorm,
                 );
 
                 // Start non-blocking readback into the surface texture (map_async sets the flag)
