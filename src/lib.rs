@@ -64,9 +64,9 @@ pub mod prelude {
             ColorWheel, Drawable, FileDialog, HAlign, HStack, Image, ImageStyle, Label, LabelRect,
             NodeId, ParamList, ParamListStyle, PopupAlignment, Project, ProjectBrowser,
             ProjectBrowserItem, ProjectBrowserStyle, ProjectError, ProjectMetadata, RecentProject,
-            RecentProjects, Slider, SliderStyle, TextButton, Toolbar, ToolbarOrientation,
-            ToolbarSeparator, ToolbarStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView,
-            VAlign, VStack, ViewContext, Workspace, create_tile_material,
+            RecentProjects, Slider, SliderStyle, Spacer, TextButton, Theme, Toolbar,
+            ToolbarOrientation, ToolbarSeparator, ToolbarStyle, UiAction, UiEvent, UiEventKind,
+            UiRenderer, UiView, VAlign, VStack, ViewContext, Workspace, create_tile_material,
         },
     };
 

@@ -9,6 +9,7 @@ pub mod layouts;
 mod renderer;
 mod style;
 mod text;
+mod theme;
 mod widgets;
 mod workspace;
 
@@ -19,14 +20,15 @@ mod project_browser;
 
 pub use drawable::{Drawable, UiColor, UiImage};
 pub use event::{UiAction, UiEvent, UiEventKind, UiEventOutcome};
-pub use layouts::{Alignment, HStack, VStack};
+pub use layouts::{Alignment, HStack, Layoutable, VStack};
 pub use renderer::UiRenderer;
 pub use style::{StyleId, StyleParams, StyleRegistry};
 pub use text::TextCache;
+pub use theme::Theme;
 pub use widgets::{
     Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas, ColorWheel, HAlign,
     Image, ImageStyle, Label, LabelRect, ParamList, ParamListStyle, PopupAlignment, ProjectBrowser,
-    ProjectBrowserItem, ProjectBrowserStyle, Slider, SliderStyle, TextButton, Toolbar,
+    ProjectBrowserItem, ProjectBrowserStyle, Slider, SliderStyle, Spacer, TextButton, Toolbar,
     ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
 };
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};

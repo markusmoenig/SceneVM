@@ -2404,7 +2404,9 @@ impl VM {
             vm_flags: self.vm_flags(),
             anim_counter: self.animation_counter as u32,
             _pad_lights: 0,
-            viewport_rect: self.viewport_rect2d.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+            viewport_rect: self
+                .viewport_rect2d
+                .unwrap_or([0.0, 0.0, fb_w as f32, fb_h as f32]),
             palette: self.palette,
         };
         if let Some(g) = self.gpu.as_ref() {

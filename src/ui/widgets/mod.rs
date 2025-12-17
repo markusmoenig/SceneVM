@@ -9,6 +9,7 @@ mod label_rect;
 mod param_list;
 mod project_browser;
 mod slider;
+mod spacer;
 mod text_button;
 mod toolbar;
 
@@ -23,5 +24,6 @@ pub use label_rect::LabelRect;
 pub use param_list::{ParamList, ParamListStyle};
 pub use project_browser::{ProjectBrowser, ProjectBrowserItem, ProjectBrowserStyle};
 pub use slider::{Slider, SliderStyle};
+pub use spacer::Spacer;
 pub use text_button::TextButton;
 pub use toolbar::{Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle};

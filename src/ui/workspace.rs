@@ -134,21 +134,32 @@ impl Workspace {
         layer: i32,
         text_cache: &TextCache,
     ) {
-        let Some(node) = self.nodes.get_mut(&id) else {
-            return;
-        };
-
-        // Check if this is a Canvas and if it's visible
-        let is_visible_canvas =
+        // Check if this is a Canvas and if it's visible (before borrowing node mutably)
+        let is_visible_canvas = {
+            let Some(node) = self.nodes.get(&id) else {
+                return;
+            };
             if let Some(canvas) = node.view.as_any().downcast_ref::<crate::ui::Canvas>() {
                 canvas.is_visible()
             } else {
                 true // Not a canvas, always visible
-            };
+            }
+        };
 
         if !is_visible_canvas {
             return; // Skip this canvas and its children
         }
+
+        // Apply layout if this node is a layout container
+        // println!("build_node: applying layout for node {:?}", id);
+        self.apply_layout(id);
+
+        // Now borrow node mutably for building
+        let Some(node) = self.nodes.get_mut(&id) else {
+            return;
+        };
+
+        let children = node.children.clone();
 
         let mut ctx = ViewContext {
             drawables: out,
@@ -156,17 +167,205 @@ impl Workspace {
             text_cache,
         };
         node.view.build(&mut ctx);
-        for child in node.children.clone() {
+        // node borrow is released here
+
+        for child in children {
             self.build_node(child, out, layer, text_cache);
         }
     }
 
+    /// Recursively apply layouts to a node and all its children
+    fn apply_layouts_recursive(&mut self, id: NodeId) {
+        // Apply layout for this node if it's a layout container
+        self.apply_layout(id);
+
+        // Recursively apply to all children
+        let children = if let Some(node) = self.nodes.get(&id) {
+            node.children.clone()
+        } else {
+            return;
+        };
+
+        for child in children {
+            self.apply_layouts_recursive(child);
+        }
+    }
+
+    /// Apply layout calculations if this node is a layout container (HStack/VStack/Toolbar)
+    fn apply_layout(&mut self, layout_id: NodeId) {
+        use crate::ui::Toolbar;
+        use crate::ui::layouts::{HStack, VStack};
+
+        // First, collect child sizes and check if this is a layout
+        let layout_info = {
+            let Some(layout_node) = self.nodes.get(&layout_id) else {
+                return;
+            };
+
+            // Check if this is an HStack
+            if let Some(hstack) = layout_node.view.as_any().downcast_ref::<HStack>() {
+                let children = hstack.children.clone();
+                Some((children, true, false)) // (children, is_hstack, is_toolbar)
+            }
+            // Check if this is a VStack
+            else if let Some(vstack) = layout_node.view.as_any().downcast_ref::<VStack>() {
+                let children = vstack.children.clone();
+                Some((children, false, false))
+            }
+            // Check if this is a Toolbar
+            else if let Some(toolbar) = layout_node.view.as_any().downcast_ref::<Toolbar>() {
+                let children = toolbar.children().to_vec();
+                let is_horizontal = matches!(
+                    toolbar.orientation,
+                    crate::ui::ToolbarOrientation::Horizontal
+                );
+                Some((children, is_horizontal, true))
+            } else {
+                None
+            }
+        };
+
+        let Some((children, is_hstack, is_toolbar)) = layout_info else {
+            return;
+        };
+
+        // Collect child sizes and identify flexible spacers
+        let mut child_sizes = Vec::new();
+        let mut flexible_indices = Vec::new();
+        for (i, &child_id) in children.iter().enumerate() {
+            if let Some(child_node) = self.nodes.get(&child_id) {
+                // Check if this is a flexible spacer
+                if let Some(spacer) = child_node.view.as_any().downcast_ref::<crate::ui::Spacer>() {
+                    if spacer.flexible {
+                        flexible_indices.push(i);
+                    }
+                }
+                let size = self.extract_widget_size(child_node);
+                child_sizes.push(size);
+            }
+        }
+
+        // Calculate layout
+        let computed_rects = if is_toolbar {
+            // Get layout from toolbar's internal HStack/VStack
+            if let Some(layout_node) = self.nodes.get(&layout_id) {
+                if let Some(toolbar) = layout_node.view.as_any().downcast_ref::<Toolbar>() {
+                    if is_hstack {
+                        toolbar
+                            .hstack
+                            .as_ref()
+                            .map(|h| h.calculate_layout(&child_sizes, &flexible_indices))
+                            .unwrap_or_default()
+                    } else {
+                        toolbar
+                            .vstack
+                            .as_ref()
+                            .map(|v| v.calculate_layout(&child_sizes, &flexible_indices))
+                            .unwrap_or_default()
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        } else if is_hstack {
+            if let Some(layout_node) = self.nodes.get(&layout_id) {
+                if let Some(hstack) = layout_node.view.as_any().downcast_ref::<HStack>() {
+                    hstack.calculate_layout(&child_sizes, &flexible_indices)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            if let Some(layout_node) = self.nodes.get(&layout_id) {
+                if let Some(vstack) = layout_node.view.as_any().downcast_ref::<VStack>() {
+                    vstack.calculate_layout(&child_sizes, &flexible_indices)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        };
+
+        // Apply computed rects to children
+        for (i, &child_id) in children.iter().enumerate() {
+            if let Some(rect) = computed_rects.get(i) {
+                if let Some(child_node) = self.nodes.get_mut(&child_id) {
+                    Self::set_widget_rect(child_node, *rect);
+                }
+            }
+        }
+    }
+
+    /// Extract widget size from common widget types (fallback for non-Layoutable widgets)
+    fn extract_widget_size(&self, node: &Node) -> [f32; 2] {
+        use crate::ui::{Button, ButtonGroup, Spacer};
+
+        // Try Button
+        if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
+            let [_x, _y, w, h] = button.style.rect;
+            return [w, h];
+        }
+
+        // Try ButtonGroup - use calculated width based on button count
+        if let Some(button_group) = node.view.as_any().downcast_ref::<ButtonGroup>() {
+            let width = button_group.calculate_width();
+            let height = button_group.style.button_height;
+            return [width, height];
+        }
+
+        // Try Spacer
+        if let Some(spacer) = node.view.as_any().downcast_ref::<Spacer>() {
+            let [_x, _y, w, h] = spacer.rect;
+            return [w, h];
+        }
+
+        // Add more widget types here as needed
+
+        // Default size
+        [100.0, 40.0]
+    }
+
+    /// Set widget rect for common widget types (fallback for non-Layoutable widgets)
+    fn set_widget_rect(node: &mut Node, rect: [f32; 4]) {
+        use crate::ui::{Button, ButtonGroup, Spacer};
+
+        // Try Button
+        if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
+            button.style.rect = rect;
+            return;
+        }
+
+        // Try ButtonGroup
+        if let Some(button_group) = node.view.as_any_mut().downcast_mut::<ButtonGroup>() {
+            button_group.style.rect = rect;
+            return;
+        }
+
+        // Try Spacer
+        if let Some(spacer) = node.view.as_any_mut().downcast_mut::<Spacer>() {
+            spacer.rect = rect;
+            return;
+        }
+
+        // Add more widget types here as needed
+    }
+
     /// Dispatch a UI event to all views; collects actions and marks dirty when a view changes.
     pub fn handle_event(&mut self, evt: &UiEvent) {
-        let mut outcome = UiEventOutcome::none();
+        // CRITICAL: Apply layouts BEFORE processing events to ensure hit tests use current positions
         let roots = self.roots.clone();
-        for root in roots {
-            outcome.merge(self.dispatch_node(root, evt));
+        for root in &roots {
+            self.apply_layouts_recursive(*root);
+        }
+
+        let mut outcome = UiEventOutcome::none();
+        for root in &roots {
+            outcome.merge(self.dispatch_node(*root, evt));
         }
 
         // Also dispatch events to visible popup contents

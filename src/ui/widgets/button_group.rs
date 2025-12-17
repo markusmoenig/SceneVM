@@ -108,6 +108,15 @@ impl ButtonGroup {
         self.active_index
     }
 
+    /// Calculate the total width needed for all buttons
+    pub fn calculate_width(&self) -> f32 {
+        let button_count = self.button_count() as f32;
+        if button_count == 0.0 {
+            return 0.0;
+        }
+        (button_count * self.style.button_width) + ((button_count - 1.0) * self.style.spacing)
+    }
+
     /// Get the rect for a button at the given index
     fn button_rect(&self, index: usize) -> [f32; 4] {
         let [x, y, _, _] = self.style.rect;
@@ -148,10 +157,29 @@ impl UiView for ButtonGroup {
         // Draw each button
         for index in 0..button_count {
             let is_active = index == self.active_index;
-            // let is_hover = self.hover_index == Some(index);
+            let is_hover = self.hover_index == Some(index);
+            let is_pressed = self.active_pointer.is_some() && is_hover;
 
-            let (fill, border) = if is_active {
+            let (fill, border) = if is_pressed {
+                // Pressed state - even darker/more distinct
+                let pressed_fill = Vec4::new(
+                    self.style.active_fill.x * 0.8,
+                    self.style.active_fill.y * 0.8,
+                    self.style.active_fill.z * 0.8,
+                    self.style.active_fill.w,
+                );
+                (pressed_fill, self.style.active_border)
+            } else if is_active {
                 (self.style.active_fill, self.style.active_border)
+            } else if is_hover {
+                // Hover state - add brightness instead of multiply
+                let hover_fill = Vec4::new(
+                    (self.style.fill.x + 0.15).min(1.0),
+                    (self.style.fill.y + 0.15).min(1.0),
+                    (self.style.fill.z + 0.15).min(1.0),
+                    self.style.fill.w,
+                );
+                (hover_fill, self.style.border)
             } else {
                 (self.style.fill, self.style.border)
             };

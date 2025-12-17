@@ -4,6 +4,7 @@ use vek::Vec4;
 use crate::ui::{
     drawable::Drawable,
     event::{UiAction, UiEvent, UiEventKind, UiEventOutcome},
+    layouts::Layoutable,
     workspace::{NodeId, UiView, ViewContext},
 };
 
@@ -206,6 +207,16 @@ impl UiView for Button {
             ButtonState::Pressed | ButtonState::On => {
                 (self.style.pressed_fill, self.style.pressed_border)
             }
+            ButtonState::Hover => {
+                // Very bright hover feedback - add brightness instead of multiply
+                let hover_fill = Vec4::new(
+                    (self.style.fill.x + 0.15).min(1.0),
+                    (self.style.fill.y + 0.15).min(1.0),
+                    (self.style.fill.z + 0.15).min(1.0),
+                    self.style.fill.w,
+                );
+                (hover_fill, self.style.border)
+            }
             _ => (self.style.fill, self.style.border),
         };
 
@@ -338,5 +349,16 @@ impl UiView for Button {
 
     fn view_id(&self) -> &str {
         &self.id
+    }
+}
+
+impl Layoutable for Button {
+    fn set_layout_rect(&mut self, rect: [f32; 4]) {
+        self.style.rect = rect;
+    }
+
+    fn get_desired_size(&self) -> Option<[f32; 2]> {
+        let [_x, _y, w, h] = self.style.rect;
+        Some([w, h])
     }
 }

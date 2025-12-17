@@ -24,6 +24,9 @@ struct UiDemo {
     noise_layer: usize,
     param_sliders: Vec<f32>,
     has_changes: bool,
+    noise_tile_id: uuid::Uuid,
+    noise_button_id: Option<NodeId>,
+    update_noise_icon: bool,
 }
 
 impl UiDemo {
@@ -36,6 +39,9 @@ impl UiDemo {
             noise_layer: 0,
             param_sliders: default.param_sliders,
             has_changes: false,
+            noise_tile_id: uuid::Uuid::new_v4(),
+            noise_button_id: None,
+            update_noise_icon: true,
         }
     }
 }
@@ -49,9 +55,12 @@ impl SceneVMApp for UiDemo {
         Some((960, 600))
     }
 
-    fn init(&mut self, vm: &mut SceneVM, _size: (u32, u32)) {
+    fn init(&mut self, vm: &mut SceneVM, size: (u32, u32)) {
+        // Create dark theme
+        let theme = Theme::dark();
+
         // Simple background and render mode
-        vm.execute(Atom::SetBackground(Vec4::new(0.08, 0.08, 0.1, 1.0)));
+        vm.execute(Atom::SetBackground(theme.background));
         vm.execute(Atom::SetRenderMode(RenderMode::Compute2D));
         if let Some(bytes) = Embedded::get("ui_body.wgsl") {
             if let Ok(src) = std::str::from_utf8(bytes.data.as_ref()) {
@@ -126,18 +135,9 @@ impl SceneVMApp for UiDemo {
 
         // Add a basic button to the workspace
         let button_rect = [40.0, 40.0, 180.0, 56.0];
-        let button = Button::new(ButtonStyle {
-            rect: button_rect,
-            fill: Vec4::new(0.20, 0.25, 0.35, 1.0),
-            border: Vec4::new(0.05, 0.08, 0.12, 1.0),
-            pressed_fill: Vec4::new(0.15, 0.18, 0.24, 1.0),
-            pressed_border: Vec4::new(0.04, 0.07, 0.10, 1.0),
-            radius_px: 12.0,
-            border_px: 1.0,
-            layer: 10,
-        })
-        .with_id("toggle_button")
-        .with_kind(ButtonKind::Toggle);
+        let button = Button::new(theme.button(button_rect))
+            .with_id("toggle_button")
+            .with_kind(ButtonKind::Toggle);
         let node = self.workspace.add_view(button);
         self.workspace.add_root(node);
 
@@ -148,26 +148,17 @@ impl SceneVMApp for UiDemo {
             18.0,
             Vec4::new(0.9, 0.9, 0.95, 1.0),
         )
-        .with_layer(11); // Layer above button
+        .with_layer(16); // Layer above button (buttons are now on layer 15)
         let label_node = self.workspace.add_view(label);
         self.workspace.add_root(label_node);
 
         // Add an image button with the test tile and offset
-        let image_button = Button::new(ButtonStyle {
-            rect: [250.0, 40.0, 64.0, 64.0],
-            fill: Vec4::new(0.2, 0.2, 0.25, 1.0),
-            border: Vec4::new(0.4, 0.5, 0.7, 1.0),
-            pressed_fill: Vec4::new(0.3, 0.4, 0.5, 1.0),
-            pressed_border: Vec4::new(0.6, 0.7, 0.9, 1.0),
-            radius_px: 8.0,
-            border_px: 2.0,
-            layer: 10,
-        })
-        .with_id("image_button")
-        .with_kind(ButtonKind::Toggle)
-        .with_tile(test_tile_id)
-        .with_pressed_tile(pressed_tile_id) // Different tile when toggled
-        .with_tile_offset(4.0); // 4px offset inside the button
+        let image_button = Button::new(theme.button([250.0, 40.0, 64.0, 64.0]))
+            .with_id("image_button")
+            .with_kind(ButtonKind::Toggle)
+            .with_tile(test_tile_id)
+            .with_pressed_tile(pressed_tile_id) // Different tile when toggled
+            .with_tile_offset(4.0); // 4px offset inside the button
         let image_button_node = self.workspace.add_view(image_button);
         self.workspace.add_root(image_button_node);
 
@@ -184,21 +175,9 @@ impl SceneVMApp for UiDemo {
         self.workspace.add_root(plain_image_node);
 
         // Add a slider below the button
-        let slider = Slider::new(
-            SliderStyle {
-                rect: [40.0, 120.0, 200.0, 32.0],
-                track_color: Vec4::new(0.15, 0.15, 0.18, 1.0),
-                fill_color: Vec4::new(0.3, 0.5, 0.8, 1.0),
-                thumb_color: Vec4::new(0.4, 0.6, 0.9, 1.0), // Blue color for thumb
-                thumb_radius: 8.0,
-                track_height: 6.0,
-                layer: 10,
-            },
-            0.0,
-            100.0,
-        )
-        .with_id("main_slider")
-        .with_value(self.slider_value);
+        let slider = Slider::new(theme.slider([40.0, 120.0, 200.0, 32.0]), 0.0, 100.0)
+            .with_id("main_slider")
+            .with_value(self.slider_value);
         let slider_node = self.workspace.add_view(slider);
         self.workspace.add_root(slider_node);
 
@@ -214,82 +193,107 @@ impl SceneVMApp for UiDemo {
         let slider_label_node = self.workspace.add_view(slider_label);
         self.workspace.add_root(slider_label_node);
 
-        // Add a toolbar with image buttons
+        // Add a toolbar with image buttons using automatic layout
+        let window_width = size.0 as f32;
         let toolbar = Toolbar::new(
-            ToolbarStyle {
-                rect: [40.0, 180.0, 600.0, 48.0],
-                fill: Vec4::new(0.15, 0.15, 0.18, 1.0),
-                border: Vec4::new(0.25, 0.25, 0.28, 1.0),
-                radius_px: 6.0,
-                border_px: 1.0,
-                layer: 10,
-            },
+            theme.toolbar([0.0, 180.0, window_width, 48.0]),
             ToolbarOrientation::Horizontal,
         )
         .with_id("main_toolbar")
         .with_spacing(4.0)
-        .with_offset(8.0);
+        .with_padding(8.0);
 
-        let toolbar_node = self.workspace.add_view(toolbar.clone());
+        let toolbar_node = self.workspace.add_view(toolbar);
         self.workspace.add_root(toolbar_node);
 
-        // Add 8 image buttons to the toolbar with manual positioning
+        // Add 8 image buttons to the toolbar - they will be automatically positioned!
         let button_size = 32.0;
-        let toolbar_x = 40.0;
-        let toolbar_y = 180.0;
-        let spacing = 4.0;
-        let offset = 8.0;
-        let extra_gap = 16.0; // Extra spacing after 4th button
+        let extra_gap = 16.0; // Extra spacing between button groups
 
         for i in 0..8 {
-            // Calculate x position with extra spacing after 4th button
-            let x_pos = toolbar_x
-                + offset
-                + (i as f32 * (button_size + spacing))
-                + if i >= 4 { extra_gap } else { 0.0 };
-            let y_pos = toolbar_y + 8.0; // Center vertically in toolbar (48px tall, button 32px)
+            // Add a spacer after the 4th button to create visual grouping
+            if i == 4 {
+                // Create an invisible spacer for the gap
+                let spacer = Spacer::new(extra_gap, button_size);
 
-            let btn = Button::new(ButtonStyle {
-                rect: [x_pos, y_pos, button_size, button_size],
-                fill: Vec4::new(0.2, 0.2, 0.25, 1.0),
-                border: Vec4::new(0.3, 0.3, 0.35, 1.0),
-                pressed_fill: Vec4::new(0.3, 0.4, 0.5, 1.0),
-                pressed_border: Vec4::new(0.4, 0.5, 0.6, 1.0),
-                radius_px: 4.0,
-                border_px: 1.0,
-                layer: 11,
-            })
-            .with_id(format!("toolbar_btn_{}", i))
-            .with_kind(ButtonKind::Momentary)
-            .with_tile(test_tile_id)
-            .with_tile_offset(2.0);
+                let spacer_node = self.workspace.add_view(spacer);
+                if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar")
+                {
+                    toolbar_view.add_child(spacer_node);
+                }
+                self.workspace.attach(toolbar_node, spacer_node);
+
+                // Add separator in the middle of the gap
+                let separator_x = 40.0 + 8.0 + (4.0 * (button_size + 4.0)) + (extra_gap / 2.0);
+                if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar")
+                {
+                    toolbar_view.add_separator_at(separator_x, None);
+                }
+            }
+
+            let btn = Button::new(theme.button([0.0, 0.0, button_size, button_size]))
+                .with_id(format!("toolbar_btn_{}", i))
+                .with_kind(ButtonKind::Momentary)
+                .with_tile(test_tile_id)
+                .with_tile_offset(2.0);
 
             let btn_node = self.workspace.add_view(btn);
-            self.workspace.add_root(btn_node);
+
+            // Add to toolbar's layout AND workspace hierarchy
+            if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+                toolbar_view.add_child(btn_node);
+            }
+            self.workspace.attach(toolbar_node, btn_node);
         }
 
-        // Add a separator after the 4th button
+        // Add a noise button with procedurally generated texture
+        let noise_btn = Button::new(theme.button([0.0, 0.0, button_size, button_size]))
+            .with_id("noise_button")
+            .with_kind(ButtonKind::Momentary)
+            .with_tile(self.noise_tile_id)
+            .with_tile_offset(2.0);
+
+        let noise_btn_node = self.workspace.add_view(noise_btn);
+        self.noise_button_id = Some(noise_btn_node);
+
         if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
-            // Calculate separator position (after 4th button, in the middle of the extra gap)
-            let separator_x =
-                toolbar_x + offset + (4.0 * (button_size + spacing)) + (extra_gap / 2.0);
-            toolbar_view.add_separator_at(separator_x, None);
+            toolbar_view.add_child(noise_btn_node);
         }
+        self.workspace.attach(toolbar_node, noise_btn_node);
+
+        // Add a flexible spacer to push the ButtonGroup to the right
+        let flex_spacer = Spacer::flexible();
+        let flex_spacer_node = self.workspace.add_view(flex_spacer);
+        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+            toolbar_view.add_child(flex_spacer_node);
+        }
+        self.workspace.attach(toolbar_node, flex_spacer_node);
+
+        // Add a ButtonGroup to the right side of the toolbar (with automatic layout)
+        let toolbar_button_group = ButtonGroup::new(
+            "toolbar_group",
+            theme.button_group([0.0, 0.0, 0.0, 36.0], 60.0, 36.0),
+        )
+        .with_id("toolbar_group")
+        .with_textures(vec![
+            Some(test_tile_id),
+            Some(pressed_tile_id),
+            Some(test_tile_id),
+        ]);
+
+        let toolbar_group_node = self.workspace.add_view(toolbar_button_group);
+        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+            toolbar_view.add_child(toolbar_group_node);
+        }
+        self.workspace.attach(toolbar_node, toolbar_group_node);
 
         // Add a parameter list below the toolbar
-        let mut param_list = ParamList::new(ParamListStyle {
-            rect: [40.0, 250.0, 350.0, 200.0], // Widened from 300 to 350 to fit value text
-            fill: Vec4::new(0.12, 0.12, 0.15, 1.0),
-            border: Vec4::new(0.25, 0.25, 0.28, 1.0),
-            radius_px: 6.0,
-            border_px: 1.0,
-            layer: 10,
-        })
-        .with_id("param_list")
-        .with_item_height(32.0)
-        .with_label_width(80.0)
-        .with_spacing(8.0)
-        .with_label_size(14.0);
+        let mut param_list = ParamList::new(theme.param_list([40.0, 250.0, 350.0, 200.0]))
+            .with_id("param_list")
+            .with_item_height(32.0)
+            .with_label_width(80.0)
+            .with_spacing(8.0)
+            .with_label_size(14.0);
 
         // Create sliders and labels for the parameter list
         let param_slider_width = 180.0; // Slider width, value text appears 8px to the right
@@ -306,25 +310,16 @@ impl SceneVMApp for UiDemo {
             // Get the position for this widget from the param list
             let widget_rect = param_list.get_widget_rect(i, param_slider_width);
 
-            let slider = Slider::new(
-                SliderStyle {
-                    rect: widget_rect,
-                    track_color: Vec4::new(0.15, 0.15, 0.18, 1.0),
-                    fill_color: Vec4::new(0.3, 0.5, 0.8, 1.0),
-                    thumb_color: Vec4::new(0.4, 0.6, 0.9, 1.0),
-                    thumb_radius: 6.0,
-                    track_height: 4.0,
-                    layer: 11,
-                },
-                0.0,
-                100.0,
-            )
-            .with_id(format!("param_slider_{}", i))
-            .with_value(50.0 + (i as f32 * 10.0))
-            .with_show_value(true)
-            .with_value_precision(1)
-            .with_value_color(Vec4::new(0.6, 0.6, 0.65, 1.0))
-            .with_value_size(12.0);
+            let mut slider_style = theme.slider(widget_rect);
+            slider_style.layer = 11; // Override layer for param list children
+
+            let slider = Slider::new(slider_style, 0.0, 100.0)
+                .with_id(format!("param_slider_{}", i))
+                .with_value(50.0 + (i as f32 * 10.0))
+                .with_show_value(true)
+                .with_value_precision(1)
+                .with_value_color(Vec4::new(0.6, 0.6, 0.65, 1.0))
+                .with_value_size(12.0);
 
             let slider_node = self.workspace.add_view(slider);
             param_list.add_item(label_text, slider_node);
@@ -335,19 +330,15 @@ impl SceneVMApp for UiDemo {
         self.workspace.add_root(param_list_node);
 
         // Create a popup ParamList for a button
-        let mut popup_param_list = ParamList::new(ParamListStyle {
-            rect: [0.0, 0.0, 250.0, 150.0], // Position will be set by popup system
-            fill: Vec4::new(0.18, 0.18, 0.22, 1.0), // Slightly lighter for better visibility
-            border: Vec4::new(0.4, 0.5, 0.7, 1.0),
-            radius_px: 6.0,
-            border_px: 2.0,
-            layer: 100, // High layer for popup
-        })
-        .with_id("popup_param_list")
-        .with_item_height(28.0)
-        .with_label_width(70.0)
-        .with_spacing(6.0)
-        .with_label_size(13.0);
+        let mut popup_style = theme.param_list([0.0, 0.0, 250.0, 150.0]);
+        popup_style.layer = 100; // High layer for popup
+
+        let mut popup_param_list = ParamList::new(popup_style)
+            .with_id("popup_param_list")
+            .with_item_height(28.0)
+            .with_label_width(70.0)
+            .with_spacing(6.0)
+            .with_label_size(13.0);
 
         // Add sliders to the popup
         // Width accounts for: label_width (80) + slider (90) + gap (8) + value text (~30) + padding (16)
@@ -363,25 +354,18 @@ impl SceneVMApp for UiDemo {
 
             let widget_rect = popup_param_list.get_widget_rect(i, popup_slider_width);
 
-            let slider = Slider::new(
-                SliderStyle {
-                    rect: widget_rect,
-                    track_color: Vec4::new(0.15, 0.15, 0.18, 1.0),
-                    fill_color: Vec4::new(0.3, 0.5, 0.8, 1.0),
-                    thumb_color: Vec4::new(0.4, 0.6, 0.9, 1.0),
-                    thumb_radius: 5.0,
-                    track_height: 3.0,
-                    layer: 101,
-                },
-                0.0,
-                255.0,
-            )
-            .with_id(format!("popup_slider_{}", i))
-            .with_value(128.0 + (i as f32 * 20.0))
-            .with_show_value(true)
-            .with_value_precision(0)
-            .with_value_color(Vec4::new(0.7, 0.7, 0.75, 1.0))
-            .with_value_size(11.0);
+            let mut popup_slider_style = theme.slider(widget_rect);
+            popup_slider_style.layer = 101;
+            popup_slider_style.thumb_radius = 5.0;
+            popup_slider_style.track_height = 3.0;
+
+            let slider = Slider::new(popup_slider_style, 0.0, 255.0)
+                .with_id(format!("popup_slider_{}", i))
+                .with_value(128.0 + (i as f32 * 20.0))
+                .with_show_value(true)
+                .with_value_precision(0)
+                .with_value_color(Vec4::new(0.7, 0.7, 0.75, 1.0))
+                .with_value_size(11.0);
 
             let slider_node = self.workspace.add_view(slider);
             popup_param_list.add_item(label_text, slider_node);
@@ -389,28 +373,17 @@ impl SceneVMApp for UiDemo {
         }
 
         // Add a ButtonGroup to the popup ParamList
-        let popup_button_group = ButtonGroup::new(
-            "popup_group",
-            ButtonGroupStyle {
-                rect: [0.0, 0.0, 140.0, 28.0], // Will be positioned by ParamList
-                button_width: 44.0,
-                button_height: 28.0,
-                spacing: 2.0,
-                fill: Vec4::new(0.18, 0.18, 0.22, 1.0),
-                border: Vec4::new(0.3, 0.3, 0.35, 1.0),
-                active_fill: Vec4::new(0.4, 0.5, 0.7, 1.0),
-                active_border: Vec4::new(0.5, 0.6, 0.8, 1.0),
-                radius_px: 3.0,
-                border_px: 1.0,
-                layer: 101,
-            },
-        )
-        .with_id("popup_group")
-        .with_labels(vec![
-            "RGB".to_string(),
-            "HSV".to_string(),
-            "HEX".to_string(),
-        ]);
+        let mut popup_group_style = theme.button_group([0.0, 0.0, 140.0, 28.0], 44.0, 28.0);
+        popup_group_style.layer = 101;
+        popup_group_style.spacing = 2.0;
+
+        let popup_button_group = ButtonGroup::new("popup_group", popup_group_style)
+            .with_id("popup_group")
+            .with_labels(vec![
+                "RGB".to_string(),
+                "HSV".to_string(),
+                "HEX".to_string(),
+            ]);
 
         let popup_group_node = self.workspace.add_view(popup_button_group);
         popup_param_list.add_item("Mode", popup_group_node);
@@ -424,19 +397,10 @@ impl SceneVMApp for UiDemo {
         }
 
         // Create a button that opens the popup
-        let popup_button = Button::new(ButtonStyle {
-            rect: [450.0, 250.0, 120.0, 44.0],
-            fill: Vec4::new(0.25, 0.35, 0.5, 1.0),
-            border: Vec4::new(0.4, 0.5, 0.7, 1.0),
-            pressed_fill: Vec4::new(0.2, 0.28, 0.4, 1.0),
-            pressed_border: Vec4::new(0.35, 0.45, 0.65, 1.0),
-            radius_px: 8.0,
-            border_px: 2.0,
-            layer: 10,
-        })
-        .with_id("popup_button")
-        .with_kind(ButtonKind::Momentary)
-        .with_popup(popup_param_list_node, PopupAlignment::Right);
+        let popup_button = Button::new(theme.button([450.0, 250.0, 120.0, 44.0]))
+            .with_id("popup_button")
+            .with_kind(ButtonKind::Momentary)
+            .with_popup(popup_param_list_node, PopupAlignment::Right);
 
         let popup_button_node = self.workspace.add_view(popup_button);
         self.workspace.add_root(popup_button_node);
@@ -448,37 +412,9 @@ impl SceneVMApp for UiDemo {
             16.0,
             Vec4::new(0.9, 0.9, 0.95, 1.0),
         )
-        .with_layer(11);
+        .with_layer(16); // Layer above button (buttons are now on layer 15)
         let popup_button_label_node = self.workspace.add_view(popup_button_label);
         self.workspace.add_root(popup_button_label_node);
-
-        // Add a ButtonGroup to the toolbar area with textures
-        // Toolbar is at [40.0, 180.0, 600.0, 48.0]
-        let toolbar_button_group = ButtonGroup::new(
-            "toolbar_group",
-            ButtonGroupStyle {
-                rect: [420.0, 186.0, 200.0, 40.0], // Inside toolbar, right side, vertically centered
-                button_width: 60.0,
-                button_height: 36.0,
-                spacing: 4.0,
-                fill: Vec4::new(0.2, 0.2, 0.25, 1.0),
-                border: Vec4::new(0.3, 0.3, 0.35, 1.0),
-                active_fill: Vec4::new(0.3, 0.5, 0.7, 1.0),
-                active_border: Vec4::new(0.4, 0.6, 0.8, 1.0),
-                radius_px: 4.0,
-                border_px: 1.0,
-                layer: 11,
-            },
-        )
-        .with_id("toolbar_group")
-        .with_textures(vec![
-            Some(test_tile_id),
-            Some(pressed_tile_id),
-            Some(test_tile_id),
-        ]);
-
-        let toolbar_group_node = self.workspace.add_view(toolbar_button_group);
-        self.workspace.add_root(toolbar_group_node);
 
         // === Canvas Demo: Two modes that can be toggled ===
 
@@ -515,48 +451,28 @@ impl SceneVMApp for UiDemo {
         self.workspace
             .attach(settings_canvas_node, settings_label_node);
 
-        let settings_slider = Slider::new(
-            SliderStyle {
-                rect: [40.0, 560.0, 300.0, 40.0],
-                track_color: Vec4::new(0.2, 0.2, 0.25, 1.0),
-                fill_color: Vec4::new(0.4, 0.5, 0.6, 1.0),
-                thumb_color: Vec4::new(0.5, 0.6, 0.7, 1.0),
-                thumb_radius: 12.0,
-                track_height: 4.0,
-                layer: 10,
-            },
-            0.0,
-            100.0,
-        )
-        .with_id("settings_slider")
-        .with_value(75.0)
-        .with_show_value(true);
+        let mut settings_slider_style = theme.slider([40.0, 560.0, 300.0, 40.0]);
+        settings_slider_style.thumb_radius = 12.0; // Larger thumb for settings
+
+        let settings_slider = Slider::new(settings_slider_style, 0.0, 100.0)
+            .with_id("settings_slider")
+            .with_value(75.0)
+            .with_show_value(true);
         let settings_slider_node = self.workspace.add_view(settings_slider);
         self.workspace
             .attach(settings_canvas_node, settings_slider_node);
 
         // Add a button to toggle between canvases (using TextButton)
-        let canvas_toggle_button = TextButton::new(
-            ButtonStyle {
-                rect: [450.0, 510.0, 150.0, 44.0],
-                fill: Vec4::new(0.25, 0.35, 0.5, 1.0),
-                border: Vec4::new(0.4, 0.5, 0.7, 1.0),
-                pressed_fill: Vec4::new(0.2, 0.28, 0.4, 1.0),
-                pressed_border: Vec4::new(0.35, 0.45, 0.65, 1.0),
-                radius_px: 8.0,
-                border_px: 2.0,
-                layer: 10,
-            },
-            "Switch Mode",
-        )
-        .with_id("canvas_toggle")
-        .with_text_size(14.0);
+        let canvas_toggle_button =
+            TextButton::new(theme.button([450.0, 510.0, 150.0, 44.0]), "Switch Mode")
+                .with_id("canvas_toggle")
+                .with_text_size(14.0);
         let canvas_toggle_node = self.workspace.add_view(canvas_toggle_button);
         self.workspace.add_root(canvas_toggle_node);
 
         // === Color Wheel Demo ===
         let color_wheel = ColorWheel::new(
-            [740.0, 40.0, 180.0, 180.0],   // Position in top-right area
+            [740.0, 340.0, 180.0, 180.0],  // Position in top-right area
             Vec4::new(1.0, 0.5, 0.2, 1.0), // Initial orange color
         )
         .with_id("demo_color_wheel");
@@ -570,7 +486,7 @@ impl SceneVMApp for UiDemo {
         // Label for color wheel
         let color_wheel_label = LabelRect::new(
             "Color Wheel",
-            [740.0, 10.0, 180.0, 25.0],
+            [740.0, 310.0, 180.0, 25.0],
             14.0,
             Vec4::new(0.7, 0.7, 0.75, 1.0),
         );
@@ -599,9 +515,7 @@ impl SceneVMApp for UiDemo {
     }
 
     fn needs_update(&mut self) -> bool {
-        // Always update for animated noise layer
         self.workspace.is_dirty()
-        // true
     }
 
     fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx) {
@@ -682,6 +596,41 @@ impl SceneVMApp for UiDemo {
         {
             let hsv_value = color_wheel.hsv_value();
             vm.execute(Atom::SetGP0(Vec4::new(0.0, 0.0, hsv_value, 0.0)));
+        }
+
+        // Update noise button texture if needed
+        if self.update_noise_icon {
+            // Switch to noise layer to render the procedural texture
+            vm.set_active_vm(self.noise_layer);
+
+            vm.execute(Atom::SetViewportRect2D(None));
+            vm.execute(Atom::SetGP0(Vec4::new(0.0, 0.0, 0.0, 0.0)));
+
+            // Render noise to a small buffer that fits the button
+            let tile_width = 32u32;
+            let tile_height = 32u32;
+            let mut pixels: Vec<u8> = vec![0; (tile_width * tile_height * 4) as usize];
+            vm.render_frame(&mut pixels, tile_width, tile_height);
+
+            // Create/update the tile with the rendered noise
+            vm.execute(Atom::AddTile {
+                id: self.noise_tile_id,
+                width: tile_width,
+                height: tile_height,
+                frames: vec![pixels],
+                material_frames: Some(vec![create_tile_material(
+                    tile_width as u32,
+                    tile_height as u32,
+                )]),
+            });
+            vm.execute(Atom::BuildAtlas);
+
+            self.update_noise_icon = false;
+
+            vm.execute(Atom::SetViewportRect2D(Some([900.0, 700.0, 400.0, 300.0])));
+
+            // Switch back to main layer
+            vm.set_active_vm(0);
         }
 
         // Build drawables from workspace
@@ -812,6 +761,21 @@ impl SceneVMApp for UiDemo {
 
     fn has_unsaved_changes(&self) -> bool {
         self.has_changes
+    }
+
+    fn resize(&mut self, _vm: &mut SceneVM, size: (u32, u32)) {
+        // Update toolbar to span full width
+        if let Some(toolbar) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+            let width = size.0 as f32;
+            toolbar.style.rect[2] = width; // Update width
+
+            // Update internal HStack rect
+            if let Some(ref mut hstack) = toolbar.hstack {
+                hstack.rect[2] = width;
+            }
+
+            self.workspace.set_dirty(); // Trigger relayout
+        }
     }
 }
 
