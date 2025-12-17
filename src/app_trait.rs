@@ -32,6 +32,8 @@ pub trait SceneVMApp {
     }
     /// Resize callback with new logical size.
     fn resize(&mut self, _vm: &mut SceneVM, _size: (u32, u32)) {}
+    /// Set the scale factor (device pixel ratio) for HiDPI displays.
+    fn set_scale(&mut self, _scale: f32) {}
     /// Mouse/touch down callback in logical pixels.
     fn mouse_down(&mut self, _vm: &mut SceneVM, _x: f32, _y: f32) {}
     /// Mouse/touch up callback in logical pixels.

@@ -1681,6 +1681,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
             let mut new_vm = SceneVM::new_with_window(&win);
             apply_logical_scale(&mut new_vm, scale);
             let new_ctx = NativeRenderCtx::new(logical_size);
+            app.set_scale(scale as f32);
             app.init(&mut new_vm, logical_size);
             window = Some(win);
             vm = Some(new_vm);
@@ -1702,6 +1703,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                             ctx_ref.size = logical_size;
                             vm_ref.resize_window_surface(size.width, size.height);
                             apply_logical_scale(vm_ref, scale);
+                            app.set_scale(scale as f32);
                             app.resize(vm_ref, logical_size);
                         }
                         WindowEvent::ScaleFactorChanged {
@@ -1715,8 +1717,8 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                                 (logical.width.round() as u32, logical.height.round() as u32);
                             ctx_ref.size = logical_size;
                             vm_ref.resize_window_surface(size.width, size.height);
+                            app.set_scale(scale_factor as f32);
                             apply_logical_scale(vm_ref, scale_factor);
-                            app.resize(vm_ref, logical_size);
                         }
                         WindowEvent::CursorMoved { position, .. } => {
                             cursor_pos = position;
