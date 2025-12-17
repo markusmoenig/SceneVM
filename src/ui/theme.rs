@@ -151,7 +151,7 @@ impl Theme {
     pub fn slider(&self, rect: [f32; 4]) -> SliderStyle {
         SliderStyle {
             rect,
-            track_color: self.surface,
+            track_color: self.primary, // Use primary instead of surface for better contrast
             fill_color: self.accent,
             thumb_color: self.accent_hover,
             thumb_radius: 6.0,

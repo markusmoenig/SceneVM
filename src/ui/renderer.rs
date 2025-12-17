@@ -36,8 +36,20 @@ impl UiRenderer {
 
     /// Emit drawables into the current chunk as 2D polys.
     pub fn render(&mut self, vm: &mut VM, drawables: &[Drawable]) {
-        // Wipe previous UI geometry so we don't accumulate quads across frames.
-        vm.execute(Atom::ClearGeometry);
+        self.render_internal(vm, drawables, true);
+    }
+
+    /// Emit drawables without clearing geometry (for rendering to separate layers).
+    /// Used when rendering popups to a different VM layer.
+    pub fn render_no_clear(&mut self, vm: &mut VM, drawables: &[Drawable]) {
+        self.render_internal(vm, drawables, false);
+    }
+
+    fn render_internal(&mut self, vm: &mut VM, drawables: &[Drawable], clear: bool) {
+        if clear {
+            // Wipe previous UI geometry so we don't accumulate quads across frames.
+            vm.execute(Atom::ClearGeometry);
+        }
 
         for d in drawables {
             match d {

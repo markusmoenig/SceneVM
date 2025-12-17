@@ -68,6 +68,7 @@ pub struct Workspace {
     roots: Vec<NodeId>,
     dirty: bool,
     pending_actions: Vec<UiAction>,
+    popup_layer: Option<usize>,
 }
 
 impl Workspace {
@@ -77,7 +78,20 @@ impl Workspace {
             roots: Vec::new(),
             dirty: true,
             pending_actions: Vec::new(),
+            popup_layer: None,
         }
+    }
+
+    /// Set the optional popup layer index. When set, popup drawables will be
+    /// returned separately so they can be rendered to a different VM layer.
+    pub fn with_popup_layer(mut self, layer: usize) -> Self {
+        self.popup_layer = Some(layer);
+        self
+    }
+
+    /// Set the popup layer after creation
+    pub fn set_popup_layer(&mut self, layer: Option<usize>) {
+        self.popup_layer = layer;
     }
 
     /// Insert a view as a new node and return its id.
@@ -113,6 +127,8 @@ impl Workspace {
     }
 
     /// Traverse roots and collect drawables.
+    /// Returns main UI drawables. If popup_layer is set, popup drawables
+    /// should be retrieved with `build_popups_separate()`.
     pub fn build(&mut self, text_cache: &TextCache) -> Vec<Drawable> {
         let mut drawables = Vec::new();
         let roots = self.roots.clone();
@@ -121,9 +137,24 @@ impl Workspace {
         }
 
         // After rendering all normal views, render popups on top
-        self.build_popups(&mut drawables, text_cache);
+        // (only if we're not using a separate popup layer)
+        if self.popup_layer.is_none() {
+            self.build_popups(&mut drawables, text_cache);
+        }
 
         self.dirty = false;
+        drawables
+    }
+
+    /// Build popup drawables separately (only when popup_layer is set).
+    /// Call this after `build()` to get popup drawables for a separate layer.
+    pub fn build_popups_separate(&mut self, text_cache: &TextCache) -> Vec<Drawable> {
+        if self.popup_layer.is_none() {
+            return Vec::new();
+        }
+
+        let mut drawables = Vec::new();
+        self.build_popups(&mut drawables, text_cache);
         drawables
     }
 

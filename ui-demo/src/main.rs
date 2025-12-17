@@ -22,11 +22,13 @@ struct UiDemo {
     renderer: UiRenderer,
     slider_value: f32,
     noise_layer: usize,
+    popup_layer: usize,
     param_sliders: Vec<f32>,
     has_changes: bool,
     noise_tile_id: uuid::Uuid,
     noise_button_id: Option<NodeId>,
     update_noise_icon: bool,
+    scale: f32,
 }
 
 impl UiDemo {
@@ -37,11 +39,13 @@ impl UiDemo {
             renderer: UiRenderer::new(),
             slider_value: default.slider_value,
             noise_layer: 0,
+            popup_layer: 0,
             param_sliders: default.param_sliders,
             has_changes: false,
             noise_tile_id: uuid::Uuid::new_v4(),
             noise_button_id: None,
             update_noise_icon: true,
+            scale: 1.0,
         }
     }
 }
@@ -505,10 +509,33 @@ impl SceneVMApp for UiDemo {
         }
 
         // Set viewport rect to a region in the top-right corner (400x300 box)
-        vm.execute(Atom::SetViewportRect2D(Some([900.0, 700.0, 400.0, 300.0])));
+        vm.execute(Atom::SetViewportRect2D(Some([560.0, 250.0, 400.0, 300.0])));
 
         // Optional: set brightness via gp0
         vm.execute(Atom::SetGP0(Vec4::new(0.1, 0.0, 0.0, 0.0)));
+
+        // Create a popup layer for UI popups (layer 2)
+        // This will render above the noise shader layer
+        self.popup_layer = vm.add_vm_layer();
+        self.workspace.set_popup_layer(Some(self.popup_layer));
+
+        // Configure the popup layer with same settings as main UI layer
+        vm.set_active_vm(self.popup_layer);
+        vm.execute(Atom::SetRenderMode(RenderMode::Compute2D));
+        // Set transparent background for popup layer (alpha = 0)
+        // This allows proper alpha blending with layers below
+        vm.execute(Atom::SetBackground(Vec4::new(0.0, 0.0, 0.0, 0.0)));
+        if let Some(bytes) = Embedded::get("ui_body.wgsl") {
+            if let Ok(src) = std::str::from_utf8(bytes.data.as_ref()) {
+                vm.execute(Atom::SetSource2D(src.to_string()));
+            }
+        }
+        let s = self.scale;
+        let m = Mat3::<f32>::new(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 1.0);
+        vm.execute(Atom::SetTransform2D(m));
+
+        // Disable the popup layer initially (no popups at start)
+        vm.set_layer_enabled(self.popup_layer, false);
 
         // Switch back to layer 0 for normal rendering
         vm.set_active_vm(0);
@@ -636,7 +663,21 @@ impl SceneVMApp for UiDemo {
         // Build drawables from workspace
         let text_cache = self.renderer.text_cache();
         let drawables = self.workspace.build(text_cache);
+        let popup_drawables = self.workspace.build_popups_separate(text_cache);
+
+        // Render main UI to layer 0
+        vm.set_active_vm(0);
         self.renderer.render(vm.active_vm_mut(), &drawables);
+
+        // Enable/disable popup layer based on whether there are popups
+        let has_popups = !popup_drawables.is_empty();
+        vm.set_layer_enabled(self.popup_layer, has_popups);
+
+        // Render popups to popup layer (layer 2, above noise shader)
+        if has_popups {
+            vm.set_active_vm(self.popup_layer);
+            self.renderer.render(vm.active_vm_mut(), &popup_drawables);
+        }
 
         // Animate the noise layer
         vm.set_active_vm(self.noise_layer);
@@ -761,6 +802,22 @@ impl SceneVMApp for UiDemo {
 
     fn has_unsaved_changes(&self) -> bool {
         self.has_changes
+    }
+
+    fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+    }
+
+    fn update(&mut self, vm: &mut SceneVM) {
+        // Apply transform to popup layer to handle HiDPI scaling
+        // This ensures the popup layer uses the same logical-to-physical transform as layer 0
+        if self.popup_layer > 0 {
+            vm.set_active_vm(self.popup_layer);
+            let s = self.scale;
+            let m = Mat3::<f32>::new(s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, 1.0);
+            vm.execute(Atom::SetTransform2D(m));
+            vm.set_active_vm(0);
+        }
     }
 
     fn resize(&mut self, _vm: &mut SceneVM, size: (u32, u32)) {
