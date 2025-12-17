@@ -96,7 +96,6 @@ pub use crate::{
     vm::{Atom, GeoId, LineStrip2D, RenderMode, VM},
 };
 use image;
-#[cfg(not(target_arch = "wasm32"))]
 use std::borrow::Cow;
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
@@ -144,6 +143,127 @@ struct PresentPipeline {
     bind_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     surface_format: wgpu::TextureFormat,
+}
+
+/// Compositing pipeline for blending VM layers with alpha
+struct CompositingPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+impl CompositingPipeline {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scenevm-composite-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                "
+@group(0) @binding(0) var layer_tex: texture_2d<f32>;
+@group(0) @binding(1) var layer_sampler: sampler;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -3.0),
+        vec2<f32>(3.0, 1.0),
+        vec2<f32>(-1.0, 1.0)
+    );
+    var uvs = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 2.0),
+        vec2<f32>(2.0, 0.0),
+        vec2<f32>(0.0, 0.0)
+    );
+    var out: VsOut;
+    out.pos = vec4<f32>(positions[vi], 0.0, 1.0);
+    out.uv = uvs[vi];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(layer_tex, layer_sampler, in.uv);
+}
+                ",
+            )),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scenevm-composite-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scenevm-composite-pipeline-layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("scenevm-composite-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scenevm-composite-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+        }
+    }
 }
 
 /// Optional window surface (swapchain) managed by SceneVM for direct presentation.
@@ -380,6 +500,7 @@ pub struct SceneVM {
     overlay_vms: Vec<VM>,
     active_vm_index: usize,
     log_layer_activity: bool,
+    compositing_pipeline: Option<CompositingPipeline>,
 }
 
 /// Result of shader compilation with detailed diagnostics
@@ -447,19 +568,173 @@ impl SceneVM {
         w: u32,
         h: u32,
         log_errors: bool,
+        compositing_pipeline: &mut Option<CompositingPipeline>,
+        surface_format: wgpu::TextureFormat,
     ) {
+        // Render each VM to its own layer texture
+        // Explicitly clear base layer texture before rendering
+        base_vm.ensure_layer_texture(device, w, h);
+        if let Some(layer_tex) = &base_vm.layer_texture {
+            if let Some(gpu) = &layer_tex.gpu {
+                let bg = base_vm.background;
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("clear-base-layer"),
+                });
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("clear-base-layer-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &gpu.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: bg.x as f64,
+                                g: bg.y as f64,
+                                b: bg.z as f64,
+                                a: bg.w as f64,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                queue.submit(Some(encoder.finish()));
+            }
+        }
+
         if let Err(e) = base_vm.draw_into(device, queue, surface, w, h) {
             if log_errors {
                 println!("[SceneVM] Error drawing base VM: {:?}", e);
             }
         }
-        for vm in overlays {
+
+        for vm in overlays.iter_mut() {
+            // Explicitly clear overlay layer texture before rendering
+            vm.ensure_layer_texture(device, w, h);
+            if let Some(layer_tex) = &vm.layer_texture {
+                if let Some(gpu) = &layer_tex.gpu {
+                    let bg = vm.background;
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("clear-overlay-layer"),
+                        });
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("clear-overlay-layer-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &gpu.view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: bg.x as f64,
+                                    g: bg.y as f64,
+                                    b: bg.z as f64,
+                                    a: bg.w as f64,
+                                }),
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    queue.submit(Some(encoder.finish()));
+                }
+            }
+
             if let Err(e) = vm.draw_into(device, queue, surface, w, h) {
                 if log_errors {
                     println!("[SceneVM] Error drawing overlay VM: {:?}", e);
                 }
             }
         }
+
+        // Ensure surface has GPU resources
+        surface.ensure_gpu_with(device);
+
+        // Initialize compositing pipeline if needed
+        if compositing_pipeline.is_none() {
+            *compositing_pipeline = Some(CompositingPipeline::new(device, surface_format));
+        }
+
+        let pipeline = compositing_pipeline.as_ref().unwrap();
+
+        // Create command encoder for compositing
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("scenevm-compositing-encoder"),
+        });
+
+        // Composite all layers onto the surface
+        let surface_view = &surface.gpu.as_ref().unwrap().view;
+
+        // Collect all VMs that are enabled
+        let mut vms_to_composite: Vec<&VM> = Vec::new();
+        if base_vm.is_enabled() {
+            vms_to_composite.push(base_vm);
+        }
+        for vm in overlays.iter() {
+            if vm.is_enabled() {
+                vms_to_composite.push(vm);
+            }
+        }
+
+        // Composite each layer in order
+        for (i, vm) in vms_to_composite.iter().enumerate() {
+            if let Some(layer_texture) = &vm.layer_texture {
+                if let Some(layer_gpu) = &layer_texture.gpu {
+                    // Create bind group for this layer
+                    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("scenevm-compositing-bind-group"),
+                        layout: &pipeline.bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&layer_gpu.view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                            },
+                        ],
+                    });
+
+                    // Begin render pass
+                    // First layer: clear surface to black (layer texture has background baked in)
+                    // Subsequent layers: load existing content and blend on top
+                    let load_op = if i == 0 {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    } else {
+                        wgpu::LoadOp::Load
+                    };
+
+                    {
+                        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("scenevm-compositing-pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: surface_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: load_op,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+
+                        rpass.set_pipeline(&pipeline.pipeline);
+                        rpass.set_bind_group(0, &bind_group, &[]);
+                        rpass.draw(0..3, 0..1);
+                    }
+                }
+            }
+        }
+
+        queue.submit(Some(encoder.finish()));
     }
 
     /// Total number of VM layers (base + overlays).
@@ -469,8 +744,7 @@ impl SceneVM {
 
     /// Append a new VM layer that will render on top of the existing ones. Returns its layer index.
     pub fn add_vm_layer(&mut self) -> usize {
-        let mut vm = VM::new_with_shared_atlas(self.atlas.clone());
-        vm.set_skip_surface_clear(true);
+        let vm = VM::new_with_shared_atlas(self.atlas.clone());
         self.overlay_vms.push(vm);
         self.refresh_layer_metadata();
         self.total_vm_count() - 1
@@ -655,6 +929,7 @@ impl SceneVM {
                 overlay_vms: Vec::new(),
                 active_vm_index: 0,
                 log_layer_activity: false,
+                compositing_pipeline: None,
             };
             this.refresh_layer_metadata();
             this
@@ -703,6 +978,7 @@ impl SceneVM {
                 overlay_vms: Vec::new(),
                 active_vm_index: 0,
                 log_layer_activity: false,
+                compositing_pipeline: None,
             };
             this.refresh_layer_metadata();
             this
@@ -806,6 +1082,7 @@ impl SceneVM {
             overlay_vms: Vec::new(),
             active_vm_index: 0,
             log_layer_activity: false,
+            compositing_pipeline: None,
         };
         this.refresh_layer_metadata();
         this
@@ -909,6 +1186,7 @@ impl SceneVM {
             overlay_vms: Vec::new(),
             active_vm_index: 0,
             log_layer_activity: false,
+            compositing_pipeline: None,
         };
         this.refresh_layer_metadata();
         this
@@ -1068,6 +1346,8 @@ impl SceneVM {
             w,
             h,
             self.log_layer_activity,
+            &mut self.compositing_pipeline,
+            ws.format,
         );
 
         let frame = match ws.surface.get_current_texture() {
@@ -1181,6 +1461,8 @@ impl SceneVM {
             w,
             h,
             self.log_layer_activity,
+            &mut self.compositing_pipeline,
+            wgpu::TextureFormat::Rgba8Unorm,
         );
 
         // Readback into the surface's CPU memory (blocking on native, non-blocking noop on wasm)
@@ -1220,6 +1502,8 @@ impl SceneVM {
             w,
             h,
             self.log_layer_activity,
+            &mut self.compositing_pipeline,
+            wgpu::TextureFormat::Rgba8Unorm,
         );
 
         // Start readback and await readiness
@@ -1343,6 +1627,8 @@ impl SceneVM {
                     w,
                     h,
                     self.log_layer_activity,
+                    &mut self.compositing_pipeline,
+                    wgpu::TextureFormat::Rgba8Unorm,
                 );
 
                 // Start non-blocking readback into the surface texture (map_async sets the flag)

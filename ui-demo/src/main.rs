@@ -836,6 +836,6 @@ impl SceneVMApp for UiDemo {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    scenevm::run_scenevm_app(UiDemo::new())
+fn main() {
+    scenevm::run_scenevm_app(UiDemo::new()).ok();
 }

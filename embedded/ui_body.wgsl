@@ -15,7 +15,6 @@ struct Style {
 };
 
 const STYLE_FLAG: f32 = 0.5; // params.b > 0.5 => style tile
-const VM_FLAG_SKIP_CLEAR: u32 = 1u;
 const WIDGET_TYPE_BUTTON: f32 = 1.0;
 const WIDGET_TYPE_COLOR_WHEEL: f32 = 2.0;
 
@@ -130,12 +129,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let py = gid.y;
   if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
 
-  // Optionally clear to background like the standard 2D path.
-  let skip_clear = (U.vm_flags & VM_FLAG_SKIP_CLEAR) != 0u;
-  if (!skip_clear) {
-    sv_write(px, py, U.background);
-  }
-
+  // Layer texture is already cleared by render pass
   let tid = tile_of_px(px, py);
   let bins_len = arrayLength(&tile_bins.data);
   if (bins_len == 0u || tid >= bins_len) { return; }
@@ -145,7 +139,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let indices_len = arrayLength(&indices.data);
   let verts_len = arrayLength(&verts.data);
 
-  var out_col = vec4<f32>(U.background.rgb, 1.0);
+  var out_col = U.background;
   var covered = false;
 
   let p = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
@@ -218,7 +212,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   if (covered) {
     sv_write(px, py, out_col);
-  } else if (!skip_clear) {
-    sv_write(px, py, U.background);
   }
+  // Uncovered pixels keep the cleared background from render pass
 }

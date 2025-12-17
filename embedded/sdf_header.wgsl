@@ -52,11 +52,7 @@ fn sdf_data_at(i: u32) -> vec4<f32> {
 }
 
 fn clear_if_needed(px: vec2<u32>) {
-  // Host can set VM_FLAG_SKIP_CLEAR to keep previous frame alive.
-  if (U.vm_flags & 1u) != 0u {
-    return;
-  }
-  textureStore(color_out, vec2<i32>(i32(px.x), i32(px.y)), vec4<f32>(U.background.rgb, 1.0));
+  // Layer texture is already cleared by render pass - no action needed
 }
 
 fn sdf_sample_atlas(rect: vec4<f32>, uv: vec2<f32>) -> vec4<f32> {

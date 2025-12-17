@@ -1,6 +1,5 @@
 // Non-empty dummy buffers for wgpu STORAGE bindings when a scene grid is empty.
 const DUMMY_U32_1: [u32; 1] = [0];
-const VM_FLAG_SKIP_CLEAR: u32 = 0x1;
 
 use crate::{
     Camera3D, CameraKind, Chunk, Light, LightType, Poly2D, Poly3D, Texture,
@@ -567,6 +566,8 @@ pub struct VM {
     pub render_mode: RenderMode,
 
     pub gpu: Option<VMGpu>,
+    // Intermediate texture for this VM layer (for compositing)
+    pub layer_texture: Option<crate::Texture>,
     // --- Compute pipeline params (shared by 2D/3D)
     pub background: Vec4<f32>,
     pub gp0: Vec4<f32>,
@@ -606,7 +607,6 @@ pub struct VM {
     cached_tri_visibility: Vec<u32>, // Per-triangle visibility bitmask (1 bit per triangle)
     visibility_dirty: bool,          // True when only visibility changed (no BVH rebuild needed)
     geometry2d_dirty: bool,
-    skip_surface_clear: bool,
     cached_v2: Vec<Vert2DPod>,
     cached_i2: Vec<u32>,
     cached_tile_bins: Vec<TileBinPod>,
@@ -637,6 +637,20 @@ impl VM {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Ensure the layer texture exists and matches the given size
+    pub(crate) fn ensure_layer_texture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let needs_recreate = match &self.layer_texture {
+            None => true,
+            Some(tex) => tex.width != width || tex.height != height,
+        };
+
+        if needs_recreate {
+            let mut tex = crate::Texture::new(width, height);
+            tex.ensure_gpu_with(device);
+            self.layer_texture = Some(tex);
+        }
     }
 
     pub fn set_layer_index(&mut self, index: usize) {
@@ -1080,16 +1094,9 @@ impl VM {
         self.accel_dirty = true;
     }
 
-    pub fn set_skip_surface_clear(&mut self, skip: bool) {
-        self.skip_surface_clear = skip;
-    }
-
     fn vm_flags(&self) -> u32 {
-        let mut flags = 0;
-        if self.skip_surface_clear {
-            flags |= VM_FLAG_SKIP_CLEAR;
-        }
-        flags
+        // No flags needed - layer clearing handled by render pass
+        0
     }
 
     fn atlas_dims(&self) -> (u32, u32) {
@@ -1254,6 +1261,7 @@ impl VM {
             animation_counter: 0,
             render_mode: RenderMode::Compute2D,
             gpu: None,
+            layer_texture: None,
             background: Vec4::new(1.0, 0.8, 0.2, 1.0),
             palette: [[0.0; 4]; 256],
             palette_dirty: true,
@@ -1286,7 +1294,6 @@ impl VM {
             cached_tri_visibility: Vec::new(),
             visibility_dirty: false,
             geometry2d_dirty: true,
-            skip_surface_clear: false,
             cached_v2: Vec::new(),
             cached_i2: Vec::new(),
             cached_tile_bins: Vec::new(),
@@ -2365,7 +2372,7 @@ impl VM {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        surface: &mut Texture,
+        _surface: &mut Texture,
         fb_w: u32,
         fb_h: u32,
     ) -> crate::SceneVMResult<()> {
@@ -2374,8 +2381,8 @@ impl VM {
         }
         self.init_compute(device)?;
         self.upload_tile_metadata_to_gpu(device);
-        // Require surface to be STORAGE-capable. If your Texture lacks this, recreate with STORAGE_BINDING.
-        surface.ensure_gpu_with(device);
+        // Ensure layer texture exists and matches size
+        self.ensure_layer_texture(device, fb_w, fb_h);
         // Update uniforms
         let m = self.transform2d;
         let m_inv = mat3_inverse_f32(&m).unwrap_or(Mat3::<f32>::identity());
@@ -2545,9 +2552,16 @@ impl VM {
             ));
         }
 
-        // Build bind group with surface view and atlas, plus 2D geometry SSBOs
+        // Build bind group with layer texture view and atlas, plus 2D geometry SSBOs
         let g = self.gpu.as_mut().unwrap();
-        let view = &surface.gpu.as_ref().unwrap().view;
+        let view = &self
+            .layer_texture
+            .as_ref()
+            .unwrap()
+            .gpu
+            .as_ref()
+            .unwrap()
+            .view;
         g.u2d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vm-u2d-bg"),
             layout: g.u2d_bgl.as_ref().unwrap(),
@@ -2638,7 +2652,7 @@ impl VM {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        surface: &mut Texture,
+        _surface: &mut Texture,
         fb_w: u32,
         fb_h: u32,
     ) -> crate::SceneVMResult<()> {
@@ -2647,7 +2661,7 @@ impl VM {
         }
         self.init_compute(device)?;
         self.upload_tile_metadata_to_gpu(device);
-        surface.ensure_gpu_with(device);
+        self.ensure_layer_texture(device, fb_w, fb_h);
 
         // --- Uniforms ---
         let m = self.transform3d;
@@ -2999,7 +3013,15 @@ impl VM {
         }
 
         // Avoid borrowing self immutably while we need &mut for bind group creation.
-        let surface_view = surface.gpu.as_ref().unwrap().view.clone();
+        let layer_view = self
+            .layer_texture
+            .as_ref()
+            .unwrap()
+            .gpu
+            .as_ref()
+            .unwrap()
+            .view
+            .clone();
         let (atlas_view, atlas_mat_view) = self
             .shared_atlas
             .texture_views()
@@ -3018,7 +3040,7 @@ impl VM {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&surface_view),
+                        resource: wgpu::BindingResource::TextureView(&layer_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -3090,7 +3112,7 @@ impl VM {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        surface: &mut Texture,
+        _surface: &mut Texture,
         fb_w: u32,
         fb_h: u32,
     ) -> crate::SceneVMResult<()> {
@@ -3098,7 +3120,7 @@ impl VM {
             self.init_gpu(device)?;
         }
         self.init_compute(device)?;
-        surface.ensure_gpu_with(device);
+        self.ensure_layer_texture(device, fb_w, fb_h);
         self.upload_atlas_to_gpu_with(device, queue);
         let c = self.camera3d;
 
@@ -3145,7 +3167,14 @@ impl VM {
         self.upload_sdf_data_to_gpu(device);
 
         let g = self.gpu.as_mut().unwrap();
-        let view = &surface.gpu.as_ref().unwrap().view;
+        let view = &self
+            .layer_texture
+            .as_ref()
+            .unwrap()
+            .gpu
+            .as_ref()
+            .unwrap()
+            .view;
         let (atlas_tex_view, _atlas_mat_tex_view) = self
             .shared_atlas
             .texture_views()
