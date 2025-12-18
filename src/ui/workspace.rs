@@ -530,6 +530,34 @@ impl Workspace {
         None
     }
 
+    /// Set the value of a slider by its string ID.
+    pub fn set_slider_value(&mut self, id: &str, value: f32) {
+        if let Some(slider) = self.find_view_mut::<crate::ui::Slider>(id) {
+            slider.set_value(value);
+        }
+    }
+
+    /// Set the title of a ParamList by its string ID.
+    pub fn set_paramlist_title(&mut self, id: &str, title: impl Into<String>) {
+        if let Some(param_list) = self.find_view_mut::<crate::ui::ParamList>(id) {
+            param_list.title = Some(title.into());
+        }
+    }
+
+    /// Set the active index of a ButtonGroup by its string ID.
+    pub fn set_buttongroup_index(&mut self, id: &str, index: usize) {
+        if let Some(button_group) = self.find_view_mut::<crate::ui::ButtonGroup>(id) {
+            button_group.set_active(index);
+        }
+    }
+
+    /// Set the selected index of a DropdownList by its string ID.
+    pub fn set_dropdown_index(&mut self, id: &str, index: usize) {
+        if let Some(dropdown) = self.find_view_mut::<crate::ui::DropdownList>(id) {
+            dropdown.set_selected(index);
+        }
+    }
+
     /// Set the position (x, y) of a widget by its string ID.
     /// This updates the widget's rect while preserving its width and height.
     pub fn set_widget_pos(&mut self, id: &str, x: f32, y: f32) {

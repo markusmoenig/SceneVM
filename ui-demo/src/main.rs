@@ -341,6 +341,24 @@ impl SceneVMApp for UiDemo {
 
         self.workspace.add_root(param_list_node);
 
+        // Add a dropdown list example
+        let dropdown = DropdownList::new(
+            "noise_type",
+            theme.dropdown_list([40.0, 450.0, 200.0, 40.0]),
+        )
+        .with_id("noise_dropdown")
+        .with_items(vec![
+            "Simplex Noise".into(),
+            "Perlin Noise".into(),
+            "Value Noise".into(),
+            "Worley Noise".into(),
+            "Voronoi".into(),
+        ])
+        .with_selected(0);
+
+        let dropdown_node = self.workspace.add_view(dropdown);
+        self.workspace.add_root(dropdown_node);
+
         // Create a popup ParamList for a button
         let popup_slider_width = 90.0;
 
@@ -611,6 +629,9 @@ impl SceneVMApp for UiDemo {
                 }
                 UiAction::ButtonGroupChanged(name, index) => {
                     println!("Button group '{}' changed to index {}", name, index);
+                }
+                UiAction::DropdownChanged(name, index) => {
+                    println!("Dropdown '{}' changed to index {}", name, index);
                 }
                 UiAction::ColorChanged(id, color) => {
                     println!(

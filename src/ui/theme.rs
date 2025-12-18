@@ -2,7 +2,9 @@
 
 use vek::Vec4;
 
-use crate::ui::{ButtonGroupStyle, ButtonStyle, ParamListStyle, SliderStyle, ToolbarStyle};
+use crate::ui::{
+    ButtonGroupStyle, ButtonStyle, DropdownListStyle, ParamListStyle, SliderStyle, ToolbarStyle,
+};
 
 /// A UI theme that defines colors and styling for all widgets
 #[derive(Debug, Clone)]
@@ -171,6 +173,23 @@ impl Theme {
             layer: 10,
             title_color: self.accent,
             title_size: 16.0,
+        }
+    }
+
+    /// Create a dropdown list style with the given rect
+    pub fn dropdown_list(&self, rect: [f32; 4]) -> DropdownListStyle {
+        DropdownListStyle {
+            rect,
+            fill: self.surface_variant,
+            border: self.border,
+            hover_fill: self.primary_hover,
+            text_color: self.text,
+            text_size: 14.0,
+            radius_px: self.radius_px,
+            border_px: self.border_px,
+            layer: 15,
+            item_height: 36.0,
+            max_visible_items: 8,
         }
     }
 }
