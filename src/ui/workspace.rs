@@ -558,6 +558,62 @@ impl Workspace {
         }
     }
 
+    /// Apply a new theme to all widgets in the workspace.
+    /// This updates colors and styling of all widgets to match the new theme.
+    pub fn apply_theme(&mut self, theme: &crate::ui::Theme) {
+        use crate::ui::{Button, ButtonGroup, DropdownList, ParamList, Slider, Toolbar};
+
+        for (_id, node) in self.nodes.iter_mut() {
+            // Update Button styles
+            if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
+                let rect = button.style.rect;
+                button.style = theme.button(rect);
+            }
+            // Update ButtonGroup styles - preserve spacing!
+            else if let Some(bg) = node.view.as_any_mut().downcast_mut::<ButtonGroup>() {
+                let rect = bg.style.rect;
+                let bw = bg.style.button_width;
+                let bh = bg.style.button_height;
+                let spacing = bg.style.spacing; // Preserve custom spacing
+                bg.style = theme.button_group(rect, bw, bh);
+                bg.style.spacing = spacing; // Restore custom spacing
+                // Update text label color for better contrast
+                bg.text_color = theme.text;
+            }
+            // Update Slider styles
+            else if let Some(slider) = node.view.as_any_mut().downcast_mut::<Slider>() {
+                let rect = slider.style.rect;
+                let show_value = slider.show_value; // Preserve settings
+                let precision = slider.value_precision;
+                slider.style = theme.slider(rect);
+                slider.show_value = show_value;
+                slider.value_precision = precision;
+                // Update value color for better contrast
+                slider.value_color = theme.text;
+            }
+            // Update ParamList styles - preserve title
+            else if let Some(pl) = node.view.as_any_mut().downcast_mut::<ParamList>() {
+                let rect = pl.style.rect;
+                let title = pl.title.clone(); // Preserve title
+                pl.style = theme.param_list(rect);
+                pl.title = title; // Restore title
+                // Update label color for better contrast
+                pl.label_color = theme.text;
+            }
+            // Update Toolbar styles
+            else if let Some(toolbar) = node.view.as_any_mut().downcast_mut::<Toolbar>() {
+                let rect = toolbar.style.rect;
+                toolbar.style = theme.toolbar(rect);
+            }
+            // Update DropdownList styles
+            else if let Some(dropdown) = node.view.as_any_mut().downcast_mut::<DropdownList>() {
+                let rect = dropdown.style.rect;
+                dropdown.style = theme.dropdown_list(rect);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// Set the position (x, y) of a widget by its string ID.
     /// This updates the widget's rect while preserving its width and height.
     pub fn set_widget_pos(&mut self, id: &str, x: f32, y: f32) {

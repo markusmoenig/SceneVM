@@ -14,6 +14,12 @@ pub trait SceneVMApp {
     fn target_fps(&self) -> Option<f32> {
         None
     }
+    /// Get the current system theme preference (true = dark, false = light)
+    /// Called before init() to determine initial theme
+    #[cfg(feature = "ui")]
+    fn is_dark_mode(&self) -> bool {
+        true // Default to dark mode
+    }
     /// Called once after the renderer is created and sized.
     fn init(&mut self, _vm: &mut SceneVM, _size: (u32, u32)) {}
     /// Per-frame update hook (e.g. animation).
@@ -86,6 +92,16 @@ pub trait SceneVMApp {
     #[cfg(feature = "ui")]
     fn generate_thumbnail(&mut self, _vm: &mut SceneVM) -> Option<(u32, u32, Vec<u8>)> {
         None
+    }
+
+    /// Switch between light and dark themes
+    /// Called when the system appearance changes (e.g., iOS dark mode toggle)
+    /// or when user manually switches theme
+    /// `is_dark` is true for dark mode, false for light mode
+    #[cfg(feature = "ui")]
+    fn set_theme(&mut self, _vm: &mut SceneVM, _is_dark: bool, _size: (u32, u32)) {
+        // Default: do nothing
+        // Apps should override this to rebuild their UI with the new theme
     }
 }
 

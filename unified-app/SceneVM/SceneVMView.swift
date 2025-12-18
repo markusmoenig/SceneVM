@@ -4,7 +4,7 @@ import Metal
 
 struct SceneVMView: View {
     @ObservedObject var document: SceneVMDocument
-    
+
     var body: some View {
         PlatformView(document: document)
     }
@@ -13,7 +13,7 @@ struct SceneVMView: View {
 #if os(macOS)
 struct PlatformView: NSViewRepresentable {
     @ObservedObject var document: SceneVMDocument
-    
+
     func makeNSView(context: Context) -> MetalContainer {
         let container = MetalContainer()
         container.document = document
@@ -60,16 +60,26 @@ final class MetalContainer: NSView {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         metalLayer.contentsScale = scale
         metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        
+
         if handle == nil && bounds.width > 0 && bounds.height > 0 {
             handle = SceneVMHandle(layer: metalLayer, size: bounds.size, scale: scale)
             document?.sceneVMHandle = handle
+            // Set initial theme based on system appearance
+            let isDark = effectiveAppearance.name == .darkAqua || effectiveAppearance.name == .vibrantDark
+            handle?.setTheme(isDark: isDark, size: bounds.size)
             loadProjectIfNeeded()
         } else {
             handle?.resize(to: bounds.size, scale: scale)
         }
     }
-    
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        // Detect theme changes and notify the app
+        let isDark = effectiveAppearance.name == .darkAqua || effectiveAppearance.name == .vibrantDark
+        handle?.setTheme(isDark: isDark, size: bounds.size)
+    }
+
     private func loadProjectIfNeeded() {
         guard let handle = handle, let document = document else { return }
         if !document.projectJSON.isEmpty && document.projectJSON != "{}" {
@@ -140,7 +150,7 @@ final class MetalContainer: NSView {
 #else
 struct PlatformView: UIViewRepresentable {
     @ObservedObject var document: SceneVMDocument
-    
+
     func makeUIView(context: Context) -> MetalContainer {
         let container = MetalContainer()
         container.document = document
@@ -190,16 +200,28 @@ final class MetalContainer: UIView {
         let scale = window?.screen.scale ?? UIScreen.main.scale
         metalLayer.contentsScale = scale
         metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        
+
         if handle == nil && bounds.width > 0 && bounds.height > 0 {
             handle = SceneVMHandle(layer: metalLayer, size: bounds.size, scale: scale)
             document?.sceneVMHandle = handle
+            // Set initial theme based on system appearance
+            let isDark = traitCollection.userInterfaceStyle == .dark
+            handle?.setTheme(isDark: isDark, size: bounds.size)
             loadProjectIfNeeded()
         } else {
             handle?.resize(to: bounds.size, scale: scale)
         }
     }
-    
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        // Detect theme changes and notify the app
+        if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
+            let isDark = traitCollection.userInterfaceStyle == .dark
+            handle?.setTheme(isDark: isDark, size: bounds.size)
+        }
+    }
+
     private func loadProjectIfNeeded() {
         guard let handle = handle, let document = document else { return }
         if !document.projectJSON.isEmpty && document.projectJSON != "{}" {

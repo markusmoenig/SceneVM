@@ -226,6 +226,14 @@ pub unsafe extern "C" fn unified_app_runner_create(
     let logical_w = ((width as f32) / scale.max(0.0001)).round().max(1.0) as u32;
     let logical_h = ((height as f32) / scale.max(0.0001)).round().max(1.0) as u32;
     let ctx = FfiRenderCtx::new((logical_w, logical_h));
+
+    // Set initial theme before init() so widgets are created with correct theme
+    #[cfg(feature = "ui")]
+    {
+        let is_dark = app.is_dark_mode();
+        app.set_theme(&mut vm, is_dark, ctx.size);
+    }
+
     app.init(&mut vm, ctx.size);
     Box::into_raw(Box::new(SceneVMAppRunner {
         app,
@@ -583,5 +591,28 @@ pub unsafe extern "C" fn unified_app_runner_free_data(data_ptr: *const u8, data_
                 data_len,
             ));
         }
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "macos", target_os = "ios")
+))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unified_app_runner_set_theme(
+    ptr: *mut SceneVMAppRunner,
+    is_dark: i32,
+    width: u32,
+    height: u32,
+) {
+    #[cfg(feature = "ui")]
+    {
+        if let Some(r) = unsafe { ptr.as_mut() } {
+            r.app.set_theme(&mut r.vm, is_dark != 0, (width, height));
+        }
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        let _ = (ptr, is_dark, width, height);
     }
 }

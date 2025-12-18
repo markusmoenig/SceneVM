@@ -51,6 +51,9 @@ func unified_app_runner_import_data(_ vm: UnsafeMutableRawPointer?, _ data: Unsa
 @_silgen_name("unified_app_runner_free_data")
 func unified_app_runner_free_data(_ data_ptr: UnsafePointer<UInt8>?, _ data_len: Int)
 
+@_silgen_name("unified_app_runner_set_theme")
+func unified_app_runner_set_theme(_ vm: UnsafeMutableRawPointer?, _ is_dark: Int32, _ width: UInt32, _ height: UInt32)
+
 /// Thin Swift wrapper around the SceneVM FFI for CAMetalLayer presentation.
 final class SceneVMHandle {
     private var vm: UnsafeMutableRawPointer?
@@ -106,6 +109,13 @@ final class SceneVMHandle {
     func pinch(scale: CGFloat, center: CGPoint) {
         guard let vm else { return }
         unified_app_runner_pinch(vm, Float(scale), Float(center.x), Float(center.y))
+    }
+
+    func setTheme(isDark: Bool, size: CGSize) {
+        guard let vm else { return }
+        let w = UInt32(max(size.width * scale, 1))
+        let h = UInt32(max(size.height * scale, 1))
+        unified_app_runner_set_theme(vm, isDark ? 1 : 0, w, h)
     }
 
     deinit {

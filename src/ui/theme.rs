@@ -72,30 +72,36 @@ impl Theme {
         }
     }
 
-    /// Light theme (placeholder for future)
+    /// Light theme - clean, bright appearance with high contrast
     pub fn light() -> Self {
         Self {
             name: "Light".into(),
 
-            background: Vec4::new(0.95, 0.95, 0.97, 1.0),
-            surface: Vec4::new(1.0, 1.0, 1.0, 1.0),
-            surface_variant: Vec4::new(0.93, 0.93, 0.95, 1.0),
+            // Backgrounds - clear hierarchy
+            background: Vec4::new(0.85, 0.85, 0.87, 1.0), // MUCH darker gray background
+            surface: Vec4::new(1.0, 1.0, 1.0, 1.0),       // Pure white for surfaces
+            surface_variant: Vec4::new(0.92, 0.92, 0.94, 1.0), // Light gray for buttons
 
-            primary: Vec4::new(0.88, 0.88, 0.9, 1.0),
-            primary_hover: Vec4::new(0.85, 0.85, 0.88, 1.0),
-            primary_active: Vec4::new(0.8, 0.8, 0.85, 1.0),
+            // Primary interactive elements
+            primary: Vec4::new(0.80, 0.80, 0.82, 1.0),
+            primary_hover: Vec4::new(0.70, 0.70, 0.73, 1.0),
+            primary_active: Vec4::new(0.60, 0.60, 0.63, 1.0),
 
-            border: Vec4::new(0.8, 0.8, 0.82, 1.0),
-            border_subtle: Vec4::new(0.9, 0.9, 0.92, 1.0),
+            // Borders - clearly visible
+            border: Vec4::new(0.60, 0.60, 0.63, 1.0), // VERY dark borders
+            border_subtle: Vec4::new(0.75, 0.75, 0.78, 1.0),
 
-            text: Vec4::new(0.1, 0.1, 0.12, 1.0),
-            text_secondary: Vec4::new(0.4, 0.4, 0.45, 1.0),
+            // Text - very dark for maximum contrast
+            text: Vec4::new(0.0, 0.0, 0.0, 1.0), // PURE BLACK
+            text_secondary: Vec4::new(0.25, 0.25, 0.30, 1.0),
 
-            accent: Vec4::new(0.2, 0.4, 0.7, 1.0),
-            accent_hover: Vec4::new(0.25, 0.45, 0.75, 1.0),
+            // Accent - more saturated blue
+            accent: Vec4::new(0.0, 0.4, 1.0, 1.0), // BRIGHT blue
+            accent_hover: Vec4::new(0.1, 0.5, 1.0, 1.0),
 
-            radius_px: 6.0,
-            border_px: 1.0,
+            // Rounded corners
+            radius_px: 8.0,
+            border_px: 2.0,
         }
     }
 
@@ -191,5 +197,15 @@ impl Theme {
             item_height: 36.0,
             max_visible_items: 8,
         }
+    }
+
+    /// Get the background color for this theme (for VM clear color)
+    pub fn background_color(&self) -> [f32; 4] {
+        [
+            self.background.x,
+            self.background.y,
+            self.background.z,
+            self.background.w,
+        ]
     }
 }
