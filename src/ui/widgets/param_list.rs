@@ -7,12 +7,14 @@ use crate::ui::{Drawable, UiView, ViewContext};
 /// Style properties for a parameter list widget.
 #[derive(Debug, Clone)]
 pub struct ParamListStyle {
-    pub rect: [f32; 4],    // x, y, w, h in pixels
-    pub fill: Vec4<f32>,   // Background color
-    pub border: Vec4<f32>, // Border color
-    pub radius_px: f32,    // Corner radius
-    pub border_px: f32,    // Border width
-    pub layer: i32,        // Rendering layer
+    pub rect: [f32; 4],         // x, y, w, h in pixels
+    pub fill: Vec4<f32>,        // Background color
+    pub border: Vec4<f32>,      // Border color
+    pub radius_px: f32,         // Corner radius
+    pub border_px: f32,         // Border width
+    pub layer: i32,             // Rendering layer
+    pub title_color: Vec4<f32>, // Default title color
+    pub title_size: f32,        // Default title font size
 }
 
 /// A parameter list widget that displays labels on the left and widgets on the right.
@@ -22,6 +24,10 @@ pub struct ParamList {
     pub id: String,
     render_id: Uuid,
     pub style: ParamListStyle,
+    pub title: Option<String>,        // Optional title text
+    pub title_color: Vec4<f32>,       // Title text color
+    pub title_size: f32,              // Title font size
+    pub title_height: f32,            // Height reserved for title area
     pub item_height: f32,             // Height of each row
     pub spacing: f32,                 // Vertical spacing between rows
     pub label_width: f32,             // Width of the label column
@@ -35,10 +41,17 @@ pub struct ParamList {
 impl ParamList {
     /// Create a new parameter list widget.
     pub fn new(style: ParamListStyle) -> Self {
+        let title_color = style.title_color;
+        let title_size = style.title_size;
+
         Self {
             id: String::new(),
             render_id: Uuid::new_v4(),
             style,
+            title: None,
+            title_color,
+            title_size,
+            title_height: 30.0,
             item_height: 32.0,
             spacing: 4.0,
             label_width: 100.0,
@@ -98,9 +111,35 @@ impl ParamList {
         self
     }
 
+    /// Set the title text.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the title color.
+    pub fn with_title_color(mut self, color: Vec4<f32>) -> Self {
+        self.title_color = color;
+        self
+    }
+
+    /// Set the title font size.
+    pub fn with_title_size(mut self, size: f32) -> Self {
+        self.title_size = size;
+        self
+    }
+
+    /// Set the title area height.
+    pub fn with_title_height(mut self, height: f32) -> Self {
+        self.title_height = height;
+        self
+    }
+
     /// Add a parameter item (label and widget).
     pub fn add_item(&mut self, label: impl Into<String>, widget: NodeId) {
         self.items.push((label.into(), widget));
+        // Auto-update height based on content
+        self.update_height();
     }
 
     /// Get the children (widget NodeIds) for workspace integration.
@@ -108,15 +147,48 @@ impl ParamList {
         self.items.iter().map(|(_, node_id)| *node_id).collect()
     }
 
+    /// Update the ParamList height based on its content.
+    pub fn update_height(&mut self) {
+        let height = self.calculate_total_height();
+        self.style.rect[3] = height;
+    }
+
+    /// Get the Y offset for content (accounts for title if present).
+    fn content_offset_y(&self) -> f32 {
+        if self.title.is_some() {
+            self.title_height
+        } else {
+            0.0
+        }
+    }
+
+    /// Calculate the minimum width needed based on label width, widget space, and padding.
+    /// Returns the calculated width.
+    pub fn calculate_min_width(&self, widget_width: f32) -> f32 {
+        // padding + label_offset + label_width + widget_width + value_text_space + padding
+        self.padding + self.label_offset + self.label_width + widget_width + 40.0 + self.padding
+    }
+
+    /// Set the width based on the expected widget width.
+    pub fn with_auto_width(mut self, widget_width: f32) -> Self {
+        let width = self.calculate_min_width(widget_width);
+        self.style.rect[2] = width;
+        self
+    }
+
     /// Calculate layout positions for all widget children.
     /// Returns computed rects for each widget.
     pub fn calculate_layout(&self, child_sizes: &[[f32; 2]]) -> Vec<[f32; 4]> {
         let [x, y, w, _] = self.style.rect;
+        let content_y_offset = self.content_offset_y();
         let mut rects = Vec::new();
 
         for (index, &[child_width, _]) in child_sizes.iter().enumerate() {
             let widget_x = x + self.padding + self.label_width;
-            let widget_y = y + self.padding + (index as f32 * (self.item_height + self.spacing));
+            let widget_y = y
+                + content_y_offset
+                + self.padding
+                + (index as f32 * (self.item_height + self.spacing));
             let widget_h = self.item_height;
 
             // Reserve space for value text that appears to the right of widgets (like sliders)
@@ -134,9 +206,11 @@ impl ParamList {
     /// Returns [x, y] for the label origin.
     pub fn get_label_position(&self, index: usize) -> [f32; 2] {
         let [x, y, _, _] = self.style.rect;
+        let content_y_offset = self.content_offset_y();
         let label_x = x + self.padding + self.label_offset;
         // Calculate the center of the row
         let row_center_y = y
+            + content_y_offset
             + self.padding
             + (index as f32 * (self.item_height + self.spacing))
             + (self.item_height / 2.0);
@@ -150,8 +224,12 @@ impl ParamList {
     /// Returns [x, y, w, h] for the widget.
     pub fn get_widget_rect(&self, index: usize, widget_width: f32) -> [f32; 4] {
         let [x, y, w, _] = self.style.rect;
+        let content_y_offset = self.content_offset_y();
         let widget_x = x + self.padding + self.label_width;
-        let widget_y = y + self.padding + (index as f32 * (self.item_height + self.spacing));
+        let widget_y = y
+            + content_y_offset
+            + self.padding
+            + (index as f32 * (self.item_height + self.spacing));
         let widget_h = self.item_height;
         // Reserve space for value text that appears to the right of widgets (like sliders)
         // Subtract ~40px to account for 8px gap + ~30px text + margin
@@ -162,10 +240,12 @@ impl ParamList {
 
     /// Calculate the total height needed for all items.
     pub fn calculate_total_height(&self) -> f32 {
+        let content_y_offset = self.content_offset_y();
         if self.items.is_empty() {
-            self.padding * 2.0
+            content_y_offset + self.padding * 2.0
         } else {
-            self.padding * 2.0
+            content_y_offset
+                + self.padding * 2.0
                 + (self.items.len() as f32 * self.item_height)
                 + ((self.items.len() - 1) as f32 * self.spacing)
         }
@@ -196,6 +276,34 @@ impl UiView for ParamList {
             layer: self.style.layer,
         });
 
+        // Draw title if present
+        if let Some(ref title_text) = self.title {
+            let [x, y, w, _] = self.style.rect;
+            let title_x = x + self.padding;
+            let title_y = y + (self.title_height - self.title_size) / 2.0;
+
+            ctx.push(Drawable::Text {
+                id: Uuid::new_v4(),
+                text: title_text.clone(),
+                origin: [title_x, title_y],
+                px_size: self.title_size,
+                color: self.title_color,
+                layer: self.style.layer + 1,
+            });
+
+            // Draw separator line below title
+            let separator_y = y + self.title_height - 1.0;
+            ctx.push(Drawable::Rect {
+                id: Uuid::new_v4(),
+                rect: [x + self.padding, separator_y, w - self.padding * 2.0, 1.0],
+                fill: Vec4::new(0.3, 0.3, 0.35, 0.5),
+                border: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                radius_px: 0.0,
+                border_px: 0.0,
+                layer: self.style.layer + 1,
+            });
+        }
+
         // Draw labels
         for (index, (label, _)) in self.items.iter().enumerate() {
             let [label_x, label_y] = self.get_label_position(index);
@@ -209,8 +317,7 @@ impl UiView for ParamList {
             });
         }
 
-        // Note: Widgets are positioned manually in the demo/user code
-        // They need to use get_widget_rect() to calculate their positions
+        // Note: Widgets are positioned automatically by the workspace layout system
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

@@ -48,6 +48,10 @@ pub struct ButtonGroup {
     pub style: ButtonGroupStyle,
     pub labels: Vec<String>, // Button text labels (optional if textures are used)
     pub textures: Vec<Option<Uuid>>, // Optional texture tile_id for each button
+    pub text_labels: Vec<String>, // Optional text below icons
+    pub text_color: Vec4<f32>, // Color for text labels
+    pub text_size: f32,      // Font size for text labels
+    pub text_gap: f32,       // Gap between button and text label
     pub active_index: usize, // Currently active button (0-based)
     active_pointer: Option<u32>,
     hover_index: Option<usize>,
@@ -63,6 +67,10 @@ impl ButtonGroup {
             style,
             labels: Vec::new(),
             textures: Vec::new(),
+            text_labels: Vec::new(),
+            text_color: Vec4::new(0.8, 0.8, 0.85, 1.0),
+            text_size: 11.0,
+            text_gap: 2.0,
             active_index: 0,
             active_pointer: None,
             hover_index: None,
@@ -82,6 +90,26 @@ impl ButtonGroup {
 
     pub fn with_textures(mut self, textures: Vec<Option<Uuid>>) -> Self {
         self.textures = textures;
+        self
+    }
+
+    pub fn with_text_labels(mut self, text_labels: Vec<String>) -> Self {
+        self.text_labels = text_labels;
+        self
+    }
+
+    pub fn with_text_color(mut self, color: Vec4<f32>) -> Self {
+        self.text_color = color;
+        self
+    }
+
+    pub fn with_text_size(mut self, size: f32) -> Self {
+        self.text_size = size;
+        self
+    }
+
+    pub fn with_text_gap(mut self, gap: f32) -> Self {
+        self.text_gap = gap;
         self
     }
 
@@ -234,6 +262,24 @@ impl UiView for ButtonGroup {
                     origin: [text_x, text_y],
                     px_size: text_size,
                     color: Vec4::new(0.9, 0.9, 0.95, 1.0),
+                    layer: self.style.layer + 2,
+                });
+            }
+
+            // Draw text label below button if available
+            if let Some(text_label) = self.text_labels.get(index) {
+                // Rough approximation for text width
+                let approx_text_width = text_label.len() as f32 * self.text_size * 0.6;
+                let text_x = btn_x + (btn_w - approx_text_width) * 0.5;
+                // Position text below the button with configurable gap
+                let text_y = btn_y + btn_h + self.text_gap;
+
+                ctx.push(Drawable::Text {
+                    id: Uuid::new_v4(),
+                    text: text_label.clone(),
+                    origin: [text_x, text_y],
+                    px_size: self.text_size,
+                    color: self.text_color,
                     layer: self.style.layer + 2,
                 });
             }

@@ -169,6 +169,8 @@ impl Theme {
             radius_px: self.radius_px,
             border_px: self.border_px,
             layer: 10,
+            title_color: self.accent,
+            title_size: 16.0,
         }
     }
 }

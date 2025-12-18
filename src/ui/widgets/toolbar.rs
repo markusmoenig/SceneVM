@@ -48,6 +48,7 @@ pub struct Toolbar {
     render_id: Uuid,
     pub style: ToolbarStyle,
     pub orientation: ToolbarOrientation,
+    pub draw_background: bool,  // Whether to draw the background rect
     pub hstack: Option<HStack>, // Used when orientation is Horizontal
     pub vstack: Option<VStack>, // Used when orientation is Vertical
     pub manual_separators: Vec<(f32, ToolbarSeparator)>, // Manually positioned separators (position, style)
@@ -75,6 +76,7 @@ impl Toolbar {
             render_id: Uuid::new_v4(),
             style,
             orientation,
+            draw_background: true,
             hstack,
             vstack,
             manual_separators: Vec::new(),
@@ -84,6 +86,12 @@ impl Toolbar {
     /// Set the widget ID.
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = id.into();
+        self
+    }
+
+    /// Set whether to draw the background.
+    pub fn with_background(mut self, draw: bool) -> Self {
+        self.draw_background = draw;
         self
     }
 
@@ -199,16 +207,18 @@ impl Toolbar {
 
 impl UiView for Toolbar {
     fn build(&mut self, ctx: &mut ViewContext) {
-        // Draw the background
-        ctx.push(Drawable::Rect {
-            id: self.render_id,
-            rect: self.style.rect,
-            fill: self.style.fill,
-            border: self.style.border,
-            radius_px: self.style.radius_px,
-            border_px: self.style.border_px,
-            layer: self.style.layer,
-        });
+        // Draw the background only if enabled
+        if self.draw_background {
+            ctx.push(Drawable::Rect {
+                id: self.render_id,
+                rect: self.style.rect,
+                fill: self.style.fill,
+                border: self.style.border,
+                radius_px: self.style.radius_px,
+                border_px: self.style.border_px,
+                layer: self.style.layer,
+            });
+        }
 
         // Draw manual separators
         for (position, sep) in &self.manual_separators {

@@ -292,15 +292,18 @@ impl SceneVMApp for UiDemo {
         self.workspace.attach(toolbar_node, toolbar_group_node);
 
         // Add a parameter list below the toolbar
-        let mut param_list = ParamList::new(theme.param_list([40.0, 250.0, 350.0, 200.0]))
+        let param_slider_width = 180.0; // Slider width, value text appears 8px to the right
+
+        let mut param_list = ParamList::new(theme.param_list([40.0, 250.0, 0.0, 0.0]))
             .with_id("param_list")
+            .with_title("Audio Settings")
             .with_item_height(32.0)
             .with_label_width(80.0)
             .with_spacing(8.0)
-            .with_label_size(14.0);
+            .with_label_size(14.0)
+            .with_auto_width(param_slider_width); // Auto-calculate width based on slider width
 
         // Create sliders and labels for the parameter list
-        let param_slider_width = 180.0; // Slider width, value text appears 8px to the right
         let mut param_slider_nodes = Vec::new();
 
         for i in 0..4 {
@@ -339,19 +342,21 @@ impl SceneVMApp for UiDemo {
         self.workspace.add_root(param_list_node);
 
         // Create a popup ParamList for a button
-        let mut popup_style = theme.param_list([0.0, 0.0, 250.0, 150.0]);
+        let popup_slider_width = 90.0;
+
+        let mut popup_style = theme.param_list([0.0, 0.0, 0.0, 0.0]);
         popup_style.layer = 100; // High layer for popup
 
         let mut popup_param_list = ParamList::new(popup_style)
             .with_id("popup_param_list")
+            .with_title("Color Picker")
             .with_item_height(28.0)
             .with_label_width(70.0)
             .with_spacing(6.0)
-            .with_label_size(13.0);
+            .with_label_size(13.0)
+            .with_auto_width(popup_slider_width); // Auto-calculate width
 
         // Add sliders to the popup
-        // Width accounts for: label_width (80) + slider (90) + gap (8) + value text (~30) + padding (16)
-        let popup_slider_width = 90.0;
         let mut slider_nodes = Vec::new();
         for i in 0..3 {
             let label_text = match i {
