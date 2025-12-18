@@ -7,7 +7,14 @@ use crate::ui::{
     workspace::{UiView, ViewContext},
 };
 
-/// A horizontal group of toggle buttons where only one can be active at a time
+/// Orientation for the button group layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonGroupOrientation {
+    Horizontal,
+    Vertical,
+}
+
+/// A group of toggle buttons where only one can be active at a time
 #[derive(Debug, Clone)]
 pub struct ButtonGroupStyle {
     pub rect: [f32; 4],           // x, y, w, h for the entire group
@@ -46,6 +53,7 @@ pub struct ButtonGroup {
     pub id: String,
     pub name: String, // Name sent in events
     pub style: ButtonGroupStyle,
+    pub orientation: ButtonGroupOrientation,
     pub labels: Vec<String>, // Button text labels (optional if textures are used)
     pub textures: Vec<Option<Uuid>>, // Optional texture tile_id for each button
     pub text_labels: Vec<String>, // Optional text below icons
@@ -65,6 +73,7 @@ impl ButtonGroup {
             id: String::new(),
             name: name.into(),
             style,
+            orientation: ButtonGroupOrientation::Horizontal,
             labels: Vec::new(),
             textures: Vec::new(),
             text_labels: Vec::new(),
@@ -76,6 +85,11 @@ impl ButtonGroup {
             hover_index: None,
             original_rect: None,
         }
+    }
+
+    pub fn with_orientation(mut self, orientation: ButtonGroupOrientation) -> Self {
+        self.orientation = orientation;
+        self
     }
 
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
@@ -113,6 +127,11 @@ impl ButtonGroup {
         self
     }
 
+    pub fn with_spacing(mut self, spacing: f32) -> Self {
+        self.style.spacing = spacing;
+        self
+    }
+
     pub fn add_label(&mut self, label: impl Into<String>) {
         self.labels.push(label.into());
     }
@@ -138,24 +157,59 @@ impl ButtonGroup {
 
     /// Calculate the total width needed for all buttons
     pub fn calculate_width(&self) -> f32 {
-        let button_count = self.button_count() as f32;
-        if button_count == 0.0 {
-            return 0.0;
+        match self.orientation {
+            ButtonGroupOrientation::Horizontal => {
+                let button_count = self.button_count() as f32;
+                if button_count == 0.0 {
+                    return 0.0;
+                }
+                (button_count * self.style.button_width)
+                    + ((button_count - 1.0) * self.style.spacing)
+            }
+            ButtonGroupOrientation::Vertical => self.style.button_width,
         }
-        (button_count * self.style.button_width) + ((button_count - 1.0) * self.style.spacing)
+    }
+
+    pub fn calculate_height(&self) -> f32 {
+        match self.orientation {
+            ButtonGroupOrientation::Horizontal => self.style.button_height,
+            ButtonGroupOrientation::Vertical => {
+                let button_count = self.button_count() as f32;
+                if button_count == 0.0 {
+                    return 0.0;
+                }
+                (button_count * self.style.button_height)
+                    + ((button_count - 1.0) * self.style.spacing)
+            }
+        }
     }
 
     /// Get the rect for a button at the given index
     fn button_rect(&self, index: usize) -> [f32; 4] {
         let [x, y, _, _] = self.style.rect;
-        let btn_x = x + (index as f32 * (self.style.button_width + self.style.spacing));
-        let btn_y = y;
-        [
-            btn_x,
-            btn_y,
-            self.style.button_width,
-            self.style.button_height,
-        ]
+
+        match self.orientation {
+            ButtonGroupOrientation::Horizontal => {
+                let btn_x = x + (index as f32 * (self.style.button_width + self.style.spacing));
+                let btn_y = y;
+                [
+                    btn_x,
+                    btn_y,
+                    self.style.button_width,
+                    self.style.button_height,
+                ]
+            }
+            ButtonGroupOrientation::Vertical => {
+                let btn_x = x;
+                let btn_y = y + (index as f32 * (self.style.button_height + self.style.spacing));
+                [
+                    btn_x,
+                    btn_y,
+                    self.style.button_width,
+                    self.style.button_height,
+                ]
+            }
+        }
     }
 
     /// Check if a position is inside a specific button

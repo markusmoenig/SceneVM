@@ -27,10 +27,10 @@ pub use style::{StyleId, StyleParams, StyleRegistry};
 pub use text::TextCache;
 pub use theme::Theme;
 pub use widgets::{
-    Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas, ColorWheel, HAlign,
-    Image, ImageStyle, Label, LabelRect, ParamList, ParamListStyle, PopupAlignment, ProjectBrowser,
-    ProjectBrowserItem, ProjectBrowserStyle, Slider, SliderStyle, Spacer, TextButton, Toolbar,
-    ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
+    Button, ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
+    ColorWheel, HAlign, Image, ImageStyle, Label, LabelRect, ParamList, ParamListStyle,
+    PopupAlignment, ProjectBrowser, ProjectBrowserItem, ProjectBrowserStyle, Slider, SliderStyle,
+    Spacer, TextButton, Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
 };
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};
 

@@ -60,9 +60,9 @@ pub mod prelude {
     pub use crate::{
         app_event::{AppEvent, AppEventQueue},
         ui::{
-            Alignment, Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
-            ColorWheel, Drawable, HAlign, HStack, Image, ImageStyle, Label, LabelRect,
-            NodeId, ParamList, ParamListStyle, PopupAlignment, Project, ProjectBrowser,
+            Alignment, Button, ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle, ButtonKind,
+            ButtonStyle, Canvas, ColorWheel, Drawable, HAlign, HStack, Image, ImageStyle, Label,
+            LabelRect, NodeId, ParamList, ParamListStyle, PopupAlignment, Project, ProjectBrowser,
             ProjectBrowserItem, ProjectBrowserStyle, ProjectError, ProjectMetadata, RecentProject,
             RecentProjects, Slider, SliderStyle, Spacer, TextButton, Theme, Toolbar,
             ToolbarOrientation, ToolbarSeparator, ToolbarStyle, UiAction, UiEvent, UiEventKind,

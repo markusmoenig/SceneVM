@@ -15,7 +15,7 @@ mod toolbar;
 
 pub use align::{HAlign, VAlign};
 pub use button::{Button, ButtonKind, ButtonStyle, PopupAlignment};
-pub use button_group::{ButtonGroup, ButtonGroupStyle};
+pub use button_group::{ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle};
 pub use canvas::Canvas;
 pub use color_wheel::ColorWheel;
 pub use image::{Image, ImageStyle};

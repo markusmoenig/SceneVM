@@ -530,6 +530,96 @@ impl Workspace {
         None
     }
 
+    /// Set the position (x, y) of a widget by its string ID.
+    /// This updates the widget's rect while preserving its width and height.
+    pub fn set_widget_pos(&mut self, id: &str, x: f32, y: f32) {
+        use crate::ui::{
+            Button, ButtonGroup, Image, Label, ParamList, Slider, Spacer, TextButton, Toolbar,
+        };
+
+        // Find the node with matching view_id
+        let node_entry = self
+            .nodes
+            .iter_mut()
+            .find(|(_, node)| node.view.view_id() == id);
+
+        if let Some((_, node)) = node_entry {
+            // Try Button
+            if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
+                button.style.rect[0] = x;
+                button.style.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Try ButtonGroup
+            if let Some(button_group) = node.view.as_any_mut().downcast_mut::<ButtonGroup>() {
+                button_group.style.rect[0] = x;
+                button_group.style.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Try Slider
+            if let Some(slider) = node.view.as_any_mut().downcast_mut::<Slider>() {
+                slider.style.rect[0] = x;
+                slider.style.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Try ParamList
+            if let Some(param_list) = node.view.as_any_mut().downcast_mut::<ParamList>() {
+                param_list.style.rect[0] = x;
+                param_list.style.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Try Toolbar
+            if let Some(toolbar) = node.view.as_any_mut().downcast_mut::<Toolbar>() {
+                toolbar.style.rect[0] = x;
+                toolbar.style.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Try Label
+            if let Some(label) = node.view.as_any_mut().downcast_mut::<Label>() {
+                label.origin[0] = x;
+                label.origin[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Try Image
+            if let Some(image) = node.view.as_any_mut().downcast_mut::<Image>() {
+                image.style.rect[0] = x;
+                image.style.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Canvas doesn't have position, skip it
+
+            // Try TextButton
+            if let Some(text_button) = node.view.as_any_mut().downcast_mut::<TextButton>() {
+                text_button.style.rect[0] = x;
+                text_button.style.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Try Spacer
+            if let Some(spacer) = node.view.as_any_mut().downcast_mut::<Spacer>() {
+                spacer.rect[0] = x;
+                spacer.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+        }
+    }
+
     /// Check if a point is inside any button with an open popup
     /// Returns true if the point is inside a button with popup or inside the popup itself
     pub fn is_inside_popup_area(&self, pos: [f32; 2], popup_rect: [f32; 4]) -> bool {
