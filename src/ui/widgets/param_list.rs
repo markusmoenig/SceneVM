@@ -103,6 +103,33 @@ impl ParamList {
         self.items.push((label.into(), widget));
     }
 
+    /// Get the children (widget NodeIds) for workspace integration.
+    pub fn children(&self) -> Vec<NodeId> {
+        self.items.iter().map(|(_, node_id)| *node_id).collect()
+    }
+
+    /// Calculate layout positions for all widget children.
+    /// Returns computed rects for each widget.
+    pub fn calculate_layout(&self, child_sizes: &[[f32; 2]]) -> Vec<[f32; 4]> {
+        let [x, y, w, _] = self.style.rect;
+        let mut rects = Vec::new();
+
+        for (index, &[child_width, _]) in child_sizes.iter().enumerate() {
+            let widget_x = x + self.padding + self.label_width;
+            let widget_y = y + self.padding + (index as f32 * (self.item_height + self.spacing));
+            let widget_h = self.item_height;
+
+            // Reserve space for value text that appears to the right of widgets (like sliders)
+            // Subtract ~40px to account for 8px gap + ~30px text + margin
+            let available_width = w - self.padding * 2.0 - self.label_width - 40.0;
+            let final_width = child_width.min(available_width);
+
+            rects.push([widget_x, widget_y, final_width, widget_h]);
+        }
+
+        rects
+    }
+
     /// Get the position for a label at the given index.
     /// Returns [x, y] for the label origin.
     pub fn get_label_position(&self, index: usize) -> [f32; 2] {

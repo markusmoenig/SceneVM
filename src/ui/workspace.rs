@@ -224,8 +224,17 @@ impl Workspace {
 
     /// Apply layout calculations if this node is a layout container (HStack/VStack/Toolbar)
     fn apply_layout(&mut self, layout_id: NodeId) {
-        use crate::ui::Toolbar;
         use crate::ui::layouts::{HStack, VStack};
+        use crate::ui::{ParamList, Toolbar};
+
+        // Layout type enum for cleaner handling
+        #[derive(Debug, Clone, Copy)]
+        enum LayoutType {
+            HStack,
+            VStack,
+            Toolbar { horizontal: bool },
+            ParamList,
+        }
 
         // First, collect child sizes and check if this is a layout
         let layout_info = {
@@ -236,12 +245,12 @@ impl Workspace {
             // Check if this is an HStack
             if let Some(hstack) = layout_node.view.as_any().downcast_ref::<HStack>() {
                 let children = hstack.children.clone();
-                Some((children, true, false)) // (children, is_hstack, is_toolbar)
+                Some((children, LayoutType::HStack))
             }
             // Check if this is a VStack
             else if let Some(vstack) = layout_node.view.as_any().downcast_ref::<VStack>() {
                 let children = vstack.children.clone();
-                Some((children, false, false))
+                Some((children, LayoutType::VStack))
             }
             // Check if this is a Toolbar
             else if let Some(toolbar) = layout_node.view.as_any().downcast_ref::<Toolbar>() {
@@ -250,13 +259,23 @@ impl Workspace {
                     toolbar.orientation,
                     crate::ui::ToolbarOrientation::Horizontal
                 );
-                Some((children, is_horizontal, true))
+                Some((
+                    children,
+                    LayoutType::Toolbar {
+                        horizontal: is_horizontal,
+                    },
+                ))
+            }
+            // Check if this is a ParamList
+            else if let Some(param_list) = layout_node.view.as_any().downcast_ref::<ParamList>() {
+                let children = param_list.children();
+                Some((children, LayoutType::ParamList))
             } else {
                 None
             }
         };
 
-        let Some((children, is_hstack, is_toolbar)) = layout_info else {
+        let Some((children, layout_type)) = layout_info else {
             return;
         };
 
@@ -277,48 +296,64 @@ impl Workspace {
         }
 
         // Calculate layout
-        let computed_rects = if is_toolbar {
-            // Get layout from toolbar's internal HStack/VStack
-            if let Some(layout_node) = self.nodes.get(&layout_id) {
-                if let Some(toolbar) = layout_node.view.as_any().downcast_ref::<Toolbar>() {
-                    if is_hstack {
-                        toolbar
-                            .hstack
-                            .as_ref()
-                            .map(|h| h.calculate_layout(&child_sizes, &flexible_indices))
-                            .unwrap_or_default()
+        let computed_rects = match layout_type {
+            LayoutType::Toolbar { horizontal } => {
+                // Get layout from toolbar's internal HStack/VStack
+                if let Some(layout_node) = self.nodes.get(&layout_id) {
+                    if let Some(toolbar) = layout_node.view.as_any().downcast_ref::<Toolbar>() {
+                        if horizontal {
+                            toolbar
+                                .hstack
+                                .as_ref()
+                                .map(|h| h.calculate_layout(&child_sizes, &flexible_indices))
+                                .unwrap_or_default()
+                        } else {
+                            toolbar
+                                .vstack
+                                .as_ref()
+                                .map(|v| v.calculate_layout(&child_sizes, &flexible_indices))
+                                .unwrap_or_default()
+                        }
                     } else {
-                        toolbar
-                            .vstack
-                            .as_ref()
-                            .map(|v| v.calculate_layout(&child_sizes, &flexible_indices))
-                            .unwrap_or_default()
+                        Vec::new()
                     }
                 } else {
                     Vec::new()
                 }
-            } else {
-                Vec::new()
             }
-        } else if is_hstack {
-            if let Some(layout_node) = self.nodes.get(&layout_id) {
-                if let Some(hstack) = layout_node.view.as_any().downcast_ref::<HStack>() {
-                    hstack.calculate_layout(&child_sizes, &flexible_indices)
+            LayoutType::HStack => {
+                if let Some(layout_node) = self.nodes.get(&layout_id) {
+                    if let Some(hstack) = layout_node.view.as_any().downcast_ref::<HStack>() {
+                        hstack.calculate_layout(&child_sizes, &flexible_indices)
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     Vec::new()
                 }
-            } else {
-                Vec::new()
             }
-        } else {
-            if let Some(layout_node) = self.nodes.get(&layout_id) {
-                if let Some(vstack) = layout_node.view.as_any().downcast_ref::<VStack>() {
-                    vstack.calculate_layout(&child_sizes, &flexible_indices)
+            LayoutType::VStack => {
+                if let Some(layout_node) = self.nodes.get(&layout_id) {
+                    if let Some(vstack) = layout_node.view.as_any().downcast_ref::<VStack>() {
+                        vstack.calculate_layout(&child_sizes, &flexible_indices)
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     Vec::new()
                 }
-            } else {
-                Vec::new()
+            }
+            LayoutType::ParamList => {
+                if let Some(layout_node) = self.nodes.get(&layout_id) {
+                    if let Some(param_list) = layout_node.view.as_any().downcast_ref::<ParamList>()
+                    {
+                        param_list.calculate_layout(&child_sizes)
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
             }
         };
 
@@ -334,7 +369,7 @@ impl Workspace {
 
     /// Extract widget size from common widget types (fallback for non-Layoutable widgets)
     fn extract_widget_size(&self, node: &Node) -> [f32; 2] {
-        use crate::ui::{Button, ButtonGroup, Spacer};
+        use crate::ui::{Button, ButtonGroup, Slider, Spacer};
 
         // Try Button
         if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
@@ -347,6 +382,12 @@ impl Workspace {
             let width = button_group.calculate_width();
             let height = button_group.style.button_height;
             return [width, height];
+        }
+
+        // Try Slider
+        if let Some(slider) = node.view.as_any().downcast_ref::<Slider>() {
+            let [_x, _y, w, h] = slider.style.rect;
+            return [w, h];
         }
 
         // Try Spacer
@@ -363,7 +404,7 @@ impl Workspace {
 
     /// Set widget rect for common widget types (fallback for non-Layoutable widgets)
     fn set_widget_rect(node: &mut Node, rect: [f32; 4]) {
-        use crate::ui::{Button, ButtonGroup, Spacer};
+        use crate::ui::{Button, ButtonGroup, Slider, Spacer};
 
         // Try Button
         if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
@@ -374,6 +415,12 @@ impl Workspace {
         // Try ButtonGroup
         if let Some(button_group) = node.view.as_any_mut().downcast_mut::<ButtonGroup>() {
             button_group.style.rect = rect;
+            return;
+        }
+
+        // Try Slider
+        if let Some(slider) = node.view.as_any_mut().downcast_mut::<Slider>() {
+            slider.style.rect = rect;
             return;
         }
 

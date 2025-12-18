@@ -61,7 +61,7 @@ pub mod prelude {
         app_event::{AppEvent, AppEventQueue},
         ui::{
             Alignment, Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
-            ColorWheel, Drawable, FileDialog, HAlign, HStack, Image, ImageStyle, Label, LabelRect,
+            ColorWheel, Drawable, HAlign, HStack, Image, ImageStyle, Label, LabelRect,
             NodeId, ParamList, ParamListStyle, PopupAlignment, Project, ProjectBrowser,
             ProjectBrowserItem, ProjectBrowserStyle, ProjectError, ProjectMetadata, RecentProject,
             RecentProjects, Slider, SliderStyle, Spacer, TextButton, Theme, Toolbar,
@@ -110,6 +110,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use vek::Mat3;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -1584,65 +1585,45 @@ impl SceneVM {
                 gpu.surface.ensure_gpu_with(&gpu.device);
             }
 
-            // If a previous async map completed, finalize the download now.
-            let ready = gpu
-                .surface
-                .gpu
-                .as_ref()
-                .and_then(|g| g.map_ready.as_ref())
-                .map(|f| f.get())
-                .unwrap_or(false);
-            if ready {
-                let _ = gpu.surface.try_finish_download_from_gpu();
-            }
-
-            // Determine the result for this frame without re-borrowing `self`
-            let inflight_now = gpu
-                .surface
-                .gpu
-                .as_ref()
-                .and_then(|g| g.map_ready.as_ref())
-                .is_some();
-            let mut result = if ready {
-                RenderResult::Presented
-            } else if inflight_now {
-                RenderResult::ReadbackPending
-            } else {
-                RenderResult::Presented
-            };
-
-            // Present whatever CPU pixels we currently have.
-            gpu.surface.copy_to_slice(out_pixels, out_w, out_h);
-
-            // If no readback is currently in flight, kick off one for the next frame.
+            // If a readback is already in flight, try to finish it; otherwise kick off a new one.
             let inflight = gpu
                 .surface
                 .gpu
                 .as_ref()
                 .and_then(|g| g.map_ready.as_ref())
                 .is_some();
-            if !inflight {
-                // Delegate rendering to the VM (compute 2D/3D chosen by VM::render_mode)
-                let (w, h) = self.size;
-                SceneVM::draw_all_vms(
-                    base_vm,
-                    overlays,
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut gpu.surface,
-                    w,
-                    h,
-                    self.log_layer_activity,
-                    &mut self.compositing_pipeline,
-                );
 
-                // Start non-blocking readback into the surface texture (map_async sets the flag)
-                let device = gpu.device.clone();
-                let queue = gpu.queue.clone();
-                gpu.surface.download_from_gpu_with(&device, &queue);
-                result = RenderResult::ReadbackPending;
+            if inflight {
+                let ready = gpu.surface.try_finish_download_from_gpu();
+                gpu.surface.copy_to_slice(out_pixels, out_w, out_h);
+                return if ready {
+                    RenderResult::Presented
+                } else {
+                    RenderResult::ReadbackPending
+                };
             }
-            return result;
+
+            // No readback in flight: render a new frame and start a download.
+            let (w, h) = self.size;
+            SceneVM::draw_all_vms(
+                base_vm,
+                overlays,
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.surface,
+                w,
+                h,
+                self.log_layer_activity,
+                &mut self.compositing_pipeline,
+            );
+
+            let device = gpu.device.clone();
+            let queue = gpu.queue.clone();
+            gpu.surface.download_from_gpu_with(&device, &queue);
+
+            // Present the last completed CPU pixels (may be the previous frame) while we wait.
+            gpu.surface.copy_to_slice(out_pixels, out_w, out_h);
+            RenderResult::ReadbackPending
         }
     }
 
@@ -2097,6 +2078,8 @@ struct WasmRenderCtx {
     height: u32,
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
+    /// True when the last render was not fully presented (Init/Readback pending).
+    pending_present: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2120,7 +2103,19 @@ impl SceneVMRenderCtx for WasmRenderCtx {
     }
 
     fn present(&mut self, vm: &mut SceneVM) -> SceneVMResult<RenderResult> {
-        let res = vm.render_frame(&mut self.buffer, self.width, self.height);
+        let mut res = vm.render_frame(&mut self.buffer, self.width, self.height);
+
+        // If the frame wasn't ready yet, try to finish the readback immediately.
+        if res != RenderResult::Presented {
+            if let Some(gpu) = vm.gpu.as_mut() {
+                let ready = gpu.surface.try_finish_download_from_gpu();
+                if ready {
+                    res = RenderResult::Presented;
+                }
+            }
+        }
+
+        // Always blit whatever pixels we have (latest completed frame).
         let clamped = wasm_bindgen::Clamped(&self.buffer[..]);
         let image_data =
             web_sys::ImageData::new_with_u8_clamped_array_and_sh(clamped, self.width, self.height)
@@ -2128,6 +2123,8 @@ impl SceneVMRenderCtx for WasmRenderCtx {
         self.ctx
             .put_image_data(&image_data, 0.0, 0.0)
             .map_err(|e| SceneVMError::InvalidOperation(format!("{:?}", e)))?;
+
+        self.pending_present = res != RenderResult::Presented;
         Ok(res)
     }
 }
@@ -2189,12 +2186,14 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(mut app: A) -> Result<(), JsValu
         height,
         canvas,
         ctx,
+        pending_present: true, // force initial render until Presented lands
     };
     app.init(&mut vm, (width, height));
 
     let app_rc = Rc::new(RefCell::new(app));
     let vm_rc = Rc::new(RefCell::new(vm));
     let ctx_rc = Rc::new(RefCell::new(render_ctx));
+    let first_frame = Rc::new(Cell::new(true));
 
     // Resize handler
     {
@@ -2240,6 +2239,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(mut app: A) -> Result<(), JsValu
         let app = Rc::clone(&app_rc);
         let vm = Rc::clone(&vm_rc);
         let ctx = Rc::clone(&ctx_rc);
+        let first = Rc::clone(&first_frame);
         let f = Rc::new(RefCell::new(None::<Closure<dyn FnMut()>>));
         let f_clone = Rc::clone(&f);
         let window_clone = window.clone();
@@ -2247,9 +2247,12 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(mut app: A) -> Result<(), JsValu
             {
                 let mut app_mut = app.borrow_mut();
                 let mut vm_mut = vm.borrow_mut();
-                if app_mut.needs_update() {
+                let ctx_pending = ctx.borrow().pending_present;
+                let do_render = app_mut.needs_update() || first.get() || ctx_pending;
+                if do_render {
+                    first.set(false);
                     app_mut.update(&mut vm_mut);
-                    let _ = app_mut.render(&mut vm_mut, &mut *ctx.borrow_mut());
+                    app_mut.render(&mut vm_mut, &mut *ctx.borrow_mut());
                 }
             }
             let _ = window_clone.request_animation_frame(

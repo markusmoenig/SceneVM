@@ -14,6 +14,7 @@ mod widgets;
 mod workspace;
 
 // Project management (part of UI system)
+#[cfg(not(target_os = "ios"))]
 mod file_dialog;
 mod project;
 mod project_browser;
@@ -34,6 +35,7 @@ pub use widgets::{
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};
 
 // Project management
+#[cfg(not(target_os = "ios"))]
 pub use file_dialog::FileDialog;
 pub use project::{Project, ProjectError, ProjectMetadata};
 pub use project_browser::{RecentProject, RecentProjects};

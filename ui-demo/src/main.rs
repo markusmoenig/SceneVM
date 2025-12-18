@@ -301,6 +301,7 @@ impl SceneVMApp for UiDemo {
 
         // Create sliders and labels for the parameter list
         let param_slider_width = 180.0; // Slider width, value text appears 8px to the right
+        let mut param_slider_nodes = Vec::new();
 
         for i in 0..4 {
             let label_text = match i {
@@ -311,10 +312,8 @@ impl SceneVMApp for UiDemo {
                 _ => "Unknown",
             };
 
-            // Get the position for this widget from the param list
-            let widget_rect = param_list.get_widget_rect(i, param_slider_width);
-
-            let mut slider_style = theme.slider(widget_rect);
+            // Create slider with dummy rect - workspace will position it via ParamList layout
+            let mut slider_style = theme.slider([0.0, 0.0, param_slider_width, 32.0]);
             slider_style.layer = 11; // Override layer for param list children
 
             let slider = Slider::new(slider_style, 0.0, 100.0)
@@ -327,10 +326,16 @@ impl SceneVMApp for UiDemo {
 
             let slider_node = self.workspace.add_view(slider);
             param_list.add_item(label_text, slider_node);
-            self.workspace.add_root(slider_node);
+            param_slider_nodes.push(slider_node);
         }
 
         let param_list_node = self.workspace.add_view(param_list);
+
+        // Attach all sliders as children of the ParamList
+        for slider_node in param_slider_nodes {
+            self.workspace.attach(param_list_node, slider_node);
+        }
+
         self.workspace.add_root(param_list_node);
 
         // Create a popup ParamList for a button
@@ -356,9 +361,8 @@ impl SceneVMApp for UiDemo {
                 _ => "Unknown",
             };
 
-            let widget_rect = popup_param_list.get_widget_rect(i, popup_slider_width);
-
-            let mut popup_slider_style = theme.slider(widget_rect);
+            // Create slider with dummy rect - workspace will position it via ParamList layout
+            let mut popup_slider_style = theme.slider([0.0, 0.0, popup_slider_width, 28.0]);
             popup_slider_style.layer = 101;
             popup_slider_style.thumb_radius = 5.0;
             popup_slider_style.track_height = 3.0;
