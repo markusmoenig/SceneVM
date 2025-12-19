@@ -10,6 +10,7 @@ mod renderer;
 mod style;
 mod text;
 mod theme;
+mod undo;
 mod widgets;
 mod workspace;
 
@@ -26,6 +27,10 @@ pub use renderer::UiRenderer;
 pub use style::{StyleId, StyleParams, StyleRegistry};
 pub use text::TextCache;
 pub use theme::Theme;
+pub use undo::{
+    ButtonGroupChangeCommand, ButtonToggleCommand, ColorChangeCommand, DropdownChangeCommand,
+    SliderChangeCommand, StateSnapshotCommand, UndoCommand, UndoStack,
+};
 pub use widgets::{
     Button, ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
     ColorWheel, DropdownList, DropdownListStyle, HAlign, Image, ImageStyle, Label, LabelRect,

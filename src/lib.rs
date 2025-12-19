@@ -58,15 +58,18 @@ pub mod prelude {
 
     #[cfg(feature = "ui")]
     pub use crate::{
+        RenderResult,
         app_event::{AppEvent, AppEventQueue},
         ui::{
-            Alignment, Button, ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle, ButtonKind,
-            ButtonStyle, Canvas, ColorWheel, Drawable, DropdownList, DropdownListStyle, HAlign,
-            HStack, Image, ImageStyle, Label, LabelRect, NodeId, ParamList, ParamListStyle,
-            PopupAlignment, Project, ProjectBrowser, ProjectBrowserItem, ProjectBrowserStyle,
-            ProjectError, ProjectMetadata, RecentProject, RecentProjects, Slider, SliderStyle,
-            Spacer, TextButton, Theme, Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle,
-            UiAction, UiEvent, UiEventKind, UiRenderer, UiView, VAlign, VStack, ViewContext,
+            Alignment, Button, ButtonGroup, ButtonGroupChangeCommand, ButtonGroupOrientation,
+            ButtonGroupStyle, ButtonKind, ButtonStyle, ButtonToggleCommand, Canvas,
+            ColorChangeCommand, ColorWheel, Drawable, DropdownChangeCommand, DropdownList,
+            DropdownListStyle, HAlign, HStack, Image, ImageStyle, Label, LabelRect, NodeId,
+            ParamList, ParamListStyle, PopupAlignment, Project, ProjectBrowser, ProjectBrowserItem,
+            ProjectBrowserStyle, ProjectError, ProjectMetadata, RecentProject, RecentProjects,
+            Slider, SliderChangeCommand, SliderStyle, Spacer, StateSnapshotCommand, TextButton,
+            Theme, Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle, UiAction, UiEvent,
+            UiEventKind, UiRenderer, UiView, UndoCommand, UndoStack, VAlign, VStack, ViewContext,
             Workspace, create_tile_material,
         },
     };
@@ -1930,6 +1933,8 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
     let mut vm: Option<SceneVM> = None;
     let mut ctx: Option<NativeRenderCtx> = None;
     let mut cursor_pos: PhysicalPosition<f64> = PhysicalPosition { x: 0.0, y: 0.0 };
+    #[cfg(feature = "ui")]
+    let mut modifiers = winit::event::Modifiers::default();
     let apply_logical_scale = |vm_ref: &mut SceneVM, scale: f64| {
         // Scale logical coordinates into the framebuffer when hi-dpi.
         let s = scale as f32;
@@ -2042,6 +2047,59 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                                 app.update(vm_ref);
                                 let _ = app.render(vm_ref, ctx_ref);
                                 let _ = ctx_ref.ensure_presented(vm_ref);
+
+                                // Handle app events after render
+                                #[cfg(feature = "ui")]
+                                {
+                                    let events = app.take_app_events();
+                                    for event in events {
+                                        match event {
+                                            crate::app_event::AppEvent::RequestUndo => {
+                                                app.undo(vm_ref);
+                                            }
+                                            crate::app_event::AppEvent::RequestRedo => {
+                                                app.redo(vm_ref);
+                                            }
+                                            _ => {
+                                                // Other app events (Save, Open, etc.) would be handled here
+                                                // For now, just ignore them in the native runner
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        #[cfg(feature = "ui")]
+                        WindowEvent::ModifiersChanged(new_modifiers) => {
+                            modifiers = new_modifiers;
+                        }
+                        #[cfg(feature = "ui")]
+                        WindowEvent::KeyboardInput { event, .. } => {
+                            use winit::keyboard::{KeyCode, PhysicalKey};
+
+                            if event.state == ElementState::Pressed {
+                                // Check for Cmd/Ctrl+Z (Undo)
+                                if event.physical_key == PhysicalKey::Code(KeyCode::KeyZ) {
+                                    #[cfg(target_os = "macos")]
+                                    let cmd_pressed = modifiers.state().super_key();
+                                    #[cfg(not(target_os = "macos"))]
+                                    let cmd_pressed = modifiers.state().control_key();
+
+                                    if cmd_pressed && !modifiers.state().shift_key() {
+                                        // Undo: Cmd+Z (macOS) or Ctrl+Z (other platforms)
+                                        app.undo(vm_ref);
+                                    } else if cmd_pressed && modifiers.state().shift_key() {
+                                        // Redo: Cmd+Shift+Z (macOS) or Ctrl+Shift+Z (other platforms)
+                                        app.redo(vm_ref);
+                                    }
+                                }
+                                // Check for Ctrl+Y (Redo on Windows/Linux)
+                                #[cfg(not(target_os = "macos"))]
+                                if event.physical_key == PhysicalKey::Code(KeyCode::KeyY) {
+                                    if modifiers.state().control_key() {
+                                        app.redo(vm_ref);
+                                    }
+                                }
                             }
                         }
                         _ => {}

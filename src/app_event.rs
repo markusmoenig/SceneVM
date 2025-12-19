@@ -37,6 +37,14 @@ pub enum AppEvent {
     /// App state changed (for dirty tracking)
     /// Host should: Update window title, enable save button, etc.
     StateChanged { has_unsaved_changes: bool },
+
+    /// Request to perform undo operation
+    /// Host should: Call app's undo() method
+    RequestUndo,
+
+    /// Request to perform redo operation
+    /// Host should: Call app's redo() method
+    RequestRedo,
 }
 
 /// Queue for app events that will be consumed by the host

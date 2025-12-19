@@ -103,6 +103,52 @@ pub trait SceneVMApp {
         // Default: do nothing
         // Apps should override this to rebuild their UI with the new theme
     }
+
+    // Undo/Redo Support (optional, only available with 'ui' feature)
+
+    /// Perform undo operation
+    /// Called when user triggers undo (Cmd+Z on macOS, Ctrl+Z on Windows/Linux)
+    /// Returns true if undo was performed, false if nothing to undo
+    #[cfg(feature = "ui")]
+    fn undo(&mut self, _vm: &mut SceneVM) -> bool {
+        false
+    }
+
+    /// Perform redo operation
+    /// Called when user triggers redo (Cmd+Shift+Z on macOS, Ctrl+Y on Windows/Linux)
+    /// Returns true if redo was performed, false if nothing to redo
+    #[cfg(feature = "ui")]
+    fn redo(&mut self, _vm: &mut SceneVM) -> bool {
+        false
+    }
+
+    /// Check if undo is available
+    /// Used by wrappers to enable/disable undo menu items
+    #[cfg(feature = "ui")]
+    fn can_undo(&self) -> bool {
+        false
+    }
+
+    /// Check if redo is available
+    /// Used by wrappers to enable/disable redo menu items
+    #[cfg(feature = "ui")]
+    fn can_redo(&self) -> bool {
+        false
+    }
+
+    /// Get description of next undo action (e.g., "Undo Change Slider")
+    /// Used for menu item display
+    #[cfg(feature = "ui")]
+    fn undo_description(&self) -> Option<String> {
+        None
+    }
+
+    /// Get description of next redo action (e.g., "Redo Change Slider")
+    /// Used for menu item display
+    #[cfg(feature = "ui")]
+    fn redo_description(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Rendering context supplied to `SceneVMApp::render`.

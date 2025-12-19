@@ -369,7 +369,7 @@ impl Workspace {
 
     /// Extract widget size from common widget types (fallback for non-Layoutable widgets)
     fn extract_widget_size(&self, node: &Node) -> [f32; 2] {
-        use crate::ui::{Button, ButtonGroup, Slider, Spacer};
+        use crate::ui::{Button, ButtonGroup, Slider, Spacer, TextButton};
 
         // Try Button
         if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
@@ -396,6 +396,12 @@ impl Workspace {
             return [w, h];
         }
 
+        // Try TextButton
+        if let Some(text_button) = node.view.as_any().downcast_ref::<TextButton>() {
+            let [_x, _y, w, h] = text_button.style.rect;
+            return [w, h];
+        }
+
         // Add more widget types here as needed
 
         // Default size
@@ -404,7 +410,7 @@ impl Workspace {
 
     /// Set widget rect for common widget types (fallback for non-Layoutable widgets)
     fn set_widget_rect(node: &mut Node, rect: [f32; 4]) {
-        use crate::ui::{Button, ButtonGroup, Slider, Spacer};
+        use crate::ui::{Button, ButtonGroup, Slider, Spacer, TextButton};
 
         // Try Button
         if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
@@ -427,6 +433,12 @@ impl Workspace {
         // Try Spacer
         if let Some(spacer) = node.view.as_any_mut().downcast_mut::<Spacer>() {
             spacer.rect = rect;
+            return;
+        }
+
+        // Try TextButton
+        if let Some(text_button) = node.view.as_any_mut().downcast_mut::<TextButton>() {
+            text_button.style.rect = rect;
             return;
         }
 

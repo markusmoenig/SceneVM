@@ -7,7 +7,18 @@ struct SceneVMView: View {
 
     var body: some View {
         PlatformView(document: document)
+            #if os(macOS)
+            .onAppear {
+                setupMenuCommands()
+            }
+            #endif
     }
+
+    #if os(macOS)
+    private func setupMenuCommands() {
+        // Menu commands are set up via SceneVMApp commands modifier
+    }
+    #endif
 }
 
 #if os(macOS)

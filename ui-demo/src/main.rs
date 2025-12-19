@@ -29,6 +29,8 @@ struct UiDemo {
     noise_button_id: Option<NodeId>,
     update_noise_icon: bool,
     scale: f32,
+    undo_stack: UndoStack,
+    app_events: AppEventQueue,
 }
 
 impl UiDemo {
@@ -46,6 +48,8 @@ impl UiDemo {
             noise_button_id: None,
             update_noise_icon: true,
             scale: 1.0,
+            undo_stack: UndoStack::new(100), // Max 100 undo steps
+            app_events: AppEventQueue::new(),
         }
     }
 }
@@ -210,14 +214,44 @@ impl SceneVMApp for UiDemo {
         let toolbar_node = self.workspace.add_view(toolbar);
         self.workspace.add_root(toolbar_node);
 
-        // Add 8 image buttons to the toolbar - they will be automatically positioned!
+        // Add Undo/Redo buttons at the start of the toolbar
         let button_size = 32.0;
+
+        // Undo button (using TextButton for now - could use icon later)
+        let undo_button = TextButton::new(theme.button([0.0, 0.0, 60.0, button_size]), "Undo")
+            .with_id("undo_button")
+            .with_text_size(12.0);
+        let undo_node = self.workspace.add_view(undo_button);
+        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+            toolbar_view.add_child(undo_node);
+        }
+        self.workspace.attach(toolbar_node, undo_node);
+
+        // Redo button
+        let redo_button = TextButton::new(theme.button([0.0, 0.0, 60.0, button_size]), "Redo")
+            .with_id("redo_button")
+            .with_text_size(12.0);
+        let redo_node = self.workspace.add_view(redo_button);
+        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+            toolbar_view.add_child(redo_node);
+        }
+        self.workspace.attach(toolbar_node, redo_node);
+
+        // Add a small spacer after undo/redo buttons
+        let separator_spacer = Spacer::new(8.0, button_size);
+        let separator_spacer_node = self.workspace.add_view(separator_spacer);
+        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+            toolbar_view.add_child(separator_spacer_node);
+        }
+        self.workspace.attach(toolbar_node, separator_spacer_node);
+
+        // Add 8 image buttons to the toolbar - they will be automatically positioned!
         let extra_gap = 16.0; // Extra spacing between button groups
 
         for i in 0..8 {
             // Add a spacer after the 4th button to create visual grouping
             if i == 4 {
-                // Create an invisible spacer for the gap
+                // Create a spacer for the gap (provides visual separation)
                 let spacer = Spacer::new(extra_gap, button_size);
 
                 let spacer_node = self.workspace.add_view(spacer);
@@ -227,12 +261,8 @@ impl SceneVMApp for UiDemo {
                 }
                 self.workspace.attach(toolbar_node, spacer_node);
 
-                // Add separator in the middle of the gap
-                let separator_x = 40.0 + 8.0 + (4.0 * (button_size + 4.0)) + (extra_gap / 2.0);
-                if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar")
-                {
-                    toolbar_view.add_separator_at(separator_x, None);
-                }
+                // Note: Manual separator removed because absolute positioning doesn't work
+                // with automatic layout. The spacer provides sufficient visual separation.
             }
 
             let btn = Button::new(theme.button([0.0, 0.0, button_size, button_size]))
@@ -579,8 +609,14 @@ impl SceneVMApp for UiDemo {
                 UiAction::ButtonPressed(id) => {
                     println!("Button pressed: {id}");
 
+                    // Handle undo/redo button presses
+                    if id == "undo_button" {
+                        self.app_events.emit(AppEvent::RequestUndo);
+                    } else if id == "redo_button" {
+                        self.app_events.emit(AppEvent::RequestRedo);
+                    }
                     // Toggle between canvases
-                    if id == "canvas_toggle" {
+                    else if id == "canvas_toggle" {
                         if let Some(main_canvas) =
                             self.workspace.find_view_mut::<Canvas>("main_canvas")
                         {
@@ -609,6 +645,11 @@ impl SceneVMApp for UiDemo {
                 }
                 UiAction::SliderChanged(id, value) => {
                     if id == "main_slider" {
+                        // Create undo command with old and new values
+                        let old_value = self.slider_value;
+                        let cmd = Box::new(SliderChangeCommand::new(id.clone(), old_value, value));
+                        self.undo_stack.execute(cmd, vm, &mut self.workspace);
+
                         self.slider_value = value;
                         self.has_changes = true;
                         // Update just the label text using its string ID
@@ -620,6 +661,14 @@ impl SceneVMApp for UiDemo {
                         if let Some(idx_str) = id.strip_prefix("param_slider_") {
                             if let Ok(idx) = idx_str.parse::<usize>() {
                                 if idx < self.param_sliders.len() {
+                                    let old_value = self.param_sliders[idx];
+                                    let cmd = Box::new(SliderChangeCommand::new(
+                                        id.clone(),
+                                        old_value,
+                                        value,
+                                    ));
+                                    self.undo_stack.execute(cmd, vm, &mut self.workspace);
+
                                     self.param_sliders[idx] = value;
                                     self.has_changes = true;
                                 }
@@ -629,6 +678,20 @@ impl SceneVMApp for UiDemo {
                 }
                 UiAction::ButtonGroupChanged(name, index) => {
                     println!("Button group '{}' changed to index {}", name, index);
+
+                    // Get the old index from the button group
+                    if let Some(button_group) = self.workspace.find_view_mut::<ButtonGroup>(&name) {
+                        let old_index = button_group.active_index;
+                        if old_index != index {
+                            let cmd = Box::new(ButtonGroupChangeCommand::new(
+                                name.clone(),
+                                old_index,
+                                index,
+                            ));
+                            self.undo_stack.execute(cmd, vm, &mut self.workspace);
+                            self.has_changes = true;
+                        }
+                    }
                 }
                 UiAction::DropdownChanged(name, index) => {
                     println!("Dropdown '{}' changed to index {}", name, index);
@@ -832,6 +895,62 @@ impl SceneVMApp for UiDemo {
 
     fn has_unsaved_changes(&self) -> bool {
         self.has_changes
+    }
+
+    fn take_app_events(&mut self) -> Vec<AppEvent> {
+        self.app_events.take()
+    }
+
+    // Undo/Redo Implementation
+
+    fn undo(&mut self, vm: &mut SceneVM) -> bool {
+        let result = self.undo_stack.undo(vm, &mut self.workspace);
+        if result {
+            // Sync app state with workspace after undo
+            if let Some(slider) = self.workspace.find_view_mut::<Slider>("main_slider") {
+                self.slider_value = slider.get_value();
+            }
+            if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
+                label.set_text(format!("Value: {:.1}", self.slider_value));
+            }
+            self.has_changes = true;
+        }
+        result
+    }
+
+    fn redo(&mut self, vm: &mut SceneVM) -> bool {
+        let result = self.undo_stack.redo(vm, &mut self.workspace);
+        if result {
+            // Sync app state with workspace after redo
+            if let Some(slider) = self.workspace.find_view_mut::<Slider>("main_slider") {
+                self.slider_value = slider.get_value();
+            }
+            if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
+                label.set_text(format!("Value: {:.1}", self.slider_value));
+            }
+            self.has_changes = true;
+        }
+        result
+    }
+
+    fn can_undo(&self) -> bool {
+        self.undo_stack.can_undo()
+    }
+
+    fn can_redo(&self) -> bool {
+        self.undo_stack.can_redo()
+    }
+
+    fn undo_description(&self) -> Option<String> {
+        self.undo_stack
+            .undo_description()
+            .map(|s| format!("Undo {}", s))
+    }
+
+    fn redo_description(&self) -> Option<String> {
+        self.undo_stack
+            .redo_description()
+            .map(|s| format!("Redo {}", s))
     }
 
     fn set_scale(&mut self, scale: f32) {

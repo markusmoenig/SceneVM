@@ -54,6 +54,28 @@ func unified_app_runner_free_data(_ data_ptr: UnsafePointer<UInt8>?, _ data_len:
 @_silgen_name("unified_app_runner_set_theme")
 func unified_app_runner_set_theme(_ vm: UnsafeMutableRawPointer?, _ is_dark: Int32, _ width: UInt32, _ height: UInt32)
 
+// Undo/Redo Support
+@_silgen_name("unified_app_runner_undo")
+func unified_app_runner_undo(_ vm: UnsafeMutableRawPointer?) -> Int32
+
+@_silgen_name("unified_app_runner_redo")
+func unified_app_runner_redo(_ vm: UnsafeMutableRawPointer?) -> Int32
+
+@_silgen_name("unified_app_runner_can_undo")
+func unified_app_runner_can_undo(_ vm: UnsafeMutableRawPointer?) -> Int32
+
+@_silgen_name("unified_app_runner_can_redo")
+func unified_app_runner_can_redo(_ vm: UnsafeMutableRawPointer?) -> Int32
+
+@_silgen_name("unified_app_runner_undo_description")
+func unified_app_runner_undo_description(_ vm: UnsafeMutableRawPointer?, _ out_str: UnsafeMutablePointer<UnsafePointer<UInt8>?>?, _ out_len: UnsafeMutablePointer<Int>?) -> Int32
+
+@_silgen_name("unified_app_runner_redo_description")
+func unified_app_runner_redo_description(_ vm: UnsafeMutableRawPointer?, _ out_str: UnsafeMutablePointer<UnsafePointer<UInt8>?>?, _ out_len: UnsafeMutablePointer<Int>?) -> Int32
+
+@_silgen_name("unified_app_runner_free_string")
+func unified_app_runner_free_string(_ str_ptr: UnsafePointer<UInt8>?, _ str_len: Int)
+
 /// Thin Swift wrapper around the SceneVM FFI for CAMetalLayer presentation.
 final class SceneVMHandle {
     private var vm: UnsafeMutableRawPointer?
@@ -116,6 +138,76 @@ final class SceneVMHandle {
         let w = UInt32(max(size.width * scale, 1))
         let h = UInt32(max(size.height * scale, 1))
         unified_app_runner_set_theme(vm, isDark ? 1 : 0, w, h)
+    }
+
+    // MARK: - Undo/Redo Support
+
+    /// Perform undo operation
+    /// Returns true if undo was performed, false if nothing to undo
+    func undo() -> Bool {
+        guard let vm else { return false }
+        return unified_app_runner_undo(vm) > 0
+    }
+
+    /// Perform redo operation
+    /// Returns true if redo was performed, false if nothing to redo
+    func redo() -> Bool {
+        guard let vm else { return false }
+        return unified_app_runner_redo(vm) > 0
+    }
+
+    /// Check if undo is available
+    func canUndo() -> Bool {
+        guard let vm else { return false }
+        return unified_app_runner_can_undo(vm) > 0
+    }
+
+    /// Check if redo is available
+    func canRedo() -> Bool {
+        guard let vm else { return false }
+        return unified_app_runner_can_redo(vm) > 0
+    }
+
+    /// Get description of next undo action (e.g., "Undo Change Slider")
+    func undoDescription() -> String? {
+        guard let vm else { return nil }
+
+        var strPtr: UnsafePointer<UInt8>? = nil
+        var strLen: Int = 0
+
+        let result = unified_app_runner_undo_description(vm, &strPtr, &strLen)
+
+        guard result == 0, let ptr = strPtr, strLen > 0 else {
+            return nil
+        }
+
+        defer {
+            unified_app_runner_free_string(ptr, strLen)
+        }
+
+        let data = Data(bytes: ptr, count: strLen)
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Get description of next redo action (e.g., "Redo Change Slider")
+    func redoDescription() -> String? {
+        guard let vm else { return nil }
+
+        var strPtr: UnsafePointer<UInt8>? = nil
+        var strLen: Int = 0
+
+        let result = unified_app_runner_redo_description(vm, &strPtr, &strLen)
+
+        guard result == 0, let ptr = strPtr, strLen > 0 else {
+            return nil
+        }
+
+        defer {
+            unified_app_runner_free_string(ptr, strLen)
+        }
+
+        let data = Data(bytes: ptr, count: strLen)
+        return String(data: data, encoding: .utf8)
     }
 
     deinit {
