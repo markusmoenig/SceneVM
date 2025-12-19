@@ -30,11 +30,18 @@ impl UiEvent {
 pub enum UiAction {
     ButtonPressed(String),
     ButtonToggled(String, bool),
-    SliderChanged(String, f32),
+    /// Slider value changed: (id, current_value, original_value, is_final)
+    /// - `current_value`: The current slider value (use for preview/immediate updates)
+    /// - `original_value`: The value when drag started (use for undo)
+    /// - `is_final`: true when mouse released (ready for undo command)
+    SliderChanged(String, f32, f32, bool),
     ButtonGroupChanged(String, usize), // (group_name, active_index)
     DropdownChanged(String, usize),    // (dropdown_name, selected_index)
     ColorChanged(String, [f32; 4]),    // (widget_id, RGBA color)
-    Custom { source_id: String, action: String }, // For custom widgets like ProjectBrowser
+    Custom {
+        source_id: String,
+        action: String,
+    }, // For custom widgets like ProjectBrowser
 }
 
 /// Result of handling an event: whether a view dirtied itself and any actions.

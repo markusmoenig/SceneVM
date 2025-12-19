@@ -33,8 +33,17 @@ pub trait UndoCommand<T>: std::fmt::Debug {
     /// Reverse the command (for undo)
     fn undo(&mut self, vm: &mut SceneVM, context: &mut T);
 
+    /// Optional: merge with next command if they're related (e.g., consecutive slider drags)
+    /// Returns true if merge was successful
+    fn try_merge(&mut self, _other: &dyn UndoCommand<T>) -> bool {
+        false
+    }
+
     /// Command description for UI display (e.g., "Change Slider" or "Select Tool")
     fn description(&self) -> &str;
+
+    /// Helper for downcasting in try_merge
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Undo/Redo stack manager
@@ -78,6 +87,14 @@ impl<T> UndoStack<T> {
     pub fn execute(&mut self, mut cmd: Box<dyn UndoCommand<T>>, vm: &mut SceneVM, context: &mut T) {
         // Truncate any commands after current position (user did undo then new action)
         self.commands.truncate(self.current_index);
+
+        // Try to merge with previous command (e.g., consecutive slider drags)
+        if let Some(last) = self.commands.last_mut() {
+            if last.try_merge(cmd.as_ref()) {
+                self.dirty = true;
+                return;
+            }
+        }
 
         // Execute the command (is_new = true, don't re-apply the UI action)
         cmd.execute(vm, context, true);

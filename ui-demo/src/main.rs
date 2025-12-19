@@ -109,23 +109,8 @@ impl UndoCommand<AppContext> for SliderChangeCommand {
         context.workspace.set_dirty();
     }
 
-    fn try_merge(&mut self, other: &dyn UndoCommand<AppContext>) -> bool {
-        // Try to merge consecutive slider changes for the same widget
-        if let Some(other_slider) = other.as_any().downcast_ref::<SliderChangeCommand>() {
-            if self.widget_id == other_slider.widget_id {
-                self.new_value = other_slider.new_value;
-                return true;
-            }
-        }
-        false
-    }
-
     fn description(&self) -> &str {
         "Change Slider"
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
@@ -172,10 +157,6 @@ impl UndoCommand<AppContext> for ButtonGroupChangeCommand {
 
     fn description(&self) -> &str {
         "Change Button Group"
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
@@ -867,12 +848,20 @@ impl SceneVMApp for UiDemo {
                         }
                     }
                 }
-                UiAction::SliderChanged(id, value) => {
+                UiAction::SliderChanged(id, value, original_value, is_final) => {
                     if id == "main_slider" {
-                        // Create undo command with old and new values
-                        let old_value = self.context.slider_value;
-                        let cmd = Box::new(SliderChangeCommand::new(id.clone(), old_value, value));
-                        self.undo_stack.execute(cmd, vm, &mut self.context);
+                        // Update value immediately for preview
+                        self.context.slider_value = value;
+
+                        // Only create undo command on final change (mouse up)
+                        if is_final {
+                            let cmd = Box::new(SliderChangeCommand::new(
+                                id.clone(),
+                                original_value,
+                                value,
+                            ));
+                            self.undo_stack.execute(cmd, vm, &mut self.context);
+                        }
 
                         self.has_changes = true;
                         // Update just the label text using its string ID
@@ -888,13 +877,18 @@ impl SceneVMApp for UiDemo {
                         if let Some(idx_str) = id.strip_prefix("param_slider_") {
                             if let Ok(idx) = idx_str.parse::<usize>() {
                                 if idx < self.context.param_sliders.len() {
-                                    let old_value = self.context.param_sliders[idx];
-                                    let cmd = Box::new(SliderChangeCommand::new(
-                                        id.clone(),
-                                        old_value,
-                                        value,
-                                    ));
-                                    self.undo_stack.execute(cmd, vm, &mut self.context);
+                                    // Update value immediately for preview
+                                    self.context.param_sliders[idx] = value;
+
+                                    // Only create undo command on final change (mouse up)
+                                    if is_final {
+                                        let cmd = Box::new(SliderChangeCommand::new(
+                                            id.clone(),
+                                            original_value,
+                                            value,
+                                        ));
+                                        self.undo_stack.execute(cmd, vm, &mut self.context);
+                                    }
 
                                     self.has_changes = true;
                                 }

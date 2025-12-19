@@ -42,6 +42,7 @@ pub struct Slider {
     pub max: f32,
     dragging: bool,
     active_pointer: Option<u32>,
+    original_value: f32,        // Value when drag started (for undo)
     pub show_value: bool,       // Whether to show value text
     pub value_color: Vec4<f32>, // Color for value text
     pub value_size: f32,        // Font size for value text
@@ -61,6 +62,7 @@ impl Slider {
             max,
             dragging: false,
             active_pointer: None,
+            original_value: 0.5,
             show_value: false,
             value_color: Vec4::new(0.6, 0.6, 0.65, 1.0),
             value_size: 12.0,
@@ -225,12 +227,15 @@ impl UiView for Slider {
                 if self.hit_thumb(evt.pos) || self.hit_track(evt.pos) {
                     self.dragging = true;
                     self.active_pointer = Some(evt.pointer_id);
+                    self.original_value = self.get_value(); // Capture original value for undo
                     let changed = self.update_value_from_pos(evt.pos);
                     let mut outcome = UiEventOutcome::dirty();
                     if changed {
                         outcome.merge(UiEventOutcome::with_action(UiAction::SliderChanged(
                             self.id.clone(),
                             self.get_value(),
+                            self.original_value,
+                            false, // Not final - dragging just started
                         )));
                     }
                     return outcome;
@@ -244,6 +249,8 @@ impl UiView for Slider {
                         outcome.merge(UiEventOutcome::with_action(UiAction::SliderChanged(
                             self.id.clone(),
                             self.get_value(),
+                            self.original_value,
+                            false, // Not final - still dragging
                         )));
                         return outcome;
                     }
@@ -253,6 +260,13 @@ impl UiView for Slider {
                 if self.active_pointer == Some(evt.pointer_id) {
                     self.dragging = false;
                     self.active_pointer = None;
+                    // Emit final value change for undo/redo
+                    return UiEventOutcome::with_action(UiAction::SliderChanged(
+                        self.id.clone(),
+                        self.get_value(),
+                        self.original_value,
+                        true, // Final - mouse released
+                    ));
                 }
             }
             _ => {}
