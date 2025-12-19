@@ -1,6 +1,184 @@
 use scenevm::prelude::*;
 use serde::{Deserialize, Serialize};
 
+// ============================================================================
+// Application Context - This is where your backend/app state would live
+// ============================================================================
+
+/// Context struct that holds the actual application state.
+/// This is separate from the UI state (workspace) and is what gets modified
+/// by undo commands. In a real application, this would be your backend/domain model.
+struct AppContext {
+    workspace: Workspace,
+    slider_value: f32,
+    param_sliders: Vec<f32>,
+}
+
+impl AppContext {
+    fn new() -> Self {
+        let default = UiDemoData::default();
+        Self {
+            workspace: Workspace::new(),
+            slider_value: default.slider_value,
+            param_sliders: default.param_sliders,
+        }
+    }
+}
+
+// ============================================================================
+// Undo Commands - Application-specific implementations
+// ============================================================================
+
+/// Command for slider value changes (supports merging)
+#[derive(Debug, Clone)]
+struct SliderChangeCommand {
+    widget_id: String,
+    old_value: f32,
+    new_value: f32,
+}
+
+impl SliderChangeCommand {
+    fn new(widget_id: String, old_value: f32, new_value: f32) -> Self {
+        Self {
+            widget_id,
+            old_value,
+            new_value,
+        }
+    }
+}
+
+impl UndoCommand<AppContext> for SliderChangeCommand {
+    fn execute(&mut self, _vm: &mut SceneVM, context: &mut AppContext, is_new: bool) {
+        // Only apply if this is a redo (is_new = false)
+        // For new commands, the UI already updated the slider
+        if !is_new {
+            if self.widget_id == "main_slider" {
+                context.slider_value = self.new_value;
+                if let Some(slider) = context.workspace.find_view_mut::<Slider>(&self.widget_id) {
+                    slider.set_value(self.new_value);
+                }
+                if let Some(label) = context.workspace.find_view_mut::<Label>("slider_label") {
+                    label.set_text(format!("Slider Value: {:.1}", self.new_value));
+                }
+            } else if self.widget_id.starts_with("param_slider_") {
+                if let Ok(idx_str) = self
+                    .widget_id
+                    .strip_prefix("param_slider_")
+                    .unwrap()
+                    .parse::<usize>()
+                {
+                    if idx_str < context.param_sliders.len() {
+                        context.param_sliders[idx_str] = self.new_value;
+                        if let Some(slider) =
+                            context.workspace.find_view_mut::<Slider>(&self.widget_id)
+                        {
+                            slider.set_value(self.new_value);
+                        }
+                    }
+                }
+            }
+            context.workspace.set_dirty();
+        }
+    }
+
+    fn undo(&mut self, _vm: &mut SceneVM, context: &mut AppContext) {
+        if self.widget_id == "main_slider" {
+            context.slider_value = self.old_value;
+            if let Some(slider) = context.workspace.find_view_mut::<Slider>(&self.widget_id) {
+                slider.set_value(self.old_value);
+            }
+            if let Some(label) = context.workspace.find_view_mut::<Label>("slider_label") {
+                label.set_text(format!("Slider Value: {:.1}", self.old_value));
+            }
+        } else if self.widget_id.starts_with("param_slider_") {
+            if let Ok(idx_str) = self
+                .widget_id
+                .strip_prefix("param_slider_")
+                .unwrap()
+                .parse::<usize>()
+            {
+                if idx_str < context.param_sliders.len() {
+                    context.param_sliders[idx_str] = self.old_value;
+                    if let Some(slider) = context.workspace.find_view_mut::<Slider>(&self.widget_id)
+                    {
+                        slider.set_value(self.old_value);
+                    }
+                }
+            }
+        }
+        context.workspace.set_dirty();
+    }
+
+    fn try_merge(&mut self, other: &dyn UndoCommand<AppContext>) -> bool {
+        // Try to merge consecutive slider changes for the same widget
+        if let Some(other_slider) = other.as_any().downcast_ref::<SliderChangeCommand>() {
+            if self.widget_id == other_slider.widget_id {
+                self.new_value = other_slider.new_value;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn description(&self) -> &str {
+        "Change Slider"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Command for button group selection changes
+#[derive(Debug, Clone)]
+struct ButtonGroupChangeCommand {
+    group_id: String,
+    old_index: usize,
+    new_index: usize,
+}
+
+impl ButtonGroupChangeCommand {
+    fn new(group_id: String, old_index: usize, new_index: usize) -> Self {
+        Self {
+            group_id,
+            old_index,
+            new_index,
+        }
+    }
+}
+
+impl UndoCommand<AppContext> for ButtonGroupChangeCommand {
+    fn execute(&mut self, _vm: &mut SceneVM, context: &mut AppContext, is_new: bool) {
+        if !is_new {
+            if let Some(group) = context
+                .workspace
+                .find_view_mut::<ButtonGroup>(&self.group_id)
+            {
+                group.set_active(self.new_index);
+            }
+            context.workspace.set_dirty();
+        }
+    }
+
+    fn undo(&mut self, _vm: &mut SceneVM, context: &mut AppContext) {
+        if let Some(group) = context
+            .workspace
+            .find_view_mut::<ButtonGroup>(&self.group_id)
+        {
+            group.set_active(self.old_index);
+        }
+        context.workspace.set_dirty();
+    }
+
+    fn description(&self) -> &str {
+        "Change Button Group"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UiDemoData {
     slider_value: f32,
@@ -18,31 +196,26 @@ impl Default for UiDemoData {
 }
 
 struct UiDemo {
-    workspace: Workspace,
+    context: AppContext,
     renderer: UiRenderer,
-    slider_value: f32,
     noise_layer: usize,
     popup_layer: usize,
-    param_sliders: Vec<f32>,
     has_changes: bool,
     noise_tile_id: uuid::Uuid,
     noise_button_id: Option<NodeId>,
     update_noise_icon: bool,
     scale: f32,
-    undo_stack: UndoStack,
+    undo_stack: UndoStack<AppContext>,
     app_events: AppEventQueue,
 }
 
 impl UiDemo {
     fn new() -> Self {
-        let default = UiDemoData::default();
         Self {
-            workspace: Workspace::new(),
+            context: AppContext::new(),
             renderer: UiRenderer::new(),
-            slider_value: default.slider_value,
             noise_layer: 0,
             popup_layer: 0,
-            param_sliders: default.param_sliders,
             has_changes: false,
             noise_tile_id: uuid::Uuid::new_v4(),
             noise_button_id: None,
@@ -146,8 +319,8 @@ impl SceneVMApp for UiDemo {
         let button = Button::new(theme.button(button_rect))
             .with_id("toggle_button")
             .with_kind(ButtonKind::Toggle);
-        let node = self.workspace.add_view(button);
-        self.workspace.add_root(node);
+        let node = self.context.workspace.add_view(button);
+        self.context.workspace.add_root(node);
 
         // Add a centered label inside the button
         let label = LabelRect::new(
@@ -157,8 +330,8 @@ impl SceneVMApp for UiDemo {
             Vec4::new(0.9, 0.9, 0.95, 1.0),
         )
         .with_layer(16); // Layer above button (buttons are now on layer 15)
-        let label_node = self.workspace.add_view(label);
-        self.workspace.add_root(label_node);
+        let label_node = self.context.workspace.add_view(label);
+        self.context.workspace.add_root(label_node);
 
         // Add an image button with the test tile and offset
         let image_button = Button::new(theme.button([250.0, 40.0, 64.0, 64.0]))
@@ -167,8 +340,8 @@ impl SceneVMApp for UiDemo {
             .with_tile(test_tile_id)
             .with_pressed_tile(pressed_tile_id) // Different tile when toggled
             .with_tile_offset(4.0); // 4px offset inside the button
-        let image_button_node = self.workspace.add_view(image_button);
-        self.workspace.add_root(image_button_node);
+        let image_button_node = self.context.workspace.add_view(image_button);
+        self.context.workspace.add_root(image_button_node);
 
         // Add a plain image widget (no border, just the texture)
         let plain_image = Image::new(
@@ -179,27 +352,27 @@ impl SceneVMApp for UiDemo {
             test_tile_id,
         )
         .with_id("plain_image");
-        let plain_image_node = self.workspace.add_view(plain_image);
-        self.workspace.add_root(plain_image_node);
+        let plain_image_node = self.context.workspace.add_view(plain_image);
+        self.context.workspace.add_root(plain_image_node);
 
         // Add a slider below the button
         let slider = Slider::new(theme.slider([40.0, 120.0, 200.0, 32.0]), 0.0, 100.0)
             .with_id("main_slider")
-            .with_value(self.slider_value);
-        let slider_node = self.workspace.add_view(slider);
-        self.workspace.add_root(slider_node);
+            .with_value(self.context.slider_value);
+        let slider_node = self.context.workspace.add_view(slider);
+        self.context.workspace.add_root(slider_node);
 
         // Add a label for the slider (using fixed position Label, not LabelRect)
         let slider_label = Label::new(
-            format!("Value: {:.1}", self.slider_value),
+            format!("Value: {:.1}", self.context.slider_value),
             [250.0, 126.0],
             16.0,
             Vec4::new(0.9, 0.9, 0.95, 1.0),
         )
         .with_id("slider_label")
         .with_layer(10);
-        let slider_label_node = self.workspace.add_view(slider_label);
-        self.workspace.add_root(slider_label_node);
+        let slider_label_node = self.context.workspace.add_view(slider_label);
+        self.context.workspace.add_root(slider_label_node);
 
         // Add a toolbar with image buttons using automatic layout
         let window_width = size.0 as f32;
@@ -211,8 +384,8 @@ impl SceneVMApp for UiDemo {
         .with_spacing(4.0)
         .with_padding(8.0);
 
-        let toolbar_node = self.workspace.add_view(toolbar);
-        self.workspace.add_root(toolbar_node);
+        let toolbar_node = self.context.workspace.add_view(toolbar);
+        self.context.workspace.add_root(toolbar_node);
 
         // Add Undo/Redo buttons at the start of the toolbar
         let button_size = 32.0;
@@ -221,29 +394,43 @@ impl SceneVMApp for UiDemo {
         let undo_button = TextButton::new(theme.button([0.0, 0.0, 60.0, button_size]), "Undo")
             .with_id("undo_button")
             .with_text_size(12.0);
-        let undo_node = self.workspace.add_view(undo_button);
-        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+        let undo_node = self.context.workspace.add_view(undo_button);
+        if let Some(toolbar_view) = self
+            .context
+            .workspace
+            .find_view_mut::<Toolbar>("main_toolbar")
+        {
             toolbar_view.add_child(undo_node);
         }
-        self.workspace.attach(toolbar_node, undo_node);
+        self.context.workspace.attach(toolbar_node, undo_node);
 
         // Redo button
         let redo_button = TextButton::new(theme.button([0.0, 0.0, 60.0, button_size]), "Redo")
             .with_id("redo_button")
             .with_text_size(12.0);
-        let redo_node = self.workspace.add_view(redo_button);
-        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+        let redo_node = self.context.workspace.add_view(redo_button);
+        if let Some(toolbar_view) = self
+            .context
+            .workspace
+            .find_view_mut::<Toolbar>("main_toolbar")
+        {
             toolbar_view.add_child(redo_node);
         }
-        self.workspace.attach(toolbar_node, redo_node);
+        self.context.workspace.attach(toolbar_node, redo_node);
 
         // Add a small spacer after undo/redo buttons
         let separator_spacer = Spacer::new(8.0, button_size);
-        let separator_spacer_node = self.workspace.add_view(separator_spacer);
-        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+        let separator_spacer_node = self.context.workspace.add_view(separator_spacer);
+        if let Some(toolbar_view) = self
+            .context
+            .workspace
+            .find_view_mut::<Toolbar>("main_toolbar")
+        {
             toolbar_view.add_child(separator_spacer_node);
         }
-        self.workspace.attach(toolbar_node, separator_spacer_node);
+        self.context
+            .workspace
+            .attach(toolbar_node, separator_spacer_node);
 
         // Add 8 image buttons to the toolbar - they will be automatically positioned!
         let extra_gap = 16.0; // Extra spacing between button groups
@@ -254,12 +441,15 @@ impl SceneVMApp for UiDemo {
                 // Create a spacer for the gap (provides visual separation)
                 let spacer = Spacer::new(extra_gap, button_size);
 
-                let spacer_node = self.workspace.add_view(spacer);
-                if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar")
+                let spacer_node = self.context.workspace.add_view(spacer);
+                if let Some(toolbar_view) = self
+                    .context
+                    .workspace
+                    .find_view_mut::<Toolbar>("main_toolbar")
                 {
                     toolbar_view.add_child(spacer_node);
                 }
-                self.workspace.attach(toolbar_node, spacer_node);
+                self.context.workspace.attach(toolbar_node, spacer_node);
 
                 // Note: Manual separator removed because absolute positioning doesn't work
                 // with automatic layout. The spacer provides sufficient visual separation.
@@ -271,13 +461,17 @@ impl SceneVMApp for UiDemo {
                 .with_tile(test_tile_id)
                 .with_tile_offset(2.0);
 
-            let btn_node = self.workspace.add_view(btn);
+            let btn_node = self.context.workspace.add_view(btn);
 
             // Add to toolbar's layout AND workspace hierarchy
-            if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+            if let Some(toolbar_view) = self
+                .context
+                .workspace
+                .find_view_mut::<Toolbar>("main_toolbar")
+            {
                 toolbar_view.add_child(btn_node);
             }
-            self.workspace.attach(toolbar_node, btn_node);
+            self.context.workspace.attach(toolbar_node, btn_node);
         }
 
         // Add a noise button with procedurally generated texture
@@ -287,21 +481,31 @@ impl SceneVMApp for UiDemo {
             .with_tile(self.noise_tile_id)
             .with_tile_offset(2.0);
 
-        let noise_btn_node = self.workspace.add_view(noise_btn);
+        let noise_btn_node = self.context.workspace.add_view(noise_btn);
         self.noise_button_id = Some(noise_btn_node);
 
-        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+        if let Some(toolbar_view) = self
+            .context
+            .workspace
+            .find_view_mut::<Toolbar>("main_toolbar")
+        {
             toolbar_view.add_child(noise_btn_node);
         }
-        self.workspace.attach(toolbar_node, noise_btn_node);
+        self.context.workspace.attach(toolbar_node, noise_btn_node);
 
         // Add a flexible spacer to push the ButtonGroup to the right
         let flex_spacer = Spacer::flexible();
-        let flex_spacer_node = self.workspace.add_view(flex_spacer);
-        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+        let flex_spacer_node = self.context.workspace.add_view(flex_spacer);
+        if let Some(toolbar_view) = self
+            .context
+            .workspace
+            .find_view_mut::<Toolbar>("main_toolbar")
+        {
             toolbar_view.add_child(flex_spacer_node);
         }
-        self.workspace.attach(toolbar_node, flex_spacer_node);
+        self.context
+            .workspace
+            .attach(toolbar_node, flex_spacer_node);
 
         // Add a ButtonGroup to the right side of the toolbar (with automatic layout)
         let toolbar_button_group = ButtonGroup::new(
@@ -315,11 +519,17 @@ impl SceneVMApp for UiDemo {
             Some(test_tile_id),
         ]);
 
-        let toolbar_group_node = self.workspace.add_view(toolbar_button_group);
-        if let Some(toolbar_view) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+        let toolbar_group_node = self.context.workspace.add_view(toolbar_button_group);
+        if let Some(toolbar_view) = self
+            .context
+            .workspace
+            .find_view_mut::<Toolbar>("main_toolbar")
+        {
             toolbar_view.add_child(toolbar_group_node);
         }
-        self.workspace.attach(toolbar_node, toolbar_group_node);
+        self.context
+            .workspace
+            .attach(toolbar_node, toolbar_group_node);
 
         // Add a parameter list below the toolbar
         let param_slider_width = 180.0; // Slider width, value text appears 8px to the right
@@ -357,19 +567,19 @@ impl SceneVMApp for UiDemo {
                 .with_value_color(Vec4::new(0.6, 0.6, 0.65, 1.0))
                 .with_value_size(12.0);
 
-            let slider_node = self.workspace.add_view(slider);
+            let slider_node = self.context.workspace.add_view(slider);
             param_list.add_item(label_text, slider_node);
             param_slider_nodes.push(slider_node);
         }
 
-        let param_list_node = self.workspace.add_view(param_list);
+        let param_list_node = self.context.workspace.add_view(param_list);
 
         // Attach all sliders as children of the ParamList
         for slider_node in param_slider_nodes {
-            self.workspace.attach(param_list_node, slider_node);
+            self.context.workspace.attach(param_list_node, slider_node);
         }
 
-        self.workspace.add_root(param_list_node);
+        self.context.workspace.add_root(param_list_node);
 
         // Add a dropdown list example
         let dropdown = DropdownList::new(
@@ -386,8 +596,8 @@ impl SceneVMApp for UiDemo {
         ])
         .with_selected(0);
 
-        let dropdown_node = self.workspace.add_view(dropdown);
-        self.workspace.add_root(dropdown_node);
+        let dropdown_node = self.context.workspace.add_view(dropdown);
+        self.context.workspace.add_root(dropdown_node);
 
         // Create a popup ParamList for a button
         let popup_slider_width = 90.0;
@@ -428,7 +638,7 @@ impl SceneVMApp for UiDemo {
                 .with_value_color(Vec4::new(0.7, 0.7, 0.75, 1.0))
                 .with_value_size(11.0);
 
-            let slider_node = self.workspace.add_view(slider);
+            let slider_node = self.context.workspace.add_view(slider);
             popup_param_list.add_item(label_text, slider_node);
             slider_nodes.push(slider_node);
         }
@@ -446,15 +656,17 @@ impl SceneVMApp for UiDemo {
                 "HEX".to_string(),
             ]);
 
-        let popup_group_node = self.workspace.add_view(popup_button_group);
+        let popup_group_node = self.context.workspace.add_view(popup_button_group);
         popup_param_list.add_item("Mode", popup_group_node);
         slider_nodes.push(popup_group_node);
 
-        let popup_param_list_node = self.workspace.add_view(popup_param_list);
+        let popup_param_list_node = self.context.workspace.add_view(popup_param_list);
 
         // Attach all child widgets (sliders and button group) to the popup ParamList
         for child_node in slider_nodes {
-            self.workspace.attach(popup_param_list_node, child_node);
+            self.context
+                .workspace
+                .attach(popup_param_list_node, child_node);
         }
 
         // Create a button that opens the popup
@@ -463,8 +675,8 @@ impl SceneVMApp for UiDemo {
             .with_kind(ButtonKind::Momentary)
             .with_popup(popup_param_list_node, PopupAlignment::Right);
 
-        let popup_button_node = self.workspace.add_view(popup_button);
-        self.workspace.add_root(popup_button_node);
+        let popup_button_node = self.context.workspace.add_view(popup_button);
+        self.context.workspace.add_root(popup_button_node);
 
         // Add label for popup button
         let popup_button_label = LabelRect::new(
@@ -474,15 +686,15 @@ impl SceneVMApp for UiDemo {
             Vec4::new(0.9, 0.9, 0.95, 1.0),
         )
         .with_layer(16); // Layer above button (buttons are now on layer 15)
-        let popup_button_label_node = self.workspace.add_view(popup_button_label);
-        self.workspace.add_root(popup_button_label_node);
+        let popup_button_label_node = self.context.workspace.add_view(popup_button_label);
+        self.context.workspace.add_root(popup_button_label_node);
 
         // === Canvas Demo: Two modes that can be toggled ===
 
         // Create Main Canvas
         let main_canvas = Canvas::new().with_id("main_canvas").with_visible(true);
-        let main_canvas_node = self.workspace.add_view(main_canvas);
-        self.workspace.add_root(main_canvas_node);
+        let main_canvas_node = self.context.workspace.add_view(main_canvas);
+        self.context.workspace.add_root(main_canvas_node);
 
         // Add widgets to main canvas
         let main_label = LabelRect::new(
@@ -492,13 +704,15 @@ impl SceneVMApp for UiDemo {
             Vec4::new(0.9, 0.9, 0.95, 1.0),
         )
         .with_layer(10);
-        let main_label_node = self.workspace.add_view(main_label);
-        self.workspace.attach(main_canvas_node, main_label_node);
+        let main_label_node = self.context.workspace.add_view(main_label);
+        self.context
+            .workspace
+            .attach(main_canvas_node, main_label_node);
 
         // Create Settings Canvas (initially hidden)
         let settings_canvas = Canvas::new().with_id("settings_canvas").with_visible(false);
-        let settings_canvas_node = self.workspace.add_view(settings_canvas);
-        self.workspace.add_root(settings_canvas_node);
+        let settings_canvas_node = self.context.workspace.add_view(settings_canvas);
+        self.context.workspace.add_root(settings_canvas_node);
 
         // Add widgets to settings canvas
         let settings_label = LabelRect::new(
@@ -508,8 +722,9 @@ impl SceneVMApp for UiDemo {
             Vec4::new(0.9, 0.9, 0.5, 1.0),
         )
         .with_layer(10);
-        let settings_label_node = self.workspace.add_view(settings_label);
-        self.workspace
+        let settings_label_node = self.context.workspace.add_view(settings_label);
+        self.context
+            .workspace
             .attach(settings_canvas_node, settings_label_node);
 
         let mut settings_slider_style = theme.slider([40.0, 560.0, 300.0, 40.0]);
@@ -519,8 +734,9 @@ impl SceneVMApp for UiDemo {
             .with_id("settings_slider")
             .with_value(75.0)
             .with_show_value(true);
-        let settings_slider_node = self.workspace.add_view(settings_slider);
-        self.workspace
+        let settings_slider_node = self.context.workspace.add_view(settings_slider);
+        self.context
+            .workspace
             .attach(settings_canvas_node, settings_slider_node);
 
         // Add a button to toggle between canvases (using TextButton)
@@ -528,8 +744,8 @@ impl SceneVMApp for UiDemo {
             TextButton::new(theme.button([450.0, 510.0, 150.0, 44.0]), "Switch Mode")
                 .with_id("canvas_toggle")
                 .with_text_size(14.0);
-        let canvas_toggle_node = self.workspace.add_view(canvas_toggle_button);
-        self.workspace.add_root(canvas_toggle_node);
+        let canvas_toggle_node = self.context.workspace.add_view(canvas_toggle_button);
+        self.context.workspace.add_root(canvas_toggle_node);
 
         // === Color Wheel Demo ===
         let color_wheel = ColorWheel::new(
@@ -541,8 +757,8 @@ impl SceneVMApp for UiDemo {
         // Create the atlas tile for the color wheel
         color_wheel.ensure_tile(vm.active_vm_mut());
 
-        let color_wheel_node = self.workspace.add_view(color_wheel);
-        self.workspace.add_root(color_wheel_node);
+        let color_wheel_node = self.context.workspace.add_view(color_wheel);
+        self.context.workspace.add_root(color_wheel_node);
 
         // Label for color wheel
         let color_wheel_label = LabelRect::new(
@@ -551,8 +767,8 @@ impl SceneVMApp for UiDemo {
             14.0,
             Vec4::new(0.7, 0.7, 0.75, 1.0),
         );
-        let color_wheel_label_node = self.workspace.add_view(color_wheel_label);
-        self.workspace.add_root(color_wheel_label_node);
+        let color_wheel_label_node = self.context.workspace.add_view(color_wheel_label);
+        self.context.workspace.add_root(color_wheel_label_node);
 
         // Create a new VM layer for procedural noise shader
         self.noise_layer = vm.add_vm_layer();
@@ -574,7 +790,9 @@ impl SceneVMApp for UiDemo {
         // Create a popup layer for UI popups (layer 2)
         // This will render above the noise shader layer
         self.popup_layer = vm.add_vm_layer();
-        self.workspace.set_popup_layer(Some(self.popup_layer));
+        self.context
+            .workspace
+            .set_popup_layer(Some(self.popup_layer));
 
         // Configure the popup layer with same settings as main UI layer
         vm.set_active_vm(self.popup_layer);
@@ -599,12 +817,12 @@ impl SceneVMApp for UiDemo {
     }
 
     fn needs_update(&mut self) -> bool {
-        self.workspace.is_dirty()
+        self.context.workspace.is_dirty()
     }
 
     fn render(&mut self, vm: &mut SceneVM, ctx: &mut dyn SceneVMRenderCtx) {
         // Handle actions and update state
-        for action in self.workspace.take_actions() {
+        for action in self.context.workspace.take_actions() {
             match action {
                 UiAction::ButtonPressed(id) => {
                     println!("Button pressed: {id}");
@@ -617,14 +835,18 @@ impl SceneVMApp for UiDemo {
                     }
                     // Toggle between canvases
                     else if id == "canvas_toggle" {
-                        if let Some(main_canvas) =
-                            self.workspace.find_view_mut::<Canvas>("main_canvas")
+                        if let Some(main_canvas) = self
+                            .context
+                            .workspace
+                            .find_view_mut::<Canvas>("main_canvas")
                         {
                             let is_visible = main_canvas.is_visible();
                             main_canvas.set_visible(!is_visible);
                         }
-                        if let Some(settings_canvas) =
-                            self.workspace.find_view_mut::<Canvas>("settings_canvas")
+                        if let Some(settings_canvas) = self
+                            .context
+                            .workspace
+                            .find_view_mut::<Canvas>("settings_canvas")
                         {
                             let is_visible = settings_canvas.is_visible();
                             settings_canvas.set_visible(!is_visible);
@@ -636,8 +858,10 @@ impl SceneVMApp for UiDemo {
 
                     // Example: sync image_button state with toggle_button
                     if id == "toggle_button" {
-                        if let Some(img_btn) =
-                            self.workspace.find_view_mut::<Button>("image_button")
+                        if let Some(img_btn) = self
+                            .context
+                            .workspace
+                            .find_view_mut::<Button>("image_button")
                         {
                             img_btn.set_toggled(on);
                         }
@@ -646,30 +870,32 @@ impl SceneVMApp for UiDemo {
                 UiAction::SliderChanged(id, value) => {
                     if id == "main_slider" {
                         // Create undo command with old and new values
-                        let old_value = self.slider_value;
+                        let old_value = self.context.slider_value;
                         let cmd = Box::new(SliderChangeCommand::new(id.clone(), old_value, value));
-                        self.undo_stack.execute(cmd, vm, &mut self.workspace);
+                        self.undo_stack.execute(cmd, vm, &mut self.context);
 
-                        self.slider_value = value;
                         self.has_changes = true;
                         // Update just the label text using its string ID
-                        if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
-                            label.set_text(format!("Value: {:.1}", self.slider_value));
+                        if let Some(label) = self
+                            .context
+                            .workspace
+                            .find_view_mut::<Label>("slider_label")
+                        {
+                            label.set_text(format!("Value: {:.1}", self.context.slider_value));
                         }
                     } else if id.starts_with("param_slider_") {
                         // Update param sliders
                         if let Some(idx_str) = id.strip_prefix("param_slider_") {
                             if let Ok(idx) = idx_str.parse::<usize>() {
-                                if idx < self.param_sliders.len() {
-                                    let old_value = self.param_sliders[idx];
+                                if idx < self.context.param_sliders.len() {
+                                    let old_value = self.context.param_sliders[idx];
                                     let cmd = Box::new(SliderChangeCommand::new(
                                         id.clone(),
                                         old_value,
                                         value,
                                     ));
-                                    self.undo_stack.execute(cmd, vm, &mut self.workspace);
+                                    self.undo_stack.execute(cmd, vm, &mut self.context);
 
-                                    self.param_sliders[idx] = value;
                                     self.has_changes = true;
                                 }
                             }
@@ -680,7 +906,9 @@ impl SceneVMApp for UiDemo {
                     println!("Button group '{}' changed to index {}", name, index);
 
                     // Get the old index from the button group
-                    if let Some(button_group) = self.workspace.find_view_mut::<ButtonGroup>(&name) {
+                    if let Some(button_group) =
+                        self.context.workspace.find_view_mut::<ButtonGroup>(&name)
+                    {
                         let old_index = button_group.active_index;
                         if old_index != index {
                             let cmd = Box::new(ButtonGroupChangeCommand::new(
@@ -688,7 +916,7 @@ impl SceneVMApp for UiDemo {
                                 old_index,
                                 index,
                             ));
-                            self.undo_stack.execute(cmd, vm, &mut self.workspace);
+                            self.undo_stack.execute(cmd, vm, &mut self.context);
                             self.has_changes = true;
                         }
                     }
@@ -711,6 +939,7 @@ impl SceneVMApp for UiDemo {
         // Set GP0.z to the color wheel's HSV value for shader (ensure we're on layer 0)
         vm.set_active_vm(0);
         if let Some(color_wheel) = self
+            .context
             .workspace
             .find_view_mut::<ColorWheel>("demo_color_wheel")
         {
@@ -755,8 +984,8 @@ impl SceneVMApp for UiDemo {
 
         // Build drawables from workspace
         let text_cache = self.renderer.text_cache();
-        let drawables = self.workspace.build(text_cache);
-        let popup_drawables = self.workspace.build_popups_separate(text_cache);
+        let drawables = self.context.workspace.build(text_cache);
+        let popup_drawables = self.context.workspace.build_popups_separate(text_cache);
 
         // Render main UI to layer 0
         vm.set_active_vm(0);
@@ -783,11 +1012,11 @@ impl SceneVMApp for UiDemo {
 
     fn mouse_down(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
         // Check if click is outside popup system - close all popups if so
-        if !self.workspace.is_click_inside_popup_system([x, y]) {
-            self.workspace.close_all_popups();
+        if !self.context.workspace.is_click_inside_popup_system([x, y]) {
+            self.context.workspace.close_all_popups();
         }
 
-        self.workspace.handle_event(&UiEvent {
+        self.context.workspace.handle_event(&UiEvent {
             kind: UiEventKind::PointerDown,
             pos: [x, y],
             pointer_id: 0,
@@ -795,7 +1024,7 @@ impl SceneVMApp for UiDemo {
     }
 
     fn mouse_up(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
-        self.workspace.handle_event(&UiEvent {
+        self.context.workspace.handle_event(&UiEvent {
             kind: UiEventKind::PointerUp,
             pos: [x, y],
             pointer_id: 0,
@@ -803,7 +1032,7 @@ impl SceneVMApp for UiDemo {
     }
 
     fn mouse_move(&mut self, _vm: &mut SceneVM, x: f32, y: f32) {
-        self.workspace.handle_event(&UiEvent {
+        self.context.workspace.handle_event(&UiEvent {
             kind: UiEventKind::PointerMove,
             pos: [x, y],
             pointer_id: 0,
@@ -814,8 +1043,8 @@ impl SceneVMApp for UiDemo {
 
     fn save_to_json(&mut self, _vm: &mut SceneVM) -> Option<String> {
         let data = UiDemoData {
-            slider_value: self.slider_value,
-            param_sliders: self.param_sliders.clone(),
+            slider_value: self.context.slider_value,
+            param_sliders: self.context.param_sliders.clone(),
         };
 
         match serde_json::to_string_pretty(&data) {
@@ -833,21 +1062,30 @@ impl SceneVMApp for UiDemo {
     fn load_from_json(&mut self, vm: &mut SceneVM, json: &str) -> bool {
         match serde_json::from_str::<UiDemoData>(json) {
             Ok(data) => {
-                self.slider_value = data.slider_value;
-                self.param_sliders = data.param_sliders;
+                self.context.slider_value = data.slider_value;
+                self.context.param_sliders = data.param_sliders;
                 self.has_changes = false;
 
                 // Update UI to reflect loaded values
-                if let Some(slider) = self.workspace.find_view_mut::<Slider>("main_slider") {
-                    slider.set_value(self.slider_value);
+                if let Some(slider) = self
+                    .context
+                    .workspace
+                    .find_view_mut::<Slider>("main_slider")
+                {
+                    slider.set_value(self.context.slider_value);
                 }
-                if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
-                    label.set_text(format!("Value: {:.1}", self.slider_value));
+                if let Some(label) = self
+                    .context
+                    .workspace
+                    .find_view_mut::<Label>("slider_label")
+                {
+                    label.set_text(format!("Value: {:.1}", self.context.slider_value));
                 }
 
                 // Update parameter sliders
-                for (i, value) in self.param_sliders.iter().enumerate() {
+                for (i, value) in self.context.param_sliders.iter().enumerate() {
                     if let Some(slider) = self
+                        .context
                         .workspace
                         .find_view_mut::<Slider>(&format!("param_slider_{}", i))
                     {
@@ -869,20 +1107,29 @@ impl SceneVMApp for UiDemo {
 
     fn new_project(&mut self, vm: &mut SceneVM) {
         let default = UiDemoData::default();
-        self.slider_value = default.slider_value;
-        self.param_sliders = default.param_sliders;
+        self.context.slider_value = default.slider_value;
+        self.context.param_sliders = default.param_sliders;
         self.has_changes = false;
 
         // Reset UI
-        if let Some(slider) = self.workspace.find_view_mut::<Slider>("main_slider") {
-            slider.set_value(self.slider_value);
+        if let Some(slider) = self
+            .context
+            .workspace
+            .find_view_mut::<Slider>("main_slider")
+        {
+            slider.set_value(self.context.slider_value);
         }
-        if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
-            label.set_text(format!("Value: {:.1}", self.slider_value));
+        if let Some(label) = self
+            .context
+            .workspace
+            .find_view_mut::<Label>("slider_label")
+        {
+            label.set_text(format!("Value: {:.1}", self.context.slider_value));
         }
 
-        for (i, value) in self.param_sliders.iter().enumerate() {
+        for (i, value) in self.context.param_sliders.iter().enumerate() {
             if let Some(slider) = self
+                .context
                 .workspace
                 .find_view_mut::<Slider>(&format!("param_slider_{}", i))
             {
@@ -904,33 +1151,11 @@ impl SceneVMApp for UiDemo {
     // Undo/Redo Implementation
 
     fn undo(&mut self, vm: &mut SceneVM) -> bool {
-        let result = self.undo_stack.undo(vm, &mut self.workspace);
-        if result {
-            // Sync app state with workspace after undo
-            if let Some(slider) = self.workspace.find_view_mut::<Slider>("main_slider") {
-                self.slider_value = slider.get_value();
-            }
-            if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
-                label.set_text(format!("Value: {:.1}", self.slider_value));
-            }
-            self.has_changes = true;
-        }
-        result
+        self.undo_stack.undo(vm, &mut self.context)
     }
 
     fn redo(&mut self, vm: &mut SceneVM) -> bool {
-        let result = self.undo_stack.redo(vm, &mut self.workspace);
-        if result {
-            // Sync app state with workspace after redo
-            if let Some(slider) = self.workspace.find_view_mut::<Slider>("main_slider") {
-                self.slider_value = slider.get_value();
-            }
-            if let Some(label) = self.workspace.find_view_mut::<Label>("slider_label") {
-                label.set_text(format!("Value: {:.1}", self.slider_value));
-            }
-            self.has_changes = true;
-        }
-        result
+        self.undo_stack.redo(vm, &mut self.context)
     }
 
     fn can_undo(&self) -> bool {
@@ -971,7 +1196,11 @@ impl SceneVMApp for UiDemo {
 
     fn resize(&mut self, _vm: &mut SceneVM, size: (u32, u32)) {
         // Update toolbar to span full width
-        if let Some(toolbar) = self.workspace.find_view_mut::<Toolbar>("main_toolbar") {
+        if let Some(toolbar) = self
+            .context
+            .workspace
+            .find_view_mut::<Toolbar>("main_toolbar")
+        {
             let width = size.0 as f32;
             toolbar.style.rect[2] = width; // Update width
 
@@ -980,7 +1209,7 @@ impl SceneVMApp for UiDemo {
                 hstack.rect[2] = width;
             }
 
-            self.workspace.set_dirty(); // Trigger relayout
+            self.context.workspace.set_dirty(); // Trigger relayout
         }
     }
 }

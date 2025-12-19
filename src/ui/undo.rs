@@ -1,19 +1,41 @@
 use crate::SceneVM;
-use crate::ui::Workspace;
 
 /// Trait for undoable/redoable commands
-pub trait UndoCommand: std::fmt::Debug {
+///
+/// Implement this trait for your application-specific commands.
+/// The generic parameter `T` is your application context (e.g., your main app struct).
+///
+/// # Example
+/// ```ignore
+/// #[derive(Debug)]
+/// struct MyCommand { /* ... */ }
+///
+/// impl UndoCommand<MyApp> for MyCommand {
+///     fn execute(&mut self, vm: &mut SceneVM, context: &mut MyApp, is_new: bool) {
+///         // Modify your app state and VM
+///     }
+///
+///     fn undo(&mut self, vm: &mut SceneVM, context: &mut MyApp) {
+///         // Restore previous state
+///     }
+///
+///     fn description(&self) -> &str {
+///         "My Custom Command"
+///     }
+/// }
+/// ```
+pub trait UndoCommand<T>: std::fmt::Debug {
     /// Execute the command
     /// `is_new` is true when the command is first executed, false when redoing
     /// This prevents re-applying UI actions that were just performed
-    fn execute(&mut self, vm: &mut SceneVM, workspace: &mut Workspace, is_new: bool);
+    fn execute(&mut self, vm: &mut SceneVM, context: &mut T, is_new: bool);
 
     /// Reverse the command (for undo)
-    fn undo(&mut self, vm: &mut SceneVM, workspace: &mut Workspace);
+    fn undo(&mut self, vm: &mut SceneVM, context: &mut T);
 
     /// Optional: merge with next command if they're related (e.g., consecutive slider drags)
     /// Returns true if merge was successful
-    fn try_merge(&mut self, _other: &dyn UndoCommand) -> bool {
+    fn try_merge(&mut self, _other: &dyn UndoCommand<T>) -> bool {
         false
     }
 
@@ -25,14 +47,32 @@ pub trait UndoCommand: std::fmt::Debug {
 }
 
 /// Undo/Redo stack manager
-pub struct UndoStack {
-    commands: Vec<Box<dyn UndoCommand>>,
+///
+/// Generic over the application context type `T`.
+/// Use this to manage undo/redo functionality in your application.
+///
+/// # Example
+/// ```ignore
+/// let mut undo_stack = UndoStack::<MyApp>::new(100);
+///
+/// // Execute a command
+/// let cmd = Box::new(MyCommand::new(/* ... */));
+/// undo_stack.execute(cmd, &mut my_app);
+///
+/// // Undo
+/// undo_stack.undo(&mut my_app);
+///
+/// // Redo
+/// undo_stack.redo(&mut my_app);
+/// ```
+pub struct UndoStack<T> {
+    commands: Vec<Box<dyn UndoCommand<T>>>,
     current_index: usize, // Points to the next command to redo
     max_size: usize,
     dirty: bool,
 }
 
-impl UndoStack {
+impl<T> UndoStack<T> {
     /// Create a new undo stack with a maximum size
     pub fn new(max_size: usize) -> Self {
         Self {
@@ -44,12 +84,7 @@ impl UndoStack {
     }
 
     /// Add a new command and execute it
-    pub fn execute(
-        &mut self,
-        mut cmd: Box<dyn UndoCommand>,
-        vm: &mut SceneVM,
-        workspace: &mut Workspace,
-    ) {
+    pub fn execute(&mut self, mut cmd: Box<dyn UndoCommand<T>>, vm: &mut SceneVM, context: &mut T) {
         // Truncate any commands after current position (user did undo then new action)
         self.commands.truncate(self.current_index);
 
@@ -62,7 +97,7 @@ impl UndoStack {
         }
 
         // Execute the command (is_new = true, don't re-apply the UI action)
-        cmd.execute(vm, workspace, true);
+        cmd.execute(vm, context, true);
 
         // Add to stack
         self.commands.push(cmd);
@@ -77,29 +112,27 @@ impl UndoStack {
     }
 
     /// Undo the last command
-    pub fn undo(&mut self, vm: &mut SceneVM, workspace: &mut Workspace) -> bool {
+    pub fn undo(&mut self, vm: &mut SceneVM, context: &mut T) -> bool {
         if self.current_index == 0 {
             return false;
         }
 
         self.current_index -= 1;
-        self.commands[self.current_index].undo(vm, workspace);
+        self.commands[self.current_index].undo(vm, context);
         self.dirty = true;
-        workspace.set_dirty();
         true
     }
 
     /// Redo the next command
-    pub fn redo(&mut self, vm: &mut SceneVM, workspace: &mut Workspace) -> bool {
+    pub fn redo(&mut self, vm: &mut SceneVM, context: &mut T) -> bool {
         if self.current_index >= self.commands.len() {
             return false;
         }
 
         // is_new = false for redo (apply the UI action)
-        self.commands[self.current_index].execute(vm, workspace, false);
+        self.commands[self.current_index].execute(vm, context, false);
         self.current_index += 1;
         self.dirty = true;
-        workspace.set_dirty();
         true
     }
 
@@ -156,268 +189,5 @@ impl UndoStack {
     /// Check if stack is empty
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
-    }
-}
-
-// ============================================================================
-// Concrete Command Implementations
-// ============================================================================
-
-/// Command for slider value changes (supports merging)
-#[derive(Debug, Clone)]
-pub struct SliderChangeCommand {
-    widget_id: String,
-    old_value: f32,
-    new_value: f32,
-    description: String,
-}
-
-impl SliderChangeCommand {
-    pub fn new(widget_id: String, old_value: f32, new_value: f32) -> Self {
-        Self {
-            description: format!("Change {}", widget_id),
-            widget_id,
-            old_value,
-            new_value,
-        }
-    }
-}
-
-impl UndoCommand for SliderChangeCommand {
-    fn execute(&mut self, _vm: &mut SceneVM, workspace: &mut Workspace, is_new: bool) {
-        // Only apply if this is a redo (is_new = false)
-        // For new commands, the UI already updated the slider
-        if !is_new {
-            workspace.set_slider_value(&self.widget_id, self.new_value);
-        }
-    }
-
-    fn undo(&mut self, _vm: &mut SceneVM, workspace: &mut Workspace) {
-        workspace.set_slider_value(&self.widget_id, self.old_value);
-    }
-
-    fn try_merge(&mut self, other: &dyn UndoCommand) -> bool {
-        // Try to merge consecutive slider changes for the same widget
-        if let Some(other_slider) = other.as_any().downcast_ref::<SliderChangeCommand>() {
-            if self.widget_id == other_slider.widget_id {
-                self.new_value = other_slider.new_value;
-                return true;
-            }
-        }
-        false
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-/// Command for button group selection changes
-#[derive(Debug, Clone)]
-pub struct ButtonGroupChangeCommand {
-    group_id: String,
-    old_index: usize,
-    new_index: usize,
-}
-
-impl ButtonGroupChangeCommand {
-    pub fn new(group_id: String, old_index: usize, new_index: usize) -> Self {
-        Self {
-            group_id,
-            old_index,
-            new_index,
-        }
-    }
-}
-
-impl UndoCommand for ButtonGroupChangeCommand {
-    fn execute(&mut self, _vm: &mut SceneVM, workspace: &mut Workspace, is_new: bool) {
-        if !is_new {
-            workspace.set_buttongroup_index(&self.group_id, self.new_index);
-        }
-    }
-
-    fn undo(&mut self, _vm: &mut SceneVM, workspace: &mut Workspace) {
-        workspace.set_buttongroup_index(&self.group_id, self.old_index);
-    }
-
-    fn description(&self) -> &str {
-        "Change Button Group"
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-/// Command for dropdown selection changes
-#[derive(Debug, Clone)]
-pub struct DropdownChangeCommand {
-    dropdown_id: String,
-    old_index: usize,
-    new_index: usize,
-}
-
-impl DropdownChangeCommand {
-    pub fn new(dropdown_id: String, old_index: usize, new_index: usize) -> Self {
-        Self {
-            dropdown_id,
-            old_index,
-            new_index,
-        }
-    }
-}
-
-impl UndoCommand for DropdownChangeCommand {
-    fn execute(&mut self, _vm: &mut SceneVM, workspace: &mut Workspace, is_new: bool) {
-        if !is_new {
-            workspace.set_dropdown_index(&self.dropdown_id, self.new_index);
-        }
-    }
-
-    fn undo(&mut self, _vm: &mut SceneVM, workspace: &mut Workspace) {
-        workspace.set_dropdown_index(&self.dropdown_id, self.old_index);
-    }
-
-    fn description(&self) -> &str {
-        "Change Dropdown"
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-/// Command for button toggle changes
-#[derive(Debug, Clone)]
-pub struct ButtonToggleCommand {
-    #[allow(dead_code)]
-    button_id: String,
-    #[allow(dead_code)]
-    old_state: bool,
-    #[allow(dead_code)]
-    new_state: bool,
-}
-
-impl ButtonToggleCommand {
-    pub fn new(button_id: String, old_state: bool, new_state: bool) -> Self {
-        Self {
-            button_id,
-            old_state,
-            new_state,
-        }
-    }
-}
-
-impl UndoCommand for ButtonToggleCommand {
-    fn execute(&mut self, _vm: &mut SceneVM, _workspace: &mut Workspace, _is_new: bool) {
-        // Note: Workspace doesn't have a set_button_state method yet
-        // Apps will need to implement this or handle it in their own state
-    }
-
-    fn undo(&mut self, _vm: &mut SceneVM, _workspace: &mut Workspace) {
-        // Apps will need to implement button state restoration
-    }
-
-    fn description(&self) -> &str {
-        "Toggle Button"
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-/// Command for color changes
-#[derive(Debug, Clone)]
-pub struct ColorChangeCommand {
-    widget_id: String,
-    #[allow(dead_code)]
-    old_color: [f32; 4],
-    new_color: [f32; 4],
-}
-
-impl ColorChangeCommand {
-    pub fn new(widget_id: String, old_color: [f32; 4], new_color: [f32; 4]) -> Self {
-        Self {
-            widget_id,
-            old_color,
-            new_color,
-        }
-    }
-}
-
-impl UndoCommand for ColorChangeCommand {
-    fn execute(&mut self, _vm: &mut SceneVM, _workspace: &mut Workspace, _is_new: bool) {
-        // Apps will need to implement color state restoration
-    }
-
-    fn undo(&mut self, _vm: &mut SceneVM, _workspace: &mut Workspace) {
-        // Apps will need to implement color state restoration
-    }
-
-    fn try_merge(&mut self, other: &dyn UndoCommand) -> bool {
-        // Merge consecutive color changes for the same widget
-        if let Some(other_color) = other.as_any().downcast_ref::<ColorChangeCommand>() {
-            if self.widget_id == other_color.widget_id {
-                self.new_color = other_color.new_color;
-                return true;
-            }
-        }
-        false
-    }
-
-    fn description(&self) -> &str {
-        "Change Color"
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-/// Full state snapshot command for complex operations
-/// Uses JSON serialization from app_trait
-#[derive(Debug, Clone)]
-pub struct StateSnapshotCommand {
-    description: String,
-    #[allow(dead_code)]
-    old_state: String, // JSON snapshot
-    #[allow(dead_code)]
-    new_state: String, // JSON snapshot
-}
-
-impl StateSnapshotCommand {
-    pub fn new(description: String, old_state: String, new_state: String) -> Self {
-        Self {
-            description,
-            old_state,
-            new_state,
-        }
-    }
-}
-
-impl UndoCommand for StateSnapshotCommand {
-    fn execute(&mut self, _vm: &mut SceneVM, _workspace: &mut Workspace, _is_new: bool) {
-        // Note: This needs to be called through the app instance
-        // The app's load_from_json method should be called here
-        // This is a placeholder - apps will need to implement the actual loading
-    }
-
-    fn undo(&mut self, _vm: &mut SceneVM, _workspace: &mut Workspace) {
-        // Note: This needs to be called through the app instance
-        // The app's load_from_json method should be called with old_state
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
