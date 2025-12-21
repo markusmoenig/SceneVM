@@ -77,23 +77,23 @@ impl Theme {
         Self {
             name: "Light".into(),
 
-            // Backgrounds - lighter base so UI elements pop
-            background: Vec4::new(0.72, 0.72, 0.74, 1.0), // Light canvas
-            surface: Vec4::new(0.66, 0.66, 0.68, 1.0),    // Darker cards/panels
-            surface_variant: Vec4::new(0.62, 0.62, 0.64, 1.0), // Inputs/secondary surfaces
+            // Backgrounds - nearly white for maximum contrast with dark text
+            background: Vec4::new(0.98, 0.98, 0.99, 1.0), // Nearly white canvas
+            surface: Vec4::new(0.95, 0.95, 0.96, 1.0),    // Very light cards/panels
+            surface_variant: Vec4::new(0.92, 0.92, 0.93, 1.0), // Inputs/secondary surfaces
 
             // Primary interactive elements
-            primary: Vec4::new(0.5, 0.5, 0.52, 1.0), // Darker to separate from surface
-            primary_hover: Vec4::new(0.46, 0.46, 0.48, 1.0),
-            primary_active: Vec4::new(0.42, 0.42, 0.44, 1.0),
+            primary: Vec4::new(0.88, 0.88, 0.89, 1.0),
+            primary_hover: Vec4::new(0.84, 0.84, 0.85, 1.0),
+            primary_active: Vec4::new(0.8, 0.8, 0.81, 1.0),
 
             // Borders - clearly visible
-            border: Vec4::new(0.44, 0.44, 0.46, 1.0), // Outline elements against darker surfaces
-            border_subtle: Vec4::new(0.58, 0.58, 0.6, 1.0),
+            border: Vec4::new(0.7, 0.7, 0.71, 1.0),
+            border_subtle: Vec4::new(0.8, 0.8, 0.81, 1.0),
 
-            // Text - black-leaning for maximum contrast on light surfaces
+            // Text - black for maximum contrast on light surfaces
             text: Vec4::new(0.0, 0.0, 0.0, 1.0),
-            text_secondary: Vec4::new(0.12, 0.12, 0.14, 1.0),
+            text_secondary: Vec4::new(0.3, 0.3, 0.31, 1.0),
 
             // Accent - deeper blue for titles/active states
             accent: Vec4::new(0.02, 0.5, 0.94, 1.0), // Darker but saturated to stand out
@@ -174,6 +174,12 @@ impl Theme {
             Vec4::new(0.05, 0.05, 0.06, 1.0) // Dark mode: clearly darker than panel
         };
 
+        let value_color = if self.name == "Light" {
+            Vec4::new(0.2, 0.2, 0.22, 1.0) // Dark text for light mode
+        } else {
+            Vec4::new(0.6, 0.6, 0.65, 1.0) // Light text for dark mode
+        };
+
         SliderStyle {
             rect,
             track_color,
@@ -182,17 +188,14 @@ impl Theme {
             thumb_radius: 6.0,
             track_height: 4.0,
             layer: 11,
+            value_color,
         }
     }
 
     /// Create a param list style with the given rect
     pub fn param_list(&self, rect: [f32; 4]) -> ParamListStyle {
-        // Title can be accent color in dark mode for emphasis
-        let title_color = if self.name == "Light" {
-            self.text
-        } else {
-            self.accent
-        };
+        // Use accent color for title in both themes for emphasis
+        let title_color = self.accent;
 
         ParamListStyle {
             rect,

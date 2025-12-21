@@ -16,6 +16,7 @@ pub struct SliderStyle {
     pub thumb_radius: f32,
     pub track_height: f32,
     pub layer: i32,
+    pub value_color: Vec4<f32>, // Value text color (from theme)
 }
 
 impl Default for SliderStyle {
@@ -28,6 +29,7 @@ impl Default for SliderStyle {
             thumb_radius: 12.0,
             track_height: 6.0,
             layer: 10,
+            value_color: Vec4::new(0.6, 0.6, 0.65, 1.0),
         }
     }
 }
@@ -53,6 +55,7 @@ pub struct Slider {
 impl Slider {
     pub fn new(style: SliderStyle, min: f32, max: f32) -> Self {
         let thumb_roundness = style.thumb_radius; // Default to circle
+        let value_color = style.value_color;
         Self {
             id: String::new(),
             render_id: Uuid::new_v4(),
@@ -64,7 +67,7 @@ impl Slider {
             active_pointer: None,
             original_value: 0.5,
             show_value: false,
-            value_color: Vec4::new(0.6, 0.6, 0.65, 1.0),
+            value_color,
             value_size: 12.0,
             value_precision: 1,
             thumb_roundness,
