@@ -45,26 +45,26 @@ impl Theme {
             name: "Dark".into(),
 
             // Backgrounds - deep blacks
-            background: Vec4::new(0.02, 0.02, 0.02, 1.0), // Almost black
-            surface: Vec4::new(0.08, 0.08, 0.08, 1.0),    // Very dark gray
-            surface_variant: Vec4::new(0.12, 0.12, 0.13, 1.0), // Slightly lighter
+            background: Vec4::new(0.015, 0.015, 0.02, 1.0), // Near black
+            surface: Vec4::new(0.06, 0.06, 0.07, 1.0),      // Deep charcoal
+            surface_variant: Vec4::new(0.1, 0.1, 0.11, 1.0), // Slight lift for panels
 
             // Primary interactive elements - darker, more subtle
-            primary: Vec4::new(0.18, 0.18, 0.19, 1.0),
-            primary_hover: Vec4::new(0.22, 0.22, 0.24, 1.0),
-            primary_active: Vec4::new(0.08, 0.08, 0.09, 1.0), // Much darker for pressed state
+            primary: Vec4::new(0.16, 0.16, 0.18, 1.0),
+            primary_hover: Vec4::new(0.2, 0.2, 0.22, 1.0),
+            primary_active: Vec4::new(0.1, 0.1, 0.11, 1.0), // Darker for pressed state
 
             // Borders - very subtle, almost invisible
-            border: Vec4::new(0.15, 0.15, 0.16, 1.0),
+            border: Vec4::new(0.16, 0.16, 0.18, 1.0),
             border_subtle: Vec4::new(0.1, 0.1, 0.11, 1.0),
 
             // Text - crisp white
             text: Vec4::new(1.0, 1.0, 1.0, 1.0),
-            text_secondary: Vec4::new(0.7, 0.7, 0.72, 1.0),
+            text_secondary: Vec4::new(0.72, 0.72, 0.75, 1.0),
 
-            // Accent - vibrant blue
-            accent: Vec4::new(0.0, 0.48, 1.0, 1.0), // Bright blue
-            accent_hover: Vec4::new(0.2, 0.58, 1.0, 1.0),
+            // Accent - deeper blue
+            accent: Vec4::new(0.08, 0.42, 0.9, 1.0), // Slightly darker
+            accent_hover: Vec4::new(0.18, 0.5, 0.98, 1.0),
 
             // Rounded corners
             radius_px: 10.0, // Rounded corners
@@ -77,27 +77,27 @@ impl Theme {
         Self {
             name: "Light".into(),
 
-            // Backgrounds - clear hierarchy
-            background: Vec4::new(0.85, 0.85, 0.87, 1.0), // MUCH darker gray background
-            surface: Vec4::new(1.0, 1.0, 1.0, 1.0),       // Pure white for surfaces
-            surface_variant: Vec4::new(0.92, 0.92, 0.94, 1.0), // Light gray for buttons
+            // Backgrounds - lighter base so UI elements pop
+            background: Vec4::new(0.72, 0.72, 0.74, 1.0), // Light canvas
+            surface: Vec4::new(0.66, 0.66, 0.68, 1.0),    // Darker cards/panels
+            surface_variant: Vec4::new(0.62, 0.62, 0.64, 1.0), // Inputs/secondary surfaces
 
             // Primary interactive elements
-            primary: Vec4::new(0.80, 0.80, 0.82, 1.0),
-            primary_hover: Vec4::new(0.70, 0.70, 0.73, 1.0),
-            primary_active: Vec4::new(0.60, 0.60, 0.63, 1.0),
+            primary: Vec4::new(0.5, 0.5, 0.52, 1.0), // Darker to separate from surface
+            primary_hover: Vec4::new(0.46, 0.46, 0.48, 1.0),
+            primary_active: Vec4::new(0.42, 0.42, 0.44, 1.0),
 
             // Borders - clearly visible
-            border: Vec4::new(0.60, 0.60, 0.63, 1.0), // VERY dark borders
-            border_subtle: Vec4::new(0.75, 0.75, 0.78, 1.0),
+            border: Vec4::new(0.44, 0.44, 0.46, 1.0), // Outline elements against darker surfaces
+            border_subtle: Vec4::new(0.58, 0.58, 0.6, 1.0),
 
-            // Text - very dark for maximum contrast
-            text: Vec4::new(0.0, 0.0, 0.0, 1.0), // PURE BLACK
-            text_secondary: Vec4::new(0.25, 0.25, 0.30, 1.0),
+            // Text - black-leaning for maximum contrast on light surfaces
+            text: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            text_secondary: Vec4::new(0.12, 0.12, 0.14, 1.0),
 
-            // Accent - more saturated blue
-            accent: Vec4::new(0.0, 0.4, 1.0, 1.0), // BRIGHT blue
-            accent_hover: Vec4::new(0.1, 0.5, 1.0, 1.0),
+            // Accent - deeper blue for titles/active states
+            accent: Vec4::new(0.02, 0.5, 0.94, 1.0), // Darker but saturated to stand out
+            accent_hover: Vec4::new(0.0, 0.58, 1.0, 1.0),
 
             // Rounded corners
             radius_px: 8.0,
@@ -157,9 +157,15 @@ impl Theme {
 
     /// Create a slider style with the given rect
     pub fn slider(&self, rect: [f32; 4]) -> SliderStyle {
+        let track_color = if self.name == "Light" {
+            self.primary_active // Darker track on light panels
+        } else {
+            Vec4::new(0.05, 0.05, 0.06, 1.0) // Dark mode: clearly darker than panel
+        };
+
         SliderStyle {
             rect,
-            track_color: self.primary, // Use primary instead of surface for better contrast
+            track_color,
             fill_color: self.accent,
             thumb_color: self.accent_hover,
             thumb_radius: 6.0,
@@ -170,14 +176,20 @@ impl Theme {
 
     /// Create a param list style with the given rect
     pub fn param_list(&self, rect: [f32; 4]) -> ParamListStyle {
+        let title_color = if self.name == "Light" {
+            self.text
+        } else {
+            self.accent
+        };
+
         ParamListStyle {
             rect,
-            fill: self.surface,
+            fill: self.surface_variant, // Match other widget surfaces for consistency
             border: self.border_subtle,
             radius_px: self.radius_px,
             border_px: self.border_px,
             layer: 10,
-            title_color: self.accent,
+            title_color,
             title_size: 16.0,
         }
     }

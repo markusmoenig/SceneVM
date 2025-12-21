@@ -304,13 +304,7 @@ impl SceneVMApp for UiDemo {
         self.context.workspace.add_root(node);
 
         // Add a centered label inside the button
-        let label = LabelRect::new(
-            "Toggle Me",
-            button_rect,
-            18.0,
-            Vec4::new(0.9, 0.9, 0.95, 1.0),
-        )
-        .with_layer(16); // Layer above button (buttons are now on layer 15)
+        let label = LabelRect::new("Toggle Me", button_rect, 18.0, theme.text).with_layer(16); // Layer above button (buttons are now on layer 15)
         let label_node = self.context.workspace.add_view(label);
         self.context.workspace.add_root(label_node);
 
@@ -348,7 +342,7 @@ impl SceneVMApp for UiDemo {
             format!("Value: {:.1}", self.context.slider_value),
             [250.0, 126.0],
             16.0,
-            Vec4::new(0.9, 0.9, 0.95, 1.0),
+            theme.text,
         )
         .with_id("slider_label")
         .with_layer(10);
@@ -374,7 +368,8 @@ impl SceneVMApp for UiDemo {
         // Undo button (using TextButton for now - could use icon later)
         let undo_button = TextButton::new(theme.button([0.0, 0.0, 60.0, button_size]), "Undo")
             .with_id("undo_button")
-            .with_text_size(12.0);
+            .with_text_size(12.0)
+            .with_text_color(theme.text);
         let undo_node = self.context.workspace.add_view(undo_button);
         if let Some(toolbar_view) = self
             .context
@@ -388,7 +383,8 @@ impl SceneVMApp for UiDemo {
         // Redo button
         let redo_button = TextButton::new(theme.button([0.0, 0.0, 60.0, button_size]), "Redo")
             .with_id("redo_button")
-            .with_text_size(12.0);
+            .with_text_size(12.0)
+            .with_text_color(theme.text);
         let redo_node = self.context.workspace.add_view(redo_button);
         if let Some(toolbar_view) = self
             .context
@@ -494,6 +490,7 @@ impl SceneVMApp for UiDemo {
             theme.button_group([0.0, 0.0, 0.0, 36.0], 60.0, 36.0),
         )
         .with_id("toolbar_group")
+        .with_text_color(theme.text)
         .with_textures(vec![
             Some(test_tile_id),
             Some(pressed_tile_id),
@@ -522,6 +519,7 @@ impl SceneVMApp for UiDemo {
             .with_label_width(80.0)
             .with_spacing(8.0)
             .with_label_size(14.0)
+            .with_label_color(theme.text)
             .with_auto_width(param_slider_width); // Auto-calculate width based on slider width
 
         // Create sliders and labels for the parameter list
@@ -545,7 +543,7 @@ impl SceneVMApp for UiDemo {
                 .with_value(50.0 + (i as f32 * 10.0))
                 .with_show_value(true)
                 .with_value_precision(1)
-                .with_value_color(Vec4::new(0.6, 0.6, 0.65, 1.0))
+                .with_value_color(theme.text)
                 .with_value_size(12.0);
 
             let slider_node = self.context.workspace.add_view(slider);
@@ -593,6 +591,7 @@ impl SceneVMApp for UiDemo {
             .with_label_width(70.0)
             .with_spacing(6.0)
             .with_label_size(13.0)
+            .with_label_color(theme.text)
             .with_auto_width(popup_slider_width); // Auto-calculate width
 
         // Add sliders to the popup
@@ -616,7 +615,7 @@ impl SceneVMApp for UiDemo {
                 .with_value(128.0 + (i as f32 * 20.0))
                 .with_show_value(true)
                 .with_value_precision(0)
-                .with_value_color(Vec4::new(0.7, 0.7, 0.75, 1.0))
+                .with_value_color(theme.text)
                 .with_value_size(11.0);
 
             let slider_node = self.context.workspace.add_view(slider);
@@ -635,7 +634,8 @@ impl SceneVMApp for UiDemo {
                 "RGB".to_string(),
                 "HSV".to_string(),
                 "HEX".to_string(),
-            ]);
+            ])
+            .with_text_color(theme.text);
 
         let popup_group_node = self.context.workspace.add_view(popup_button_group);
         popup_param_list.add_item("Mode", popup_group_node);
@@ -660,13 +660,8 @@ impl SceneVMApp for UiDemo {
         self.context.workspace.add_root(popup_button_node);
 
         // Add label for popup button
-        let popup_button_label = LabelRect::new(
-            "Colors",
-            [450.0, 250.0, 120.0, 44.0],
-            16.0,
-            Vec4::new(0.9, 0.9, 0.95, 1.0),
-        )
-        .with_layer(16); // Layer above button (buttons are now on layer 15)
+        let popup_button_label =
+            LabelRect::new("Colors", [450.0, 250.0, 120.0, 44.0], 16.0, theme.text).with_layer(16); // Layer above button (buttons are now on layer 15)
         let popup_button_label_node = self.context.workspace.add_view(popup_button_label);
         self.context.workspace.add_root(popup_button_label_node);
 
@@ -682,7 +677,7 @@ impl SceneVMApp for UiDemo {
             "Main Mode - Press button below to switch",
             [40.0, 520.0, 400.0, 30.0],
             16.0,
-            Vec4::new(0.9, 0.9, 0.95, 1.0),
+            theme.text,
         )
         .with_layer(10);
         let main_label_node = self.context.workspace.add_view(main_label);
@@ -700,7 +695,7 @@ impl SceneVMApp for UiDemo {
             "Settings Mode - Press button below to switch back",
             [40.0, 520.0, 400.0, 30.0],
             16.0,
-            Vec4::new(0.9, 0.9, 0.5, 1.0),
+            theme.text,
         )
         .with_layer(10);
         let settings_label_node = self.context.workspace.add_view(settings_label);
@@ -724,7 +719,8 @@ impl SceneVMApp for UiDemo {
         let canvas_toggle_button =
             TextButton::new(theme.button([450.0, 510.0, 150.0, 44.0]), "Switch Mode")
                 .with_id("canvas_toggle")
-                .with_text_size(14.0);
+                .with_text_size(14.0)
+                .with_text_color(theme.text);
         let canvas_toggle_node = self.context.workspace.add_view(canvas_toggle_button);
         self.context.workspace.add_root(canvas_toggle_node);
 
@@ -746,7 +742,7 @@ impl SceneVMApp for UiDemo {
             "Color Wheel",
             [740.0, 310.0, 180.0, 25.0],
             14.0,
-            Vec4::new(0.7, 0.7, 0.75, 1.0),
+            theme.text_secondary,
         );
         let color_wheel_label_node = self.context.workspace.add_view(color_wheel_label);
         self.context.workspace.add_root(color_wheel_label_node);

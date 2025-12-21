@@ -573,7 +573,9 @@ impl Workspace {
     /// Apply a new theme to all widgets in the workspace.
     /// This updates colors and styling of all widgets to match the new theme.
     pub fn apply_theme(&mut self, theme: &crate::ui::Theme) {
-        use crate::ui::{Button, ButtonGroup, DropdownList, ParamList, Slider, Toolbar};
+        use crate::ui::{
+            Button, ButtonGroup, DropdownList, ParamList, Slider, TextButton, Toolbar,
+        };
 
         for (_id, node) in self.nodes.iter_mut() {
             // Update Button styles
@@ -609,8 +611,13 @@ impl Workspace {
                 let title = pl.title.clone(); // Preserve title
                 pl.style = theme.param_list(rect);
                 pl.title = title; // Restore title
-                // Update label color for better contrast
+                // Update label/title colors for better contrast
                 pl.label_color = theme.text;
+                pl.title_color = if theme.name == "Light" {
+                    theme.text
+                } else {
+                    theme.accent
+                };
             }
             // Update Toolbar styles
             else if let Some(toolbar) = node.view.as_any_mut().downcast_mut::<Toolbar>() {
@@ -621,6 +628,12 @@ impl Workspace {
             else if let Some(dropdown) = node.view.as_any_mut().downcast_mut::<DropdownList>() {
                 let rect = dropdown.style.rect;
                 dropdown.style = theme.dropdown_list(rect);
+            }
+            // Update TextButton styles and text color
+            else if let Some(text_button) = node.view.as_any_mut().downcast_mut::<TextButton>() {
+                let rect = text_button.style.rect;
+                text_button.style = theme.button(rect);
+                text_button.text_color = theme.text;
             }
         }
         self.dirty = true;
