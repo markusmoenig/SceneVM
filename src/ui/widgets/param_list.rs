@@ -15,6 +15,7 @@ pub struct ParamListStyle {
     pub layer: i32,             // Rendering layer
     pub title_color: Vec4<f32>, // Default title color
     pub title_size: f32,        // Default title font size
+    pub label_color: Vec4<f32>, // Label text color (from theme)
 }
 
 /// A parameter list widget that displays labels on the left and widgets on the right.
@@ -43,6 +44,7 @@ impl ParamList {
     pub fn new(style: ParamListStyle) -> Self {
         let title_color = style.title_color;
         let title_size = style.title_size;
+        let label_color = style.label_color;
 
         Self {
             id: String::new(),
@@ -58,7 +60,7 @@ impl ParamList {
             padding: 8.0,
             label_offset: 8.0,
             items: Vec::new(),
-            label_color: Vec4::new(0.9, 0.9, 0.95, 1.0),
+            label_color,
             label_size: 14.0,
         }
     }
@@ -296,7 +298,7 @@ impl UiView for ParamList {
             ctx.push(Drawable::Rect {
                 id: Uuid::new_v4(),
                 rect: [x + self.padding, separator_y, w - self.padding * 2.0, 1.0],
-                fill: Vec4::new(0.3, 0.3, 0.35, 0.5),
+                fill: Vec4::new(0.3, 0.3, 0.35, 1.0),
                 border: Vec4::new(0.0, 0.0, 0.0, 0.0),
                 radius_px: 0.0,
                 border_px: 0.0,

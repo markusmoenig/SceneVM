@@ -52,7 +52,7 @@ impl Theme {
             // Primary interactive elements - darker, more subtle
             primary: Vec4::new(0.16, 0.16, 0.18, 1.0),
             primary_hover: Vec4::new(0.2, 0.2, 0.22, 1.0),
-            primary_active: Vec4::new(0.1, 0.1, 0.11, 1.0), // Darker for pressed state
+            primary_active: Vec4::new(0.25, 0.25, 0.27, 1.0), // Brighter for pressed state in dark mode
 
             // Borders - very subtle, almost invisible
             border: Vec4::new(0.16, 0.16, 0.18, 1.0),
@@ -114,10 +114,11 @@ impl Theme {
             fill: self.surface_variant,
             border: self.border,
             pressed_fill: self.primary_active,
-            pressed_border: self.accent,
+            pressed_border: self.border,
             radius_px: self.radius_px,
             border_px: self.border_px,
             layer: 15, // Higher layer than toolbar to ensure buttons draw on top
+            text_color: self.text,
         }
     }
 
@@ -140,6 +141,14 @@ impl Theme {
         button_width: f32,
         button_height: f32,
     ) -> ButtonGroupStyle {
+        // For dark theme: dark background with light text
+        // For light theme: light background with dark text
+        let text_bg_color = if self.name == "Light" {
+            Vec4::new(1.0, 1.0, 1.0, 0.85) // Light semi-transparent background
+        } else {
+            Vec4::new(0.0, 0.0, 0.0, 0.85) // Dark semi-transparent background
+        };
+
         ButtonGroupStyle {
             rect,
             button_width,
@@ -152,6 +161,8 @@ impl Theme {
             radius_px: self.radius_px,
             border_px: self.border_px,
             layer: 15, // Higher layer than toolbar
+            text_color: self.text,
+            text_bg_color,
         }
     }
 
@@ -176,6 +187,7 @@ impl Theme {
 
     /// Create a param list style with the given rect
     pub fn param_list(&self, rect: [f32; 4]) -> ParamListStyle {
+        // Title can be accent color in dark mode for emphasis
         let title_color = if self.name == "Light" {
             self.text
         } else {
@@ -191,6 +203,7 @@ impl Theme {
             layer: 10,
             title_color,
             title_size: 16.0,
+            label_color: self.text, // Labels should always use theme text color
         }
     }
 

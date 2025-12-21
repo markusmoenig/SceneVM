@@ -27,13 +27,14 @@ pub struct TextButton {
 
 impl TextButton {
     pub fn new(style: ButtonStyle, text: impl Into<String>) -> Self {
+        let text_color = style.text_color;
         Self {
             id: String::new(),
             style,
             kind: ButtonKind::Momentary,
             text: text.into(),
             text_size: 16.0,
-            text_color: Vec4::new(0.9, 0.9, 0.95, 1.0),
+            text_color,
             h_align: HAlign::Center,
             v_align: VAlign::Center,
             toggled: false,

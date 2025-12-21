@@ -32,6 +32,7 @@ pub struct ButtonStyle {
     pub radius_px: f32, // Corner radius in pixels
     pub border_px: f32, // Border width in pixels
     pub layer: i32,
+    pub text_color: Vec4<f32>, // Text color (from theme)
 }
 
 impl ButtonStyle {
@@ -51,6 +52,7 @@ impl Default for ButtonStyle {
             radius_px: 4.0,
             border_px: 0.0,
             layer: 10,
+            text_color: Vec4::new(0.9, 0.9, 0.95, 1.0),
         }
     }
 }

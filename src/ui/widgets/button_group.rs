@@ -28,6 +28,8 @@ pub struct ButtonGroupStyle {
     pub radius_px: f32,           // Corner radius
     pub border_px: f32,           // Border width
     pub layer: i32,
+    pub text_color: Vec4<f32>,    // Text label color (from theme)
+    pub text_bg_color: Vec4<f32>, // Text background color (from theme)
 }
 
 impl Default for ButtonGroupStyle {
@@ -44,6 +46,8 @@ impl Default for ButtonGroupStyle {
             radius_px: 4.0,
             border_px: 1.0,
             layer: 10,
+            text_color: Vec4::new(0.9, 0.9, 0.95, 1.0),
+            text_bg_color: Vec4::new(0.0, 0.0, 0.0, 0.85),
         }
     }
 }
@@ -60,6 +64,9 @@ pub struct ButtonGroup {
     pub text_color: Vec4<f32>, // Color for text labels
     pub text_size: f32,      // Font size for text labels
     pub text_gap: f32,       // Gap between button and text label
+    pub text_background: bool, // Whether to draw semi-transparent background behind text labels
+    pub text_background_color: Vec4<f32>, // Background color for text labels
+    pub text_background_padding: f32, // Padding around text background
     pub active_index: usize, // Currently active button (0-based)
     active_pointer: Option<u32>,
     hover_index: Option<usize>,
@@ -69,6 +76,8 @@ pub struct ButtonGroup {
 
 impl ButtonGroup {
     pub fn new(name: impl Into<String>, style: ButtonGroupStyle) -> Self {
+        let text_color = style.text_color;
+        let text_background_color = style.text_bg_color;
         Self {
             id: String::new(),
             name: name.into(),
@@ -77,9 +86,12 @@ impl ButtonGroup {
             labels: Vec::new(),
             textures: Vec::new(),
             text_labels: Vec::new(),
-            text_color: Vec4::new(0.8, 0.8, 0.85, 1.0),
+            text_color,
             text_size: 11.0,
             text_gap: 2.0,
+            text_background: true,
+            text_background_color,
+            text_background_padding: 3.0,
             active_index: 0,
             active_pointer: None,
             hover_index: None,
@@ -124,6 +136,21 @@ impl ButtonGroup {
 
     pub fn with_text_gap(mut self, gap: f32) -> Self {
         self.text_gap = gap;
+        self
+    }
+
+    pub fn with_text_background(mut self, enabled: bool) -> Self {
+        self.text_background = enabled;
+        self
+    }
+
+    pub fn with_text_background_color(mut self, color: Vec4<f32>) -> Self {
+        self.text_background_color = color;
+        self
+    }
+
+    pub fn with_text_background_padding(mut self, padding: f32) -> Self {
+        self.text_background_padding = padding;
         self
     }
 
@@ -322,11 +349,30 @@ impl UiView for ButtonGroup {
 
             // Draw text label below button if available
             if let Some(text_label) = self.text_labels.get(index) {
+                // Draw optional semi-transparent background behind text
+                if self.text_background {
+                    // Background starts right after the button with text_gap, moved down by 1px
+                    let bg_x = btn_x;
+                    let bg_y = btn_y + btn_h + self.text_gap + 1.0;
+                    let bg_w = btn_w;
+                    let bg_h = self.text_size + self.text_background_padding * 2.0;
+
+                    ctx.push(Drawable::Rect {
+                        id: Uuid::new_v4(),
+                        rect: [bg_x, bg_y, bg_w, bg_h],
+                        fill: self.text_background_color,
+                        border: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                        radius_px: 4.0,
+                        border_px: 0.0,
+                        layer: self.style.layer + 2,
+                    });
+                }
+
                 // Rough approximation for text width
                 let approx_text_width = text_label.len() as f32 * self.text_size * 0.6;
                 let text_x = btn_x + (btn_w - approx_text_width) * 0.5;
-                // Position text below the button with configurable gap
-                let text_y = btn_y + btn_h + self.text_gap;
+                // Position text below the button with configurable gap, centered vertically in background
+                let text_y = btn_y + btn_h + self.text_gap + self.text_background_padding;
 
                 ctx.push(Drawable::Text {
                     id: Uuid::new_v4(),
@@ -334,7 +380,7 @@ impl UiView for ButtonGroup {
                     origin: [text_x, text_y],
                     px_size: self.text_size,
                     color: self.text_color,
-                    layer: self.style.layer + 2,
+                    layer: self.style.layer + 3,
                 });
             }
         }
