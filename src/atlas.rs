@@ -104,6 +104,19 @@ impl SharedAtlas {
         guard.tiles_index_map.get(id).copied()
     }
 
+    /// Get the raw tile data (width, height, and first frame RGBA pixels)
+    pub fn get_tile_data(&self, id: Uuid) -> Option<(u32, u32, Vec<u8>)> {
+        let guard = self.inner.lock().unwrap();
+        guard.tiles_map.get(&id).map(|tile| {
+            let frame_data = if tile.frames.is_empty() {
+                vec![]
+            } else {
+                tile.frames[0].clone()
+            };
+            (tile.w, tile.h, frame_data)
+        })
+    }
+
     pub fn gpu_tile_tables(&self) -> AtlasGpuTables {
         let guard = self.inner.lock().unwrap();
         let mut metas: Vec<AtlasTileMeta> = Vec::new();

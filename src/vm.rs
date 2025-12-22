@@ -661,6 +661,11 @@ impl VM {
         self.activity_logging = enabled;
     }
 
+    /// Get tile data for creating tinted copies
+    pub fn get_tile_data(&self, id: uuid::Uuid) -> Option<(u32, u32, Vec<u8>)> {
+        self.shared_atlas.get_tile_data(id)
+    }
+
     fn log_layer<S: AsRef<str>>(&self, msg: S) {
         if self.activity_logging {
             println!("[SceneVM][Layer {}] {}", self.layer_index, msg.as_ref());

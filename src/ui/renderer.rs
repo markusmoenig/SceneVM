@@ -58,12 +58,18 @@ impl UiRenderer {
                     rect,
                     uv,
                     layer,
+                    tint,
                     ..
                 } => {
                     let verts = quad_verts(*rect);
+
+                    // Create a tile with tint stored in material texture
+                    // The material will store RGBA tint color that the shader can read
+                    let tinted_tile_id = self.ensure_tinted_tile(vm, *tile_id, *tint);
+
                     let poly = Poly2D::poly(
                         self.alloc_id(),
-                        *tile_id,
+                        tinted_tile_id,
                         verts,
                         uv.to_vec(),
                         vec![(0, 1, 2), (0, 2, 3)],
@@ -141,6 +147,53 @@ impl UiRenderer {
         }
         self.styles.build_if_dirty(vm);
         self.text.build_if_dirty(vm);
+    }
+
+    /// Create a tinted version of a tile by copying and tinting the pixel data
+    fn ensure_tinted_tile(
+        &mut self,
+        vm: &mut VM,
+        base_tile_id: uuid::Uuid,
+        tint: vek::Vec4<f32>,
+    ) -> uuid::Uuid {
+        // If tint is white (no tint), just return the original tile
+        if (tint.x - 1.0).abs() < 0.001
+            && (tint.y - 1.0).abs() < 0.001
+            && (tint.z - 1.0).abs() < 0.001
+            && (tint.w - 1.0).abs() < 0.001
+        {
+            return base_tile_id;
+        }
+
+        // Get the original tile data
+        let tile_data = vm.get_tile_data(base_tile_id);
+        if tile_data.is_none() {
+            return base_tile_id;
+        }
+
+        let (width, height, rgba_data) = tile_data.unwrap();
+
+        // Create tinted copy by multiplying each pixel by the tint color
+        let mut tinted_data = rgba_data.clone();
+        for i in (0..tinted_data.len()).step_by(4) {
+            tinted_data[i] = ((tinted_data[i] as f32 / 255.0 * tint.x) * 255.0) as u8; // R
+            tinted_data[i + 1] = ((tinted_data[i + 1] as f32 / 255.0 * tint.y) * 255.0) as u8; // G
+            tinted_data[i + 2] = ((tinted_data[i + 2] as f32 / 255.0 * tint.z) * 255.0) as u8; // B
+            tinted_data[i + 3] = ((tinted_data[i + 3] as f32 / 255.0 * tint.w) * 255.0) as u8; // A
+        }
+
+        // Add the tinted tile
+        let tinted_tile_id = uuid::Uuid::new_v4();
+        vm.execute(Atom::AddTile {
+            id: tinted_tile_id,
+            width,
+            height,
+            frames: vec![tinted_data],
+            material_frames: Some(vec![super::create_tile_material(width, height)]),
+        });
+        vm.execute(Atom::BuildAtlas);
+
+        tinted_tile_id
     }
 }
 

@@ -109,6 +109,13 @@ impl Theme {
 
     /// Create a button style with the given rect
     pub fn button(&self, rect: [f32; 4]) -> ButtonStyle {
+        // Nuanced icon tint - not pure white/black
+        let icon_tint = if self.name == "Dark" {
+            Vec4::new(0.9, 0.9, 0.95, 1.0) // Light gray with blue hint for dark theme
+        } else {
+            Vec4::new(0.2, 0.2, 0.2, 1.0) // Dark gray for light theme
+        };
+
         ButtonStyle {
             rect,
             fill: self.surface_variant,
@@ -119,6 +126,7 @@ impl Theme {
             border_px: self.border_px,
             layer: 15, // Higher layer than toolbar to ensure buttons draw on top
             text_color: self.text,
+            icon_tint,
         }
     }
 

@@ -33,6 +33,7 @@ pub struct ButtonStyle {
     pub border_px: f32, // Border width in pixels
     pub layer: i32,
     pub text_color: Vec4<f32>, // Text color (from theme)
+    pub icon_tint: Vec4<f32>,  // Tint color for icon tiles (from theme)
 }
 
 impl ButtonStyle {
@@ -53,10 +54,12 @@ impl Default for ButtonStyle {
             border_px: 0.0,
             layer: 10,
             text_color: Vec4::new(0.9, 0.9, 0.95, 1.0),
+            icon_tint: Vec4::new(1.0, 1.0, 1.0, 1.0), // White = no tint
         }
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonState {
     Idle,
@@ -74,6 +77,7 @@ pub struct Button {
     pub tile_id: Option<Uuid>, // Optional texture tile for normal state
     pub pressed_tile_id: Option<Uuid>, // Optional texture tile for pressed/selected state
     pub tile_offset: f32,      // Offset in pixels for the tile inside the button
+    pub tile_tint: Vec4<f32>,  // Tint color for the tile (default white = no tint)
     toggled: bool,
     state: ButtonState,
     active_pointer: Option<u32>,
@@ -84,6 +88,7 @@ pub struct Button {
 
 impl Button {
     pub fn new(style: ButtonStyle) -> Self {
+        let icon_tint = style.icon_tint;
         Self {
             id: String::new(),
             render_id: Uuid::new_v4(),
@@ -92,6 +97,7 @@ impl Button {
             tile_id: None,
             pressed_tile_id: None,
             tile_offset: 0.0,
+            tile_tint: icon_tint, // Use tint from style
             toggled: false,
             state: ButtonState::Idle,
             active_pointer: None,
@@ -145,6 +151,11 @@ impl Button {
 
     pub fn with_tile_offset(mut self, offset: f32) -> Self {
         self.tile_offset = offset;
+        self
+    }
+
+    pub fn with_tile_tint(mut self, tint: Vec4<f32>) -> Self {
+        self.tile_tint = tint;
         self
     }
 
@@ -209,16 +220,6 @@ impl UiView for Button {
             ButtonState::Pressed | ButtonState::On => {
                 (self.style.pressed_fill, self.style.pressed_border)
             }
-            ButtonState::Hover => {
-                // Very bright hover feedback - add brightness instead of multiply
-                let hover_fill = Vec4::new(
-                    (self.style.fill.x + 0.15).min(1.0),
-                    (self.style.fill.y + 0.15).min(1.0),
-                    (self.style.fill.z + 0.15).min(1.0),
-                    self.style.fill.w,
-                );
-                (hover_fill, self.style.border)
-            }
             _ => (self.style.fill, self.style.border),
         };
 
@@ -253,7 +254,7 @@ impl UiView for Button {
                 rect: tile_rect,
                 uv: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 layer: self.style.layer + 1,
-                tint: Vec4::new(1.0, 1.0, 1.0, 1.0),
+                tint: self.tile_tint,
             });
         }
     }
@@ -273,11 +274,7 @@ impl UiView for Button {
                 if was_active {
                     match self.kind {
                         ButtonKind::Momentary => {
-                            let mut outcome = self.set_state(if inside {
-                                ButtonState::Hover
-                            } else {
-                                ButtonState::Idle
-                            });
+                            let mut outcome = self.set_state(ButtonState::Idle);
                             if inside {
                                 // Toggle popup if button has one
                                 if self.popup_content.is_some() {
@@ -295,7 +292,7 @@ impl UiView for Button {
                                 let mut outcome = self.set_state(if self.toggled {
                                     ButtonState::On
                                 } else {
-                                    ButtonState::Hover
+                                    ButtonState::Idle
                                 });
                                 outcome.merge(UiEventOutcome::with_action(
                                     UiAction::ButtonToggled(self.id.clone(), self.toggled),
@@ -324,17 +321,8 @@ impl UiView for Button {
                             ButtonState::Idle
                         });
                     }
-                } else {
-                    if self.kind == ButtonKind::Toggle && self.state == ButtonState::On {
-                        // Keep toggle-on state until the next click changes it.
-                        return UiEventOutcome::none();
-                    }
-                    return self.set_state(if inside {
-                        ButtonState::Hover
-                    } else {
-                        ButtonState::Idle
-                    });
                 }
+                // No hover state - don't change appearance on pointer move when not pressed
             }
             _ => {}
         }

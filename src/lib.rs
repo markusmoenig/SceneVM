@@ -72,6 +72,7 @@ pub mod prelude {
         },
     };
 
+    pub use rustc_hash::{FxHashMap, FxHashSet};
     pub use vek::{Mat3, Mat4, Vec2, Vec3, Vec4};
 }
 
