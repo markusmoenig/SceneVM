@@ -457,30 +457,55 @@ fn trace_unified(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> UnifiedH
 }
 
 // ===== Unified Shadow Trace (lightweight, no full materials for performance) =====
+// Traces and finds the first OPAQUE surface, skipping very transparent ones
 fn trace_shadow_unified(ro: vec3<f32>, rd: vec3<f32>, tmax: f32) -> f32 {
-    let geo_hit = sv_trace_grid(ro, rd, 0.0, tmax);
-    let billboard_hit = trace_billboards(ro, rd, tmax);
+    var current_ro = ro;
+    var remaining_dist = tmax;
+    let bias = 0.001;
 
-    let use_billboard = billboard_hit.hit && (!geo_hit.hit || billboard_hit.t < geo_hit.t);
+    // Search up to 4 times for an opaque surface (skipping transparent billboards)
+    // 4 iterations is a good balance between correctness and performance
+    for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+        let geo_hit = sv_trace_grid(current_ro, rd, 0.0, remaining_dist);
+        let billboard_hit = trace_billboards(current_ro, rd, remaining_dist);
 
-    if (use_billboard) {
-        // Sample billboard alpha and material opacity
-        let albedo = sample_billboard(billboard_hit);
-        let mat_data = sample_billboard_material(billboard_hit);
-        let mat = unpack_material(mat_data);
-        return mat.opacity * albedo.a;
-    } else if (geo_hit.hit) {
-        // Sample geometry material opacity
-        let tri = geo_hit.tri;
-        let i0 = indices3d.data[3u * tri + 0u];
-        let i1 = indices3d.data[3u * tri + 1u];
-        let i2 = indices3d.data[3u * tri + 2u];
-        let mat_data = sv_tri_sample_rmoe_blended(i0, i1, i2, geo_hit.u, geo_hit.v);
-        let mat = unpack_material(mat_data);
-        return mat.opacity;
+        let use_billboard = billboard_hit.hit && (!geo_hit.hit || billboard_hit.t < geo_hit.t);
+
+        if (use_billboard) {
+            // Sample billboard alpha and material opacity
+            let albedo = sample_billboard(billboard_hit);
+            let mat_data = sample_billboard_material(billboard_hit);
+            let mat = unpack_material(mat_data);
+            let opacity = mat.opacity * albedo.a;
+
+            // If mostly opaque, return it. Otherwise skip and continue searching
+            if (opacity > 0.5) {
+                return opacity;
+            }
+
+            // Skip this transparent billboard and continue
+            current_ro = current_ro + rd * (billboard_hit.t + bias);
+            remaining_dist = remaining_dist - billboard_hit.t - bias;
+
+            if (remaining_dist <= 0.0) {
+                return 0.0;
+            }
+        } else if (geo_hit.hit) {
+            // Sample geometry material opacity
+            let tri = geo_hit.tri;
+            let i0 = indices3d.data[3u * tri + 0u];
+            let i1 = indices3d.data[3u * tri + 1u];
+            let i2 = indices3d.data[3u * tri + 2u];
+            let mat_data = sv_tri_sample_rmoe_blended(i0, i1, i2, geo_hit.u, geo_hit.v);
+            let mat = unpack_material(mat_data);
+            return mat.opacity;
+        } else {
+            // No more hits
+            return 0.0;
+        }
     }
 
-    return 0.0; // No hit = no shadow
+    return 0.0; // No opaque surface found after 4 tries
 }
 
 // ===== Ray-traced shadows with opacity support =====
@@ -494,8 +519,9 @@ fn trace_shadow(P: vec3<f32>, L: vec3<f32>, max_dist: f32) -> f32 {
     // Fast path: Binary shadow test
     if (max_shadow_steps == 0u) {
         let opacity = trace_shadow_unified(P + L * shadow_bias, L, max_dist - min_light_dist);
-        if (opacity > 0.99) {
-            return 0.0; // Fully opaque shadow
+        // Only cast shadow if mostly opaque (ignore transparent billboards)
+        if (opacity > 0.5) {
+            return 0.0; // Shadow
         }
         return 1.0; // lit
     }
@@ -508,26 +534,31 @@ fn trace_shadow(P: vec3<f32>, L: vec3<f32>, max_dist: f32) -> f32 {
     for (var step: u32 = 0u; step < max_shadow_steps; step = step + 1u) {
         let opacity = trace_shadow_unified(current_pos, L, remaining_dist);
 
-        if (opacity < 0.01) {
-            break; // No more occlusion
-        }
-
         // Get the actual hit distance to advance the ray
         let geo_hit = sv_trace_grid(current_pos, L, 0.0, remaining_dist);
         let billboard_hit = trace_billboards(current_pos, L, remaining_dist);
         let use_billboard = billboard_hit.hit && (!geo_hit.hit || billboard_hit.t < geo_hit.t);
         let hit_t = select(geo_hit.t, billboard_hit.t, use_billboard);
 
+        // No hit found - fully lit
+        if (!geo_hit.hit && !billboard_hit.hit) {
+            break;
+        }
+
         if (remaining_dist - hit_t < min_light_dist) {
             break;
         }
 
-        transparency *= (1.0 - opacity);
+        // Only accumulate opacity from surfaces that are somewhat opaque
+        if (opacity > 0.1) {
+            transparency *= (1.0 - opacity);
 
-        if (transparency < 0.01) {
-            return 0.0;
+            if (transparency < 0.01) {
+                return 0.0;
+            }
         }
 
+        // Always advance the ray past the current hit (whether transparent or not)
         current_pos = current_pos + L * (hit_t + shadow_bias);
         remaining_dist = remaining_dist - hit_t - shadow_bias;
 
@@ -564,7 +595,8 @@ fn compute_ao(P: vec3<f32>, N: vec3<f32>, seed: vec3<f32>) -> f32 {
 
         let opacity = trace_shadow_unified(P + N * 0.001, world_dir, ao_radius);
 
-        if (opacity > 0.01) {
+        // Only count mostly opaque surfaces for AO (skip transparent billboards/glass)
+        if (opacity > 0.5) {
             // Get hit distance for distance-based falloff
             let geo_hit = sv_trace_grid(P + N * 0.001, world_dir, 0.0, ao_radius);
             let billboard_hit = trace_billboards(P + N * 0.001, world_dir, ao_radius);
