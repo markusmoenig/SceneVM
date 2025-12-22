@@ -81,8 +81,8 @@ pub use crate::ui::{
     Alignment, Button, ButtonGroup, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas, Drawable,
     HAlign, HStack, Image, ImageStyle, Label, LabelRect, NodeId, ParamList, ParamListStyle,
     PopupAlignment, Slider, SliderStyle, TextButton, Toolbar, ToolbarOrientation, ToolbarSeparator,
-    ToolbarStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView, VAlign, VStack, ViewContext,
-    Workspace,
+    ToolbarStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView, UndoCommand, UndoStack,
+    VAlign, VStack, ViewContext, Workspace,
 };
 pub use crate::{
     app_trait::{SceneVMApp, SceneVMRenderCtx},

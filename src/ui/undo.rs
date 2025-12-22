@@ -3,7 +3,7 @@ use crate::SceneVM;
 /// Trait for undoable/redoable commands
 ///
 /// Implement this trait for your application-specific commands.
-/// The generic parameter `T` is your application context (e.g., your main app struct).
+/// The generic parameter `T` is your main application context.
 ///
 /// # Example
 /// ```ignore
@@ -25,76 +25,55 @@ use crate::SceneVM;
 /// }
 /// ```
 pub trait UndoCommand<T>: std::fmt::Debug {
-    /// Execute the command
-    /// `is_new` is true when the command is first executed, false when redoing
-    /// This prevents re-applying UI actions that were just performed
     fn execute(&mut self, vm: &mut SceneVM, context: &mut T, is_new: bool);
-
-    /// Reverse the command (for undo)
     fn undo(&mut self, vm: &mut SceneVM, context: &mut T);
-
-    /// Command description for UI display (e.g., "Change Slider" or "Select Tool")
     fn description(&self) -> &str;
 }
 
 /// Undo/Redo stack manager
-///
-/// Generic over the application context type `T`.
-/// Use this to manage undo/redo functionality in your application.
-///
-/// # Example
-/// ```ignore
-/// let mut undo_stack = UndoStack::<MyApp>::new(100);
-///
-/// // Execute a command
-/// let cmd = Box::new(MyCommand::new(/* ... */));
-/// undo_stack.execute(cmd, &mut my_app);
-///
-/// // Undo
-/// undo_stack.undo(&mut my_app);
-///
-/// // Redo
-/// undo_stack.redo(&mut my_app);
-/// ```
 pub struct UndoStack<T> {
     commands: Vec<Box<dyn UndoCommand<T>>>,
     current_index: usize, // Points to the next command to redo
     max_size: usize,
-    dirty: bool,
+    saved_index: Option<usize>,
 }
 
 impl<T> UndoStack<T> {
-    /// Create a new undo stack with a maximum size
     pub fn new(max_size: usize) -> Self {
         Self {
             commands: Vec::new(),
             current_index: 0,
             max_size,
-            dirty: false,
+            saved_index: Some(0),
         }
     }
 
-    /// Add a new command and execute it
     pub fn execute(&mut self, mut cmd: Box<dyn UndoCommand<T>>, vm: &mut SceneVM, context: &mut T) {
-        // Truncate any commands after current position (user did undo then new action)
         self.commands.truncate(self.current_index);
+        if let Some(saved) = self.saved_index {
+            if saved > self.current_index {
+                self.saved_index = None;
+            }
+        }
 
-        // Execute the command (is_new = true, don't re-apply the UI action)
         cmd.execute(vm, context, true);
-
-        // Add to stack
         self.commands.push(cmd);
         self.current_index += 1;
-        self.dirty = true;
+        self.validate_saved_index();
 
-        // Enforce max size
         if self.commands.len() > self.max_size {
             self.commands.remove(0);
             self.current_index = self.current_index.saturating_sub(1);
+            if let Some(saved) = self.saved_index {
+                if saved > 0 {
+                    self.saved_index = Some(saved.saturating_sub(1));
+                } else {
+                    self.saved_index = None;
+                }
+            }
         }
     }
 
-    /// Undo the last command
     pub fn undo(&mut self, vm: &mut SceneVM, context: &mut T) -> bool {
         if self.current_index == 0 {
             return false;
@@ -102,41 +81,35 @@ impl<T> UndoStack<T> {
 
         self.current_index -= 1;
         self.commands[self.current_index].undo(vm, context);
-        self.dirty = true;
+        self.validate_saved_index();
         true
     }
 
-    /// Redo the next command
     pub fn redo(&mut self, vm: &mut SceneVM, context: &mut T) -> bool {
         if self.current_index >= self.commands.len() {
             return false;
         }
 
-        // is_new = false for redo (apply the UI action)
         self.commands[self.current_index].execute(vm, context, false);
         self.current_index += 1;
-        self.dirty = true;
+        self.validate_saved_index();
         true
     }
 
-    /// Check if undo is available
     pub fn can_undo(&self) -> bool {
         self.current_index > 0
     }
 
-    /// Check if redo is available
     pub fn can_redo(&self) -> bool {
         self.current_index < self.commands.len()
     }
 
-    /// Clear the entire undo stack
     pub fn clear(&mut self) {
         self.commands.clear();
         self.current_index = 0;
-        self.dirty = false;
+        self.saved_index = Some(0);
     }
 
-    /// Get description of next undo action
     pub fn undo_description(&self) -> Option<&str> {
         if self.can_undo() {
             Some(self.commands[self.current_index - 1].description())
@@ -145,7 +118,6 @@ impl<T> UndoStack<T> {
         }
     }
 
-    /// Get description of next redo action
     pub fn redo_description(&self) -> Option<&str> {
         if self.can_redo() {
             Some(self.commands[self.current_index].description())
@@ -154,23 +126,30 @@ impl<T> UndoStack<T> {
         }
     }
 
-    /// Check if stack has unsaved changes
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        match self.saved_index {
+            Some(saved) => saved != self.current_index,
+            None => true,
+        }
     }
 
-    /// Mark stack as saved (clear dirty flag)
     pub fn mark_saved(&mut self) {
-        self.dirty = false;
+        self.saved_index = Some(self.current_index);
     }
 
-    /// Get number of commands in stack
     pub fn len(&self) -> usize {
         self.commands.len()
     }
 
-    /// Check if stack is empty
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
+    }
+
+    fn validate_saved_index(&mut self) {
+        if let Some(saved) = self.saved_index {
+            if saved > self.commands.len() {
+                self.saved_index = None;
+            }
+        }
     }
 }
