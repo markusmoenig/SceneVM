@@ -298,9 +298,9 @@ fn sample_billboard_material(hit: BillboardHit) -> vec4<f32> {
     return material;
 }
 
-/// Trace all billboards and return the closest hit
-/// This is modular to allow future expansion for different billboard types
-fn trace_billboards(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> BillboardHit {
+/// Trace all billboards and return the closest hit (with optional skip list)
+/// skip_mask: bitmask of billboard indices to skip (max 32 billboards can be skipped)
+fn trace_billboards_skip(ro: vec3<f32>, rd: vec3<f32>, max_t: f32, skip_mask: u32) -> BillboardHit {
     var closest = BillboardHit(false, max_t, vec2<f32>(0.0), 0u, 0u, 0u, 0u);
 
     let billboard_count = scene_data.header.billboard_cmd_count;
@@ -309,6 +309,11 @@ fn trace_billboards(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> BillboardHit {
     }
 
     for (var i: u32 = 0u; i < billboard_count; i = i + 1u) {
+        // Skip if this billboard index is in the skip mask
+        if (i < 32u && ((skip_mask >> i) & 1u) != 0u) {
+            continue;
+        }
+
         let cmd = sd_billboard_cmd(i);
 
         // Extract billboard parameters
@@ -329,6 +334,12 @@ fn trace_billboards(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> BillboardHit {
     }
 
     return closest;
+}
+
+/// Trace all billboards and return the closest hit
+/// This is modular to allow future expansion for different billboard types
+fn trace_billboards(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> BillboardHit {
+    return trace_billboards_skip(ro, rd, max_t, 0u);
 }
 
 // ===== Unified Trace Function =====
@@ -461,35 +472,56 @@ fn trace_unified(ro: vec3<f32>, rd: vec3<f32>, tmin: f32, tmax: f32) -> UnifiedH
 fn trace_shadow_unified(ro: vec3<f32>, rd: vec3<f32>, tmax: f32) -> f32 {
     var current_ro = ro;
     var remaining_dist = tmax;
-    let bias = 0.001;
 
-    // Search up to 4 times for an opaque surface (skipping transparent billboards)
-    // 4 iterations is a good balance between correctness and performance
-    for (var i: u32 = 0u; i < 4u; i = i + 1u) {
+    // Search up to 4 times for an opaque surface (skipping transparent billboard pixels)
+    for (var iter: u32 = 0u; iter < 4u; iter = iter + 1u) {
         let geo_hit = sv_trace_grid(current_ro, rd, 0.0, remaining_dist);
         let billboard_hit = trace_billboards(current_ro, rd, remaining_dist);
 
         let use_billboard = billboard_hit.hit && (!geo_hit.hit || billboard_hit.t < geo_hit.t);
 
         if (use_billboard) {
-            // Sample billboard alpha and material opacity
-            let albedo = sample_billboard(billboard_hit);
-            let mat_data = sample_billboard_material(billboard_hit);
-            let mat = unpack_material(mat_data);
-            let opacity = mat.opacity * albedo.a;
+            // For billboards, we need to check all billboards at this distance
+            // because multiple billboards might be overlapping at the same position
+            let hit_t = billboard_hit.t;
+            let threshold = 0.001; // Distance threshold for "same position"
+            var max_opacity = 0.0;
 
-            // If mostly opaque, return it. Otherwise skip and continue searching
-            if (opacity > 0.5) {
-                return opacity;
+            let billboard_count = scene_data.header.billboard_cmd_count;
+            for (var i: u32 = 0u; i < billboard_count; i = i + 1u) {
+                let cmd = sd_billboard_cmd(i);
+                let center = cmd.center.xyz;
+                let width = cmd.center.w;
+                let axis_right = cmd.axis_right.xyz;
+                let height = cmd.axis_right.w;
+                let axis_up = cmd.axis_up.xyz;
+                let repeat_mode = u32(cmd.axis_up.w);
+                let tile_index = cmd.params.x;
+
+                let hit = intersect_billboard(current_ro, rd, center, axis_right, axis_up, tile_index, i, repeat_mode, width, height);
+
+                // Check if this billboard is at approximately the same distance
+                if (hit.hit && abs(hit.t - hit_t) < threshold) {
+                    let albedo = sample_billboard(hit);
+                    let mat_data = sample_billboard_material(hit);
+                    let mat = unpack_material(mat_data);
+                    let opacity = mat.opacity * albedo.a;
+
+                    // Keep track of the maximum opacity at this position
+                    max_opacity = max(max_opacity, opacity);
+                }
             }
 
-            // Skip this transparent billboard and continue
-            current_ro = current_ro + rd * (billboard_hit.t + bias);
-            remaining_dist = remaining_dist - billboard_hit.t - bias;
-
-            if (remaining_dist <= 0.0) {
-                return 0.0;
+            // If any billboard at this position has a mostly opaque pixel, return it
+            if (max_opacity > 0.5) {
+                return max_opacity;
             }
+
+            // All billboards at this position have transparent pixels at their UVs
+            // Advance past them to check what's behind
+            let epsilon = 0.001;
+            current_ro = current_ro + rd * (hit_t + epsilon);
+            remaining_dist = max(remaining_dist - hit_t - epsilon, 0.0);
         } else if (geo_hit.hit) {
             // Sample geometry material opacity
             let tri = geo_hit.tri;
@@ -505,7 +537,7 @@ fn trace_shadow_unified(ro: vec3<f32>, rd: vec3<f32>, tmax: f32) -> f32 {
         }
     }
 
-    return 0.0; // No opaque surface found after 4 tries
+    return 0.0;
 }
 
 // ===== Ray-traced shadows with opacity support =====
