@@ -12,6 +12,7 @@ pub struct UiRenderer {
     styles: StyleRegistry,
     text: TextCache,
     next_id: u32,
+    tinted_tiles_cache: std::collections::HashMap<(uuid::Uuid, [u8; 16]), uuid::Uuid>, // (base_tile_id, tint_bytes) -> tinted_tile_id
 }
 
 impl UiRenderer {
@@ -21,6 +22,7 @@ impl UiRenderer {
             styles: StyleRegistry::new(),
             text: TextCache::new(font_bytes),
             next_id: 0,
+            tinted_tiles_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -165,6 +167,20 @@ impl UiRenderer {
             return base_tile_id;
         }
 
+        // Create a cache key from the tint color bytes
+        let mut tint_bytes = [0u8; 16];
+        tint_bytes[0..4].copy_from_slice(&tint.x.to_le_bytes());
+        tint_bytes[4..8].copy_from_slice(&tint.y.to_le_bytes());
+        tint_bytes[8..12].copy_from_slice(&tint.z.to_le_bytes());
+        tint_bytes[12..16].copy_from_slice(&tint.w.to_le_bytes());
+
+        let cache_key = (base_tile_id, tint_bytes);
+
+        // Check if we already created this tinted tile
+        if let Some(&cached_id) = self.tinted_tiles_cache.get(&cache_key) {
+            return cached_id;
+        }
+
         // Get the original tile data
         let tile_data = vm.get_tile_data(base_tile_id);
         if tile_data.is_none() {
@@ -182,7 +198,7 @@ impl UiRenderer {
             tinted_data[i + 3] = ((tinted_data[i + 3] as f32 / 255.0 * tint.w) * 255.0) as u8; // A
         }
 
-        // Add the tinted tile
+        // Add the tinted tile with a consistent ID
         let tinted_tile_id = uuid::Uuid::new_v4();
         vm.execute(Atom::AddTile {
             id: tinted_tile_id,
@@ -192,6 +208,9 @@ impl UiRenderer {
             material_frames: Some(vec![super::create_tile_material(width, height)]),
         });
         vm.execute(Atom::BuildAtlas);
+
+        // Cache the tinted tile ID
+        self.tinted_tiles_cache.insert(cache_key, tinted_tile_id);
 
         tinted_tile_id
     }
