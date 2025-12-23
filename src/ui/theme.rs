@@ -225,6 +225,9 @@ impl Theme {
             fill: self.surface_variant,
             border: self.border,
             hover_fill: self.primary_hover,
+            // Panel uses a deeper shade and a stronger border to stand out against ParamList
+            panel_fill: self.surface, // slightly darker than surface_variant
+            panel_border: self.border,
             text_color: self.text,
             text_size: 14.0,
             radius_px: self.radius_px,

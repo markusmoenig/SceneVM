@@ -10,14 +10,16 @@ use crate::ui::{
 /// Style for the dropdown list widget
 #[derive(Debug, Clone)]
 pub struct DropdownListStyle {
-    pub rect: [f32; 4],        // x, y, w, h for the button
-    pub fill: Vec4<f32>,       // Background color
-    pub border: Vec4<f32>,     // Border color
-    pub hover_fill: Vec4<f32>, // Hover background color
-    pub text_color: Vec4<f32>, // Text color
-    pub text_size: f32,        // Font size
-    pub radius_px: f32,        // Corner radius
-    pub border_px: f32,        // Border width
+    pub rect: [f32; 4],          // x, y, w, h for the button
+    pub fill: Vec4<f32>,         // Background color
+    pub border: Vec4<f32>,       // Border color
+    pub hover_fill: Vec4<f32>,   // Hover background color
+    pub panel_fill: Vec4<f32>,   // Background for the open dropdown panel
+    pub panel_border: Vec4<f32>, // Border for the open dropdown panel
+    pub text_color: Vec4<f32>,   // Text color
+    pub text_size: f32,          // Font size
+    pub radius_px: f32,          // Corner radius
+    pub border_px: f32,          // Border width
     pub layer: i32,
     pub item_height: f32,         // Height of each dropdown item
     pub max_visible_items: usize, // Maximum items to show before scrolling
@@ -30,6 +32,8 @@ impl Default for DropdownListStyle {
             fill: Vec4::new(0.15, 0.15, 0.18, 1.0),
             border: Vec4::new(0.25, 0.25, 0.28, 1.0),
             hover_fill: Vec4::new(0.25, 0.25, 0.28, 1.0),
+            panel_fill: Vec4::new(0.1, 0.1, 0.12, 1.0),
+            panel_border: Vec4::new(0.35, 0.35, 0.4, 1.0),
             text_color: Vec4::new(0.9, 0.9, 0.95, 1.0),
             text_size: 14.0,
             radius_px: 4.0,
@@ -198,8 +202,8 @@ impl UiView for DropdownList {
             ctx.push(Drawable::Rect {
                 id: Uuid::new_v4(),
                 rect: [dx, dy, dw, dh],
-                fill: self.style.fill,
-                border: self.style.border,
+                fill: self.style.panel_fill,
+                border: self.style.panel_border,
                 radius_px: self.style.radius_px,
                 border_px: self.style.border_px,
                 layer: self.style.layer + 10, // Higher layer so it appears on top
