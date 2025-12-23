@@ -14,6 +14,13 @@ pub trait SceneVMApp {
     fn target_fps(&self) -> Option<f32> {
         None
     }
+    
+    /// Called by the runner before init() to inform the app of its runtime mode
+    /// `is_native`: true = native wgpu runner (needs file buttons)
+    ///              false = platform wrapper (Xcode, uses document system)
+    fn set_native_mode(&mut self, _is_native: bool) {
+        // Override this to store the mode and conditionally show UI elements
+    }
     /// Get the current system theme preference (true = dark, false = light)
     /// Called before init() to determine initial theme
     #[cfg(feature = "ui")]

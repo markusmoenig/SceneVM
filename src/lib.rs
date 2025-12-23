@@ -1961,6 +1961,7 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
             apply_logical_scale(&mut new_vm, scale);
             let new_ctx = NativeRenderCtx::new(logical_size);
             app.set_scale(scale as f32);
+            app.set_native_mode(true); // Native wgpu runner
             app.init(&mut new_vm, logical_size);
             window = Some(win);
             vm = Some(new_vm);
