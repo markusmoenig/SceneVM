@@ -369,7 +369,7 @@ impl Workspace {
 
     /// Extract widget size from common widget types (fallback for non-Layoutable widgets)
     fn extract_widget_size(&self, node: &Node) -> [f32; 2] {
-        use crate::ui::{Button, ButtonGroup, Slider, Spacer, TextButton};
+        use crate::ui::{Button, ButtonGroup, DropdownList, Slider, Spacer, TextButton};
 
         // Try Button
         if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
@@ -382,6 +382,12 @@ impl Workspace {
             let width = button_group.calculate_width();
             let height = button_group.style.button_height;
             return [width, height];
+        }
+
+        // Try DropdownList
+        if let Some(dropdown) = node.view.as_any().downcast_ref::<DropdownList>() {
+            let [_x, _y, w, h] = dropdown.style.rect;
+            return [w, h];
         }
 
         // Try Slider
@@ -410,7 +416,7 @@ impl Workspace {
 
     /// Set widget rect for common widget types (fallback for non-Layoutable widgets)
     fn set_widget_rect(node: &mut Node, rect: [f32; 4]) {
-        use crate::ui::{Button, ButtonGroup, Slider, Spacer, TextButton};
+        use crate::ui::{Button, ButtonGroup, DropdownList, Slider, Spacer, TextButton};
 
         // Try Button
         if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
@@ -421,6 +427,12 @@ impl Workspace {
         // Try ButtonGroup
         if let Some(button_group) = node.view.as_any_mut().downcast_mut::<ButtonGroup>() {
             button_group.style.rect = rect;
+            return;
+        }
+
+        // Try DropdownList
+        if let Some(dropdown) = node.view.as_any_mut().downcast_mut::<DropdownList>() {
+            dropdown.style.rect = rect;
             return;
         }
 
@@ -643,7 +655,8 @@ impl Workspace {
     /// This updates the widget's rect while preserving its width and height.
     pub fn set_widget_pos(&mut self, id: &str, x: f32, y: f32) {
         use crate::ui::{
-            Button, ButtonGroup, Image, Label, ParamList, Slider, Spacer, TextButton, Toolbar,
+            Button, ButtonGroup, DropdownList, Image, Label, ParamList, Slider, Spacer, TextButton,
+            Toolbar,
         };
 
         // Find the node with matching view_id
@@ -665,6 +678,14 @@ impl Workspace {
             if let Some(button_group) = node.view.as_any_mut().downcast_mut::<ButtonGroup>() {
                 button_group.style.rect[0] = x;
                 button_group.style.rect[1] = y;
+                self.dirty = true;
+                return;
+            }
+
+            // Try DropdownList
+            if let Some(dropdown) = node.view.as_any_mut().downcast_mut::<DropdownList>() {
+                dropdown.style.rect[0] = x;
+                dropdown.style.rect[1] = y;
                 self.dirty = true;
                 return;
             }
@@ -818,9 +839,9 @@ impl Workspace {
                 let children = popup_node.children.clone();
                 let popup_x = param_list.style.rect[0];
                 let popup_y = param_list.style.rect[1];
-                let num_items = param_list.items.len();
+                let num_items = param_list.widget_count();
 
-                // First N children match param_list.items - get their rects from ParamList
+                // First N widget children match the ParamList's widget rows - get their rects from ParamList
                 let mut updates = Vec::new();
                 for (index, child_id) in children.iter().enumerate() {
                     if index < num_items {

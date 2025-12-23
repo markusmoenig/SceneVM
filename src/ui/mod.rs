@@ -31,7 +31,7 @@ pub use undo::{UndoCommand, UndoStack};
 pub use widgets::{
     Button, ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
     ColorWheel, DropdownList, DropdownListStyle, HAlign, Image, ImageStyle, Label, LabelRect,
-    ParamList, ParamListStyle, PopupAlignment, ProjectBrowser, ProjectBrowserItem,
+    ParamList, ParamListEntry, ParamListStyle, PopupAlignment, ProjectBrowser, ProjectBrowserItem,
     ProjectBrowserStyle, Slider, SliderStyle, Spacer, TextButton, Toolbar, ToolbarOrientation,
     ToolbarSeparator, ToolbarStyle, VAlign,
 };

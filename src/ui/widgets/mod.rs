@@ -23,7 +23,7 @@ pub use dropdown_list::{DropdownList, DropdownListStyle};
 pub use image::{Image, ImageStyle};
 pub use label::Label;
 pub use label_rect::LabelRect;
-pub use param_list::{ParamList, ParamListStyle};
+pub use param_list::{ParamList, ParamListEntry, ParamListStyle};
 pub use project_browser::{ProjectBrowser, ProjectBrowserItem, ProjectBrowserStyle};
 pub use slider::{Slider, SliderStyle};
 pub use spacer::Spacer;

@@ -18,6 +18,19 @@ pub struct ParamListStyle {
     pub label_color: Vec4<f32>, // Label text color (from theme)
 }
 
+/// A row in the parameter list. Either a normal widget row or a text separator.
+#[derive(Debug, Clone)]
+pub enum ParamListEntry {
+    Item {
+        label: String,
+        widget: NodeId,
+        reserve_value_space: bool,
+    },
+    Separator {
+        text: String,
+    },
+}
+
 /// A parameter list widget that displays labels on the left and widgets on the right.
 /// Arranges items vertically with automatic layout.
 #[derive(Debug, Clone)]
@@ -34,7 +47,7 @@ pub struct ParamList {
     pub label_width: f32,             // Width of the label column
     pub padding: f32,                 // Padding inside the list
     pub label_offset: f32,            // Horizontal offset for labels from left edge
-    pub items: Vec<(String, NodeId)>, // (label_text, widget_node_id)
+    pub entries: Vec<ParamListEntry>, // Ordered rows (widgets or separators)
     pub label_color: Vec4<f32>,       // Color for labels
     pub label_size: f32,              // Font size for labels
 }
@@ -59,7 +72,7 @@ impl ParamList {
             label_width: 100.0,
             padding: 8.0,
             label_offset: 8.0,
-            items: Vec::new(),
+            entries: Vec::new(),
             label_color,
             label_size: 14.0,
         }
@@ -139,14 +152,48 @@ impl ParamList {
 
     /// Add a parameter item (label and widget).
     pub fn add_item(&mut self, label: impl Into<String>, widget: NodeId) {
-        self.items.push((label.into(), widget));
+        self.add_item_with_value_space(label, widget, true);
+    }
+
+    /// Add a parameter item but skip reserving extra space on the right
+    /// (useful for widgets that use their entire width, like dropdowns).
+    pub fn add_item_full_width(&mut self, label: impl Into<String>, widget: NodeId) {
+        self.add_item_with_value_space(label, widget, false);
+    }
+
+    /// Add a parameter item with explicit control over value-text spacing.
+    pub fn add_item_with_value_space(
+        &mut self,
+        label: impl Into<String>,
+        widget: NodeId,
+        reserve_value_space: bool,
+    ) {
+        self.entries.push(ParamListEntry::Item {
+            label: label.into(),
+            widget,
+            reserve_value_space,
+        });
+        // Auto-update height based on content
+        self.update_height();
+    }
+
+    /// Add a text separator row (uses the title styling).
+    pub fn add_separator(&mut self, text: impl Into<String>) {
+        self.entries
+            .push(ParamListEntry::Separator { text: text.into() });
         // Auto-update height based on content
         self.update_height();
     }
 
     /// Get the children (widget NodeIds) for workspace integration.
     pub fn children(&self) -> Vec<NodeId> {
-        self.items.iter().map(|(_, node_id)| *node_id).collect()
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ParamListEntry::Item { widget, .. } => Some(*widget),
+                ParamListEntry::Separator { .. } => None,
+            })
+            .collect()
     }
 
     /// Update the ParamList height based on its content.
@@ -181,24 +228,39 @@ impl ParamList {
     /// Calculate layout positions for all widget children.
     /// Returns computed rects for each widget.
     pub fn calculate_layout(&self, child_sizes: &[[f32; 2]]) -> Vec<[f32; 4]> {
-        let [x, y, w, _] = self.style.rect;
-        let content_y_offset = self.content_offset_y();
+        let [x, _y, w, _] = self.style.rect;
         let mut rects = Vec::new();
 
-        for (index, &[child_width, _]) in child_sizes.iter().enumerate() {
+        let mut widget_index = 0;
+        for (row_index, entry) in self.entries.iter().enumerate() {
+            let ParamListEntry::Item {
+                reserve_value_space,
+                ..
+            } = entry
+            else {
+                continue;
+            };
+
+            let Some(&[child_width, _]) = child_sizes.get(widget_index) else {
+                break;
+            };
+
             let widget_x = x + self.padding + self.label_width;
-            let widget_y = y
-                + content_y_offset
-                + self.padding
-                + (index as f32 * (self.item_height + self.spacing));
+            let widget_y = self.row_y(row_index);
             let widget_h = self.item_height;
 
-            // Reserve space for value text that appears to the right of widgets (like sliders)
-            // Subtract ~40px to account for 8px gap + ~30px text + margin
-            let available_width = w - self.padding * 2.0 - self.label_width - 40.0;
-            let final_width = child_width.min(available_width);
+            // Reserve space on the right for value text if desired. Otherwise,
+            // use the full available width for the widget.
+            let value_space = if *reserve_value_space { 40.0 } else { 0.0 };
+            let available_width = w - self.padding * 2.0 - self.label_width - value_space;
+            let final_width = if *reserve_value_space {
+                child_width.min(available_width)
+            } else {
+                available_width
+            };
 
             rects.push([widget_x, widget_y, final_width, widget_h]);
+            widget_index += 1;
         }
 
         rects
@@ -206,16 +268,11 @@ impl ParamList {
 
     /// Get the position for a label at the given index.
     /// Returns [x, y] for the label origin.
-    pub fn get_label_position(&self, index: usize) -> [f32; 2] {
-        let [x, y, _, _] = self.style.rect;
-        let content_y_offset = self.content_offset_y();
+    pub fn get_label_position(&self, row_index: usize) -> [f32; 2] {
+        let [x, _, _, _] = self.style.rect;
         let label_x = x + self.padding + self.label_offset;
         // Calculate the center of the row
-        let row_center_y = y
-            + content_y_offset
-            + self.padding
-            + (index as f32 * (self.item_height + self.spacing))
-            + (self.item_height / 2.0);
+        let row_center_y = self.row_y(row_index) + (self.item_height / 2.0);
         // Position text so its vertical center aligns with row center
         // Text origin is at top-left, so we subtract half the font size
         let label_y = row_center_y - (self.label_size / 2.0);
@@ -225,31 +282,44 @@ impl ParamList {
     /// Get the rect for a widget at the given index.
     /// Returns [x, y, w, h] for the widget.
     pub fn get_widget_rect(&self, index: usize, widget_width: f32) -> [f32; 4] {
-        let [x, y, w, _] = self.style.rect;
-        let content_y_offset = self.content_offset_y();
+        let Some(row_index) = self.row_index_for_widget(index) else {
+            return [0.0, 0.0, 0.0, 0.0];
+        };
+
+        let [x, _y, w, _] = self.style.rect;
         let widget_x = x + self.padding + self.label_width;
-        let widget_y = y
-            + content_y_offset
-            + self.padding
-            + (index as f32 * (self.item_height + self.spacing));
+        let widget_y = self.row_y(row_index);
         let widget_h = self.item_height;
-        // Reserve space for value text that appears to the right of widgets (like sliders)
-        // Subtract ~40px to account for 8px gap + ~30px text + margin
-        let available_width = w - self.padding * 2.0 - self.label_width - 40.0;
-        let final_width = widget_width.min(available_width);
+        let value_space = self
+            .entry_at_row(row_index)
+            .map(|entry| match entry {
+                ParamListEntry::Item {
+                    reserve_value_space,
+                    ..
+                } if *reserve_value_space => 40.0,
+                _ => 0.0,
+            })
+            .unwrap_or(0.0);
+        let available_width = w - self.padding * 2.0 - self.label_width - value_space;
+        let final_width = if value_space > 0.0 {
+            widget_width.min(available_width)
+        } else {
+            available_width
+        };
         [widget_x, widget_y, final_width, widget_h]
     }
 
     /// Calculate the total height needed for all items.
     pub fn calculate_total_height(&self) -> f32 {
         let content_y_offset = self.content_offset_y();
-        if self.items.is_empty() {
+        let row_count = self.entries.len();
+        if row_count == 0 {
             content_y_offset + self.padding * 2.0
         } else {
             content_y_offset
                 + self.padding * 2.0
-                + (self.items.len() as f32 * self.item_height)
-                + ((self.items.len() - 1) as f32 * self.spacing)
+                + (row_count as f32 * self.item_height)
+                + ((row_count - 1) as f32 * self.spacing)
         }
     }
 
@@ -262,6 +332,40 @@ impl ParamList {
     /// Get the size of the ParamList [width, height].
     pub fn get_size(&self) -> [f32; 2] {
         [self.style.rect[2], self.style.rect[3]]
+    }
+
+    /// Number of widget rows (excludes separators).
+    pub fn widget_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e, ParamListEntry::Item { .. }))
+            .count()
+    }
+
+    /// Get the Y coordinate for the top of a row.
+    fn row_y(&self, row_index: usize) -> f32 {
+        let [_, y, _, _] = self.style.rect;
+        y + self.content_offset_y()
+            + self.padding
+            + (row_index as f32 * (self.item_height + self.spacing))
+    }
+
+    /// Map a widget index (only items) to its row index including separators.
+    fn row_index_for_widget(&self, widget_index: usize) -> Option<usize> {
+        let mut current_widget = 0;
+        for (row_index, entry) in self.entries.iter().enumerate() {
+            if let ParamListEntry::Item { .. } = entry {
+                if current_widget == widget_index {
+                    return Some(row_index);
+                }
+                current_widget += 1;
+            }
+        }
+        None
+    }
+
+    fn entry_at_row(&self, row_index: usize) -> Option<&ParamListEntry> {
+        self.entries.get(row_index)
     }
 }
 
@@ -307,16 +411,34 @@ impl UiView for ParamList {
         }
 
         // Draw labels
-        for (index, (label, _)) in self.items.iter().enumerate() {
-            let [label_x, label_y] = self.get_label_position(index);
-            ctx.push(Drawable::Text {
-                id: Uuid::new_v4(),
-                text: label.clone(),
-                origin: [label_x, label_y],
-                px_size: self.label_size,
-                color: self.label_color,
-                layer: self.style.layer + 1,
-            });
+        for (row_index, entry) in self.entries.iter().enumerate() {
+            match entry {
+                ParamListEntry::Item { label, .. } => {
+                    let [label_x, label_y] = self.get_label_position(row_index);
+                    ctx.push(Drawable::Text {
+                        id: Uuid::new_v4(),
+                        text: label.clone(),
+                        origin: [label_x, label_y],
+                        px_size: self.label_size,
+                        color: self.label_color,
+                        layer: self.style.layer + 1,
+                    });
+                }
+                ParamListEntry::Separator { text } => {
+                    let [x, _y, _w, _h] = self.style.rect;
+                    let separator_x = x + self.padding;
+                    let separator_y =
+                        self.row_y(row_index) + (self.item_height - self.title_size) * 0.5;
+                    ctx.push(Drawable::Text {
+                        id: Uuid::new_v4(),
+                        text: text.clone(),
+                        origin: [separator_x, separator_y],
+                        px_size: self.title_size,
+                        color: self.title_color,
+                        layer: self.style.layer + 1,
+                    });
+                }
+            }
         }
 
         // Note: Widgets are positioned automatically by the workspace layout system
