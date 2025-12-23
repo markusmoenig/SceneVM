@@ -1,6 +1,8 @@
 // pub mod app;
 #[cfg(feature = "ui")]
 pub mod app_event;
+#[cfg(all(feature = "ui", not(target_arch = "wasm32")))]
+pub mod native_dialogs;
 pub mod app_trait;
 pub mod atlas;
 pub mod bbox2d;
@@ -2050,18 +2052,46 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                                 // Handle app events after render
                                 #[cfg(feature = "ui")]
                                 {
+                                    use crate::app_event::AppEvent;
                                     let events = app.take_app_events();
                                     for event in events {
                                         match event {
-                                            crate::app_event::AppEvent::RequestUndo => {
+                                            AppEvent::RequestUndo => {
                                                 app.undo(vm_ref);
                                             }
-                                            crate::app_event::AppEvent::RequestRedo => {
+                                            AppEvent::RequestRedo => {
                                                 app.redo(vm_ref);
                                             }
+                                            AppEvent::RequestExport { format, filename } => {
+                                                
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                {
+                                                    crate::native_dialogs::handle_export(&mut app, vm_ref, &format, &filename);
+                                                }
+                                            }
+                                            AppEvent::RequestSave => {
+                                                
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                {
+                                                    crate::native_dialogs::handle_save(&mut app, vm_ref);
+                                                }
+                                            }
+                                            AppEvent::RequestOpen => {
+                                                
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                {
+                                                    crate::native_dialogs::handle_open(&mut app, vm_ref);
+                                                }
+                                            }
+                                            AppEvent::RequestImport { file_types } => {
+                                                
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                {
+                                                    crate::native_dialogs::handle_import(&mut app, vm_ref, &file_types);
+                                                }
+                                            }
                                             _ => {
-                                                // Other app events (Save, Open, etc.) would be handled here
-                                                // For now, just ignore them in the native runner
+                                                // Other events
                                             }
                                         }
                                     }

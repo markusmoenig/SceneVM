@@ -24,7 +24,7 @@ pub enum AppEvent {
 
     /// Request to export project in different format
     /// Host should: Show export dialog with format options
-    RequestExport { format: String },
+    RequestExport { format: String, filename: String },
 
     /// Request to import file(s) into current project
     /// Host should: Show import dialog for specified file types, read files, pass data to app

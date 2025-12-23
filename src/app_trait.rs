@@ -94,6 +94,14 @@ pub trait SceneVMApp {
         None
     }
 
+    /// Export data in the specified format
+    /// Called when user requests export (e.g., PNG, JPEG)
+    /// Returns exported data as bytes, or None if format not supported
+    #[cfg(feature = "ui")]
+    fn export_data(&mut self, _vm: &mut SceneVM, _format: &str) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Switch between light and dark themes
     /// Called when the system appearance changes (e.g., iOS dark mode toggle)
     /// or when user manually switches theme
