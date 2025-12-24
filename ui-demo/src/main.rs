@@ -812,22 +812,19 @@ impl SceneVMApp for UiDemo {
                     }
                     // Toggle between canvases
                     else if id == "canvas_toggle" {
-                        if let Some(main_canvas) = self
+                        let main_visible = self
                             .context
                             .workspace
                             .find_view_mut::<Canvas>("main_canvas")
-                        {
-                            let is_visible = main_canvas.is_visible();
-                            main_canvas.set_visible(!is_visible);
-                        }
-                        if let Some(settings_canvas) = self
-                            .context
+                            .map(|c| c.is_visible())
+                            .unwrap_or(false);
+
+                        self.context
                             .workspace
-                            .find_view_mut::<Canvas>("settings_canvas")
-                        {
-                            let is_visible = settings_canvas.is_visible();
-                            settings_canvas.set_visible(!is_visible);
-                        }
+                            .set_canvas_visible("main_canvas", !main_visible);
+                        self.context
+                            .workspace
+                            .set_canvas_visible("settings_canvas", main_visible);
                     }
                 }
                 UiAction::ButtonToggled(id, on) => {

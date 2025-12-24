@@ -554,6 +554,17 @@ impl Workspace {
         None
     }
 
+    /// Set the visibility of a canvas by its string ID.
+    /// Returns true if the canvas was found and updated, false otherwise.
+    pub fn set_canvas_visible(&mut self, id: &str, visible: bool) -> bool {
+        if let Some(canvas) = self.find_view_mut::<crate::ui::Canvas>(id) {
+            canvas.set_visible(visible);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Set the value of a slider by its string ID.
     pub fn set_slider_value(&mut self, id: &str, value: f32) {
         if let Some(slider) = self.find_view_mut::<crate::ui::Slider>(id) {
