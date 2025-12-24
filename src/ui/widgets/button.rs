@@ -20,6 +20,10 @@ pub enum PopupAlignment {
     Left,
     Top,
     Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +194,10 @@ impl Button {
             PopupAlignment::Left => (btn_x - popup_w - gap, btn_y),
             PopupAlignment::Bottom => (btn_x, btn_y + btn_h + gap),
             PopupAlignment::Top => (btn_x, btn_y - popup_h - gap),
+            PopupAlignment::TopLeft => (btn_x + btn_w - popup_w, btn_y - popup_h - gap),
+            PopupAlignment::TopRight => (btn_x + btn_w + gap, btn_y - popup_h - gap),
+            PopupAlignment::BottomLeft => (btn_x + btn_w - popup_w, btn_y + btn_h + gap),
+            PopupAlignment::BottomRight => (btn_x + btn_w + gap, btn_y + btn_h + gap),
         };
 
         // Ensure popup stays within screen bounds

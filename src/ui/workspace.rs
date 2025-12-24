@@ -842,6 +842,18 @@ impl Workspace {
                     crate::ui::PopupAlignment::Left => (btn_x - popup_size[0] - gap, btn_y),
                     crate::ui::PopupAlignment::Bottom => (btn_x, btn_y + btn_h + gap),
                     crate::ui::PopupAlignment::Top => (btn_x, btn_y - popup_size[1] - gap),
+                    crate::ui::PopupAlignment::TopLeft => {
+                        (btn_x + btn_w - popup_size[0], btn_y - popup_size[1] - gap)
+                    }
+                    crate::ui::PopupAlignment::TopRight => {
+                        (btn_x + btn_w + gap, btn_y - popup_size[1] - gap)
+                    }
+                    crate::ui::PopupAlignment::BottomLeft => {
+                        (btn_x + btn_w - popup_size[0], btn_y + btn_h + gap)
+                    }
+                    crate::ui::PopupAlignment::BottomRight => {
+                        (btn_x + btn_w + gap, btn_y + btn_h + gap)
+                    }
                 };
 
                 param_list.set_position(x, y);

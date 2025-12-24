@@ -44,12 +44,13 @@ pub struct Slider {
     pub max: f32,
     dragging: bool,
     active_pointer: Option<u32>,
-    original_value: f32,        // Value when drag started (for undo)
-    pub show_value: bool,       // Whether to show value text
-    pub value_color: Vec4<f32>, // Color for value text
-    pub value_size: f32,        // Font size for value text
-    pub value_precision: usize, // Decimal places for value display
-    pub thumb_roundness: f32,   // Corner radius in pixels (defaults to thumb_radius for circle)
+    original_value: f32,                   // Value when drag started (for undo)
+    pub show_value: bool,                  // Whether to show value text
+    pub value_color: Vec4<f32>,            // Color for value text
+    pub value_size: f32,                   // Font size for value text
+    pub value_precision: usize,            // Decimal places for value display
+    pub thumb_roundness: f32, // Corner radius in pixels (defaults to thumb_radius for circle)
+    pub value_labels: Option<Vec<String>>, // Custom labels for discrete values
 }
 
 impl Slider {
@@ -71,6 +72,7 @@ impl Slider {
             value_size: 12.0,
             value_precision: 1,
             thumb_roundness,
+            value_labels: None,
         }
     }
 
@@ -86,6 +88,11 @@ impl Slider {
 
     pub fn with_value_color(mut self, color: Vec4<f32>) -> Self {
         self.value_color = color;
+        self
+    }
+
+    pub fn with_value_labels(mut self, labels: Vec<String>) -> Self {
+        self.value_labels = Some(labels);
         self
     }
 
@@ -166,7 +173,16 @@ impl UiView for Slider {
 
         // Draw value text if enabled (positioned to the right of the slider track)
         if self.show_value {
-            let value_text = format!("{:.prec$}", self.get_value(), prec = self.value_precision);
+            let value_text = if let Some(ref labels) = self.value_labels {
+                // Use custom labels - convert slider value to index
+                let current_value = self.get_value();
+                let index = current_value.round() as usize;
+                labels.get(index).cloned().unwrap_or_else(|| {
+                    format!("{:.prec$}", current_value, prec = self.value_precision)
+                })
+            } else {
+                format!("{:.prec$}", self.get_value(), prec = self.value_precision)
+            };
             // Position to the right of the slider track
             let text_x = x + w + 8.0; // 8px to the right of the track
             // Center text vertically - need to use original mathematical center for text
