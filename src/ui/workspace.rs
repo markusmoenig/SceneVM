@@ -185,6 +185,23 @@ impl Workspace {
         // println!("build_node: applying layout for node {:?}", id);
         self.apply_layout(id);
 
+        // Check if this is a TabbedPanel and get active tab info
+        let active_tab_info = {
+            let Some(node) = self.nodes.get(&id) else {
+                return;
+            };
+            if let Some(tabbed_panel) = node.view.as_any().downcast_ref::<crate::ui::TabbedPanel>()
+            {
+                Some((
+                    tabbed_panel.tab_button_group,
+                    tabbed_panel.active_tab,
+                    tabbed_panel.tab_contents.clone(),
+                ))
+            } else {
+                None
+            }
+        };
+
         // Now borrow node mutably for building
         let Some(node) = self.nodes.get_mut(&id) else {
             return;
@@ -200,8 +217,19 @@ impl Workspace {
         node.view.build(&mut ctx);
         // node borrow is released here
 
-        for child in children {
-            self.build_node(child, out, layer, text_cache);
+        // If this is a TabbedPanel, only render button group and active tab
+        if let Some((button_group_id, active_tab, tab_contents)) = active_tab_info {
+            // Render the button group
+            self.build_node(button_group_id, out, layer, text_cache);
+            // Render only the active tab content
+            if let Some(&active_content_id) = tab_contents.get(active_tab) {
+                self.build_node(active_content_id, out, layer, text_cache);
+            }
+        } else {
+            // Normal rendering: render all children
+            for child in children {
+                self.build_node(child, out, layer, text_cache);
+            }
         }
     }
 
@@ -234,6 +262,7 @@ impl Workspace {
             VStack,
             Toolbar { horizontal: bool },
             ParamList,
+            TabbedPanel,
         }
 
         // First, collect child sizes and check if this is a layout
@@ -270,6 +299,15 @@ impl Workspace {
             else if let Some(param_list) = layout_node.view.as_any().downcast_ref::<ParamList>() {
                 let children = param_list.children();
                 Some((children, LayoutType::ParamList))
+            }
+            // Check if this is a TabbedPanel
+            else if let Some(tabbed_panel) = layout_node
+                .view
+                .as_any()
+                .downcast_ref::<crate::ui::TabbedPanel>()
+            {
+                let children = tabbed_panel.children();
+                Some((children, LayoutType::TabbedPanel))
             } else {
                 None
             }
@@ -355,6 +393,21 @@ impl Workspace {
                     Vec::new()
                 }
             }
+            LayoutType::TabbedPanel => {
+                if let Some(layout_node) = self.nodes.get(&layout_id) {
+                    if let Some(tabbed_panel) = layout_node
+                        .view
+                        .as_any()
+                        .downcast_ref::<crate::ui::TabbedPanel>()
+                    {
+                        tabbed_panel.calculate_layout()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
         };
 
         // Apply computed rects to children
@@ -416,7 +469,7 @@ impl Workspace {
 
     /// Set widget rect for common widget types (fallback for non-Layoutable widgets)
     fn set_widget_rect(node: &mut Node, rect: [f32; 4]) {
-        use crate::ui::{Button, ButtonGroup, DropdownList, Slider, Spacer, TextButton};
+        use crate::ui::{Button, ButtonGroup, DropdownList, ParamList, Slider, Spacer, TextButton};
 
         // Try Button
         if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
@@ -451,6 +504,12 @@ impl Workspace {
         // Try TextButton
         if let Some(text_button) = node.view.as_any_mut().downcast_mut::<TextButton>() {
             text_button.style.rect = rect;
+            return;
+        }
+
+        // Try ParamList
+        if let Some(param_list) = node.view.as_any_mut().downcast_mut::<ParamList>() {
+            param_list.style.rect = rect;
             return;
         }
 
@@ -559,6 +618,17 @@ impl Workspace {
     pub fn set_canvas_visible(&mut self, id: &str, visible: bool) -> bool {
         if let Some(canvas) = self.find_view_mut::<crate::ui::Canvas>(id) {
             canvas.set_visible(visible);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set the active tab of a TabbedPanel by its string ID.
+    /// Returns true if the panel was found and updated, false otherwise.
+    pub fn set_active_tab(&mut self, id: &str, index: usize) -> bool {
+        if let Some(panel) = self.find_view_mut::<crate::ui::TabbedPanel>(id) {
+            panel.set_active_tab(index);
             true
         } else {
             false

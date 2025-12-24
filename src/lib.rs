@@ -1,8 +1,6 @@
 // pub mod app;
 #[cfg(feature = "ui")]
 pub mod app_event;
-#[cfg(all(feature = "ui", not(target_arch = "wasm32")))]
-pub mod native_dialogs;
 pub mod app_trait;
 pub mod atlas;
 pub mod bbox2d;
@@ -11,6 +9,8 @@ pub mod chunk;
 pub mod dynamic;
 pub mod intodata;
 pub mod light;
+#[cfg(all(feature = "ui", not(target_arch = "wasm32")))]
+pub mod native_dialogs;
 pub mod poly2d;
 pub mod poly3d;
 pub mod texture;
@@ -68,9 +68,9 @@ pub mod prelude {
             HStack, Image, ImageStyle, Label, LabelRect, NodeId, ParamList, ParamListStyle,
             PopupAlignment, Project, ProjectBrowser, ProjectBrowserItem, ProjectBrowserStyle,
             ProjectError, ProjectMetadata, RecentProject, RecentProjects, Slider, SliderStyle,
-            Spacer, TextButton, Theme, Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle,
-            UiAction, UiEvent, UiEventKind, UiRenderer, UiView, UndoCommand, UndoStack, VAlign,
-            VStack, ViewContext, Workspace, create_tile_material,
+            Spacer, TabbedPanel, TabbedPanelStyle, TextButton, Theme, Toolbar, ToolbarOrientation,
+            ToolbarSeparator, ToolbarStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView,
+            UndoCommand, UndoStack, VAlign, VStack, ViewContext, Workspace, create_tile_material,
         },
     };
 
@@ -2064,31 +2064,37 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                                                 app.redo(vm_ref);
                                             }
                                             AppEvent::RequestExport { format, filename } => {
-                                                
                                                 #[cfg(not(target_arch = "wasm32"))]
                                                 {
-                                                    crate::native_dialogs::handle_export(&mut app, vm_ref, &format, &filename);
+                                                    crate::native_dialogs::handle_export(
+                                                        &mut app, vm_ref, &format, &filename,
+                                                    );
                                                 }
                                             }
                                             AppEvent::RequestSave => {
-                                                
                                                 #[cfg(not(target_arch = "wasm32"))]
                                                 {
-                                                    crate::native_dialogs::handle_save(&mut app, vm_ref);
+                                                    crate::native_dialogs::handle_save(
+                                                        &mut app, vm_ref,
+                                                    );
                                                 }
                                             }
                                             AppEvent::RequestOpen => {
-                                                
                                                 #[cfg(not(target_arch = "wasm32"))]
                                                 {
-                                                    crate::native_dialogs::handle_open(&mut app, vm_ref);
+                                                    crate::native_dialogs::handle_open(
+                                                        &mut app, vm_ref,
+                                                    );
                                                 }
                                             }
                                             AppEvent::RequestImport { file_types } => {
-                                                
                                                 #[cfg(not(target_arch = "wasm32"))]
                                                 {
-                                                    crate::native_dialogs::handle_import(&mut app, vm_ref, &file_types);
+                                                    crate::native_dialogs::handle_import(
+                                                        &mut app,
+                                                        vm_ref,
+                                                        &file_types,
+                                                    );
                                                 }
                                             }
                                             _ => {

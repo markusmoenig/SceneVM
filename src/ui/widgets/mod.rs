@@ -11,6 +11,7 @@ mod param_list;
 mod project_browser;
 mod slider;
 mod spacer;
+mod tabbed_panel;
 mod text_button;
 mod toolbar;
 
@@ -27,5 +28,6 @@ pub use param_list::{ParamList, ParamListEntry, ParamListStyle};
 pub use project_browser::{ProjectBrowser, ProjectBrowserItem, ProjectBrowserStyle};
 pub use slider::{Slider, SliderStyle};
 pub use spacer::Spacer;
+pub use tabbed_panel::{TabbedPanel, TabbedPanelStyle};
 pub use text_button::TextButton;
 pub use toolbar::{Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle};

@@ -32,8 +32,8 @@ pub use widgets::{
     Button, ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
     ColorWheel, DropdownList, DropdownListStyle, HAlign, Image, ImageStyle, Label, LabelRect,
     ParamList, ParamListEntry, ParamListStyle, PopupAlignment, ProjectBrowser, ProjectBrowserItem,
-    ProjectBrowserStyle, Slider, SliderStyle, Spacer, TextButton, Toolbar, ToolbarOrientation,
-    ToolbarSeparator, ToolbarStyle, VAlign,
+    ProjectBrowserStyle, Slider, SliderStyle, Spacer, TabbedPanel, TabbedPanelStyle, TextButton,
+    Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
 };
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};
 

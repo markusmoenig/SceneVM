@@ -3,7 +3,8 @@
 use vek::Vec4;
 
 use crate::ui::{
-    ButtonGroupStyle, ButtonStyle, DropdownListStyle, ParamListStyle, SliderStyle, ToolbarStyle,
+    ButtonGroupStyle, ButtonStyle, DropdownListStyle, ParamListStyle, SliderStyle,
+    TabbedPanelStyle, ToolbarStyle,
 };
 
 /// A UI theme that defines colors and styling for all widgets
@@ -215,6 +216,20 @@ impl Theme {
             title_color,
             title_size: 16.0,
             label_color: self.text, // Labels should always use theme text color
+        }
+    }
+
+    /// Create a tabbed panel style with the given rect
+    pub fn tabbed_panel(&self, rect: [f32; 4]) -> TabbedPanelStyle {
+        TabbedPanelStyle {
+            rect,
+            fill: self.surface_variant,
+            border: self.border_subtle,
+            radius_px: self.radius_px,
+            border_px: self.border_px,
+            layer: 10,
+            tab_height: 32.0,
+            padding: 8.0,
         }
     }
 
