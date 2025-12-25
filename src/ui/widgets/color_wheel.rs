@@ -12,9 +12,10 @@ use crate::vm::{Atom, VM};
 pub struct ColorWheel {
     id: String,
     tile_id: Uuid,
-    rect: [f32; 4],           // [x, y, width, height]
-    current_color: Vec4<f32>, // RGBA
-    current_hsv: Vec3<f32>,   // HSV (hue 0-360, sat 0-1, val 0-1)
+    rect: [f32; 4],            // [x, y, width, height]
+    current_color: Vec4<f32>,  // RGBA
+    current_hsv: Vec3<f32>,    // HSV (hue 0-360, sat 0-1, val 0-1)
+    original_color: Vec4<f32>, // Color at start of drag (for undo)
     radius: f32,
     dragging: bool,
     active_pointer: Option<u32>,
@@ -33,6 +34,7 @@ impl ColorWheel {
             rect,
             current_color: initial_color,
             current_hsv: hsv,
+            original_color: initial_color,
             radius,
             dragging: false,
             active_pointer: None,
@@ -48,6 +50,12 @@ impl ColorWheel {
     /// Get the current selected color
     pub fn color(&self) -> Vec4<f32> {
         self.current_color
+    }
+
+    /// Set the color
+    pub fn set_color(&mut self, color: Vec4<f32>) {
+        self.current_color = color;
+        self.current_hsv = rgb_to_hsv(color);
     }
 
     /// Set the rectangle
@@ -182,6 +190,8 @@ impl UiView for ColorWheel {
                 if self.hit_test(event.pos) {
                     self.dragging = true;
                     self.active_pointer = Some(event.pointer_id);
+                    // Store original color for undo
+                    self.original_color = self.current_color;
                     if self.update_color_from_pos(event.pos) {
                         return UiEventOutcome::with_action(UiAction::ColorChanged(
                             self.id.clone(),
@@ -191,8 +201,16 @@ impl UiView for ColorWheel {
                                 self.current_color.z,
                                 self.current_color.w,
                             ],
+                            [
+                                self.original_color.x,
+                                self.original_color.y,
+                                self.original_color.z,
+                                self.original_color.w,
+                            ],
+                            false, // Not final (drag started)
                         ));
                     }
+                    return UiEventOutcome::dirty(); // Consume event even if color didn't change
                 }
             }
             UiEventKind::PointerMove => {
@@ -206,14 +224,39 @@ impl UiView for ColorWheel {
                                 self.current_color.z,
                                 self.current_color.w,
                             ],
+                            [
+                                self.original_color.x,
+                                self.original_color.y,
+                                self.original_color.z,
+                                self.original_color.w,
+                            ],
+                            false, // Not final (dragging)
                         ));
                     }
+                    return UiEventOutcome::dirty(); // Consume event even if color didn't change
                 }
             }
             UiEventKind::PointerUp => {
                 if self.active_pointer == Some(event.pointer_id) {
                     self.dragging = false;
                     self.active_pointer = None;
+                    // Send final ColorChanged event on mouse up
+                    return UiEventOutcome::with_action(UiAction::ColorChanged(
+                        self.id.clone(),
+                        [
+                            self.current_color.x,
+                            self.current_color.y,
+                            self.current_color.z,
+                            self.current_color.w,
+                        ],
+                        [
+                            self.original_color.x,
+                            self.original_color.y,
+                            self.original_color.z,
+                            self.original_color.w,
+                        ],
+                        true, // Final (mouse released)
+                    ));
                 }
             }
             _ => {}

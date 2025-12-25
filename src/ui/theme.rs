@@ -3,8 +3,8 @@
 use vek::Vec4;
 
 use crate::ui::{
-    ButtonGroupStyle, ButtonStyle, DropdownListStyle, ParamListStyle, SliderStyle,
-    TabbedPanelStyle, ToolbarStyle,
+    ButtonGroupStyle, ButtonStyle, ColorButtonStyle, DropdownListStyle, ParamListStyle,
+    SliderStyle, TabbedPanelStyle, ToolbarStyle,
 };
 
 /// A UI theme that defines colors and styling for all widgets
@@ -250,6 +250,19 @@ impl Theme {
             layer: 15,
             item_height: 36.0,
             max_visible_items: 8,
+        }
+    }
+
+    /// Create a color button style with the given rect
+    pub fn color_button(&self, rect: [f32; 4]) -> ColorButtonStyle {
+        ColorButtonStyle {
+            rect,
+            fill: self.surface_variant,
+            border: self.border,
+            radius_px: self.radius_px,
+            border_px: self.border_px,
+            layer: 10,
+            swatch_padding: 4.0,
         }
     }
 

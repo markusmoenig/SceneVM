@@ -64,13 +64,14 @@ pub mod prelude {
         app_event::{AppEvent, AppEventQueue},
         ui::{
             Alignment, Button, ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle, ButtonKind,
-            ButtonStyle, Canvas, ColorWheel, Drawable, DropdownList, DropdownListStyle, HAlign,
-            HStack, Image, ImageStyle, Label, LabelRect, NodeId, ParamList, ParamListStyle,
-            PopupAlignment, Project, ProjectBrowser, ProjectBrowserItem, ProjectBrowserStyle,
-            ProjectError, ProjectMetadata, RecentProject, RecentProjects, Slider, SliderStyle,
-            Spacer, TabbedPanel, TabbedPanelStyle, TextButton, Theme, Toolbar, ToolbarOrientation,
-            ToolbarSeparator, ToolbarStyle, UiAction, UiEvent, UiEventKind, UiRenderer, UiView,
-            UndoCommand, UndoStack, VAlign, VStack, ViewContext, Workspace, create_tile_material,
+            ButtonStyle, Canvas, ColorButton, ColorButtonStyle, ColorWheel, Drawable, DropdownList,
+            DropdownListStyle, HAlign, HStack, Image, ImageStyle, Label, LabelRect, NodeId,
+            ParamList, ParamListStyle, PopupAlignment, Project, ProjectBrowser, ProjectBrowserItem,
+            ProjectBrowserStyle, ProjectError, ProjectMetadata, RecentProject, RecentProjects,
+            Slider, SliderStyle, Spacer, TabbedPanel, TabbedPanelStyle, TextButton, Theme, Toolbar,
+            ToolbarOrientation, ToolbarSeparator, ToolbarStyle, UiAction, UiEvent, UiEventKind,
+            UiRenderer, UiView, UndoCommand, UndoStack, VAlign, VStack, ViewContext, Workspace,
+            create_tile_material,
         },
     };
 

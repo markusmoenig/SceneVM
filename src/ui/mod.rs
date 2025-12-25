@@ -30,10 +30,11 @@ pub use theme::Theme;
 pub use undo::{UndoCommand, UndoStack};
 pub use widgets::{
     Button, ButtonGroup, ButtonGroupOrientation, ButtonGroupStyle, ButtonKind, ButtonStyle, Canvas,
-    ColorWheel, DropdownList, DropdownListStyle, HAlign, Image, ImageStyle, Label, LabelRect,
-    ParamList, ParamListEntry, ParamListStyle, PopupAlignment, ProjectBrowser, ProjectBrowserItem,
-    ProjectBrowserStyle, Slider, SliderStyle, Spacer, TabbedPanel, TabbedPanelStyle, TextButton,
-    Toolbar, ToolbarOrientation, ToolbarSeparator, ToolbarStyle, VAlign,
+    ColorButton, ColorButtonStyle, ColorWheel, DropdownList, DropdownListStyle, HAlign, Image,
+    ImageStyle, Label, LabelRect, ParamList, ParamListEntry, ParamListStyle, PopupAlignment,
+    ProjectBrowser, ProjectBrowserItem, ProjectBrowserStyle, Slider, SliderStyle, Spacer,
+    TabbedPanel, TabbedPanelStyle, TextButton, Toolbar, ToolbarOrientation, ToolbarSeparator,
+    ToolbarStyle, VAlign,
 };
 pub use workspace::{NodeId, UiView, ViewContext, Workspace};
 

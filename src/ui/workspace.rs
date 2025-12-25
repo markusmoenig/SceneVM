@@ -4,6 +4,7 @@ use crate::ui::{
 use rustc_hash::FxHashMap;
 use std::any::Any;
 use uuid::Uuid;
+use vek::Vec4;
 
 /// Identifier for nodes in the UI workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -422,7 +423,9 @@ impl Workspace {
 
     /// Extract widget size from common widget types (fallback for non-Layoutable widgets)
     fn extract_widget_size(&self, node: &Node) -> [f32; 2] {
-        use crate::ui::{Button, ButtonGroup, DropdownList, Slider, Spacer, TextButton};
+        use crate::ui::{
+            Button, ButtonGroup, ColorButton, ColorWheel, DropdownList, Slider, Spacer, TextButton,
+        };
 
         // Try Button
         if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
@@ -461,6 +464,17 @@ impl Workspace {
             return [w, h];
         }
 
+        // Try ColorButton
+        if let Some(color_button) = node.view.as_any().downcast_ref::<ColorButton>() {
+            let [_x, _y, w, h] = color_button.style.rect;
+            return [w, h];
+        }
+
+        // Try ColorWheel - use a fixed size since rect is private
+        if node.view.as_any().downcast_ref::<ColorWheel>().is_some() {
+            return [100.0, 100.0]; // Default color wheel size
+        }
+
         // Add more widget types here as needed
 
         // Default size
@@ -469,7 +483,10 @@ impl Workspace {
 
     /// Set widget rect for common widget types (fallback for non-Layoutable widgets)
     fn set_widget_rect(node: &mut Node, rect: [f32; 4]) {
-        use crate::ui::{Button, ButtonGroup, DropdownList, ParamList, Slider, Spacer, TextButton};
+        use crate::ui::{
+            Button, ButtonGroup, ColorButton, ColorWheel, DropdownList, ParamList, Slider, Spacer,
+            TextButton,
+        };
 
         // Try Button
         if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
@@ -513,6 +530,18 @@ impl Workspace {
             return;
         }
 
+        // Try ColorButton
+        if let Some(color_button) = node.view.as_any_mut().downcast_mut::<ColorButton>() {
+            color_button.style.rect = rect;
+            return;
+        }
+
+        // Try ColorWheel
+        if let Some(color_wheel) = node.view.as_any_mut().downcast_mut::<ColorWheel>() {
+            color_wheel.set_rect(rect);
+            return;
+        }
+
         // Add more widget types here as needed
     }
 
@@ -525,14 +554,28 @@ impl Workspace {
         }
 
         let mut outcome = UiEventOutcome::none();
-        for root in &roots {
-            outcome.merge(self.dispatch_node(*root, evt));
-        }
 
-        // Also dispatch events to visible popup contents
+        // Dispatch to visible popup contents FIRST - they should consume events before main tree
         let popup_nodes = self.get_visible_popup_nodes();
         for popup_id in popup_nodes {
-            outcome.merge(self.dispatch_node(popup_id, evt));
+            let popup_outcome = self.dispatch_node(popup_id, evt);
+            // If popup consumed the event, don't dispatch to main tree
+            if popup_outcome.dirty || !popup_outcome.actions.is_empty() {
+                outcome.merge(popup_outcome);
+                if outcome.dirty {
+                    self.dirty = true;
+                }
+                if !outcome.actions.is_empty() {
+                    self.pending_actions.extend(outcome.actions);
+                }
+                return;
+            }
+            outcome.merge(popup_outcome);
+        }
+
+        // Only dispatch to roots if popup didn't consume event
+        for root in &roots {
+            outcome.merge(self.dispatch_node(*root, evt));
         }
 
         if outcome.dirty {
@@ -558,10 +601,35 @@ impl Workspace {
                 return merged; // Skip event dispatch for invisible canvas and its children
             }
 
+            // Check if this is a TabbedPanel and get active tab info
+            let tabbed_panel_info = if let Some(tabbed_panel) =
+                node.view.as_any().downcast_ref::<crate::ui::TabbedPanel>()
+            {
+                Some((
+                    tabbed_panel.tab_button_group,
+                    tabbed_panel.active_tab,
+                    tabbed_panel.tab_contents.clone(),
+                ))
+            } else {
+                None
+            };
+
             merged.merge(node.view.handle_event(evt));
-            let children = node.children.clone();
-            for child in children {
-                merged.merge(self.dispatch_node(child, evt));
+
+            // If this is a TabbedPanel, only dispatch to button group and active tab
+            if let Some((button_group_id, active_tab, tab_contents)) = tabbed_panel_info {
+                // Dispatch to button group
+                merged.merge(self.dispatch_node(button_group_id, evt));
+                // Dispatch only to the active tab content
+                if let Some(&active_content_id) = tab_contents.get(active_tab) {
+                    merged.merge(self.dispatch_node(active_content_id, evt));
+                }
+            } else {
+                // Normal event dispatch: dispatch to all children
+                let children = node.children.clone();
+                for child in children {
+                    merged.merge(self.dispatch_node(child, evt));
+                }
             }
         }
         merged
@@ -629,6 +697,28 @@ impl Workspace {
     pub fn set_active_tab(&mut self, id: &str, index: usize) -> bool {
         if let Some(panel) = self.find_view_mut::<crate::ui::TabbedPanel>(id) {
             panel.set_active_tab(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set the color of a ColorButton by its string ID.
+    /// Returns true if the button was found and updated, false otherwise.
+    pub fn set_color_button_color(&mut self, id: &str, color: Vec4<f32>) -> bool {
+        if let Some(color_button) = self.find_view_mut::<crate::ui::ColorButton>(id) {
+            color_button.set_color(color);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set the color of a ColorWheel by its string ID.
+    /// Returns true if the color wheel was found and updated, false otherwise.
+    pub fn set_color_wheel_color(&mut self, id: &str, color: Vec4<f32>) -> bool {
+        if let Some(color_wheel) = self.find_view_mut::<crate::ui::ColorWheel>(id) {
+            color_wheel.set_color(color);
             true
         } else {
             false
@@ -840,13 +930,19 @@ impl Workspace {
 
     /// Get list of visible popup node IDs
     fn get_visible_popup_nodes(&self) -> Vec<NodeId> {
-        use crate::ui::Button;
+        use crate::ui::{Button, ColorButton};
 
         let mut popup_nodes = Vec::new();
         for node in self.nodes.values() {
             if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
                 if button.is_popup_visible() {
                     if let Some(popup_id) = button.popup_content {
+                        popup_nodes.push(popup_id);
+                    }
+                }
+            } else if let Some(color_button) = node.view.as_any().downcast_ref::<ColorButton>() {
+                if color_button.is_popup_visible() {
+                    if let Some(popup_id) = color_button.color_wheel {
                         popup_nodes.push(popup_id);
                     }
                 }
@@ -857,22 +953,17 @@ impl Workspace {
 
     /// Build popups for all buttons that have visible popups
     fn build_popups(&mut self, out: &mut Vec<Drawable>, text_cache: &TextCache) {
-        use crate::ui::Button;
+        use crate::ui::{Button, ColorButton};
 
         // Collect popup info first to avoid borrow checker issues
         let mut popups_to_render = Vec::new();
 
         for (_node_id, node) in &self.nodes {
+            // Check for regular Button popups
             if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
                 if button.is_popup_visible() {
                     if let Some(popup_content_id) = button.popup_content {
-                        // We need the popup size to calculate position
-                        // For now, use a placeholder - in real implementation,
-                        // the popup widget should provide its size
-                        // For ParamList, we can estimate from its rect
                         if self.nodes.contains_key(&popup_content_id) {
-                            // Try to get size from the popup view
-                            // This is a simplified approach - ideally views would report their size
                             popups_to_render.push((
                                 popup_content_id,
                                 button.style.rect,
@@ -882,124 +973,182 @@ impl Workspace {
                     }
                 }
             }
+            // Check for ColorButton popups
+            else if let Some(color_button) = node.view.as_any().downcast_ref::<ColorButton>() {
+                if color_button.is_popup_visible() {
+                    if let Some(popup_content_id) = color_button.color_wheel {
+                        if self.nodes.contains_key(&popup_content_id) {
+                            popups_to_render.push((
+                                popup_content_id,
+                                color_button.style.rect,
+                                color_button.popup_alignment,
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         // Now position and render the popups
         for (popup_id, button_rect, alignment) in popups_to_render {
-            // Collect widget update info in a separate scope
-            let widget_updates = {
-                let Some(popup_node) = self.nodes.get_mut(&popup_id) else {
-                    continue;
-                };
+            let Some(popup_node) = self.nodes.get_mut(&popup_id) else {
+                continue;
+            };
 
-                // Try to get size from ParamList
-                let Some(param_list) = popup_node
-                    .view
-                    .as_any_mut()
-                    .downcast_mut::<crate::ui::ParamList>()
-                else {
-                    continue;
-                };
+            // Check if it's a ParamList popup
+            if let Some(param_list) = popup_node
+                .view
+                .as_any_mut()
+                .downcast_mut::<crate::ui::ParamList>()
+            {
+                // Handle ParamList popups
+                let widget_updates = {
+                    let popup_size = param_list.get_size();
 
-                let popup_size = param_list.get_size();
+                    // Calculate position (simplified bounds checking - assumes screen is large enough)
+                    let [btn_x, btn_y, btn_w, btn_h] = button_rect;
+                    let gap = 4.0;
 
-                // Calculate position (simplified bounds checking - assumes screen is large enough)
+                    let (x, y) = match alignment {
+                        crate::ui::PopupAlignment::Right => (btn_x + btn_w + gap, btn_y),
+                        crate::ui::PopupAlignment::Left => (btn_x - popup_size[0] - gap, btn_y),
+                        crate::ui::PopupAlignment::Bottom => (btn_x, btn_y + btn_h + gap),
+                        crate::ui::PopupAlignment::Top => (btn_x, btn_y - popup_size[1] - gap),
+                        crate::ui::PopupAlignment::TopLeft => {
+                            (btn_x + btn_w - popup_size[0], btn_y - popup_size[1] - gap)
+                        }
+                        crate::ui::PopupAlignment::TopRight => {
+                            (btn_x + btn_w + gap, btn_y - popup_size[1] - gap)
+                        }
+                        crate::ui::PopupAlignment::BottomLeft => {
+                            (btn_x + btn_w - popup_size[0], btn_y + btn_h + gap)
+                        }
+                        crate::ui::PopupAlignment::BottomRight => {
+                            (btn_x + btn_w + gap, btn_y + btn_h + gap)
+                        }
+                    };
+
+                    param_list.set_position(x, y);
+
+                    // Collect child widget rects
+                    let children = popup_node.children.clone();
+                    let popup_x = param_list.style.rect[0];
+                    let popup_y = param_list.style.rect[1];
+                    let num_items = param_list.widget_count();
+
+                    // First N widget children match the ParamList's widget rows - get their rects from ParamList
+                    let mut updates = Vec::new();
+                    for (index, child_id) in children.iter().enumerate() {
+                        if index < num_items {
+                            // This is a ParamList item - get its rect from ParamList
+                            let widget_rect = param_list.get_widget_rect(index, 180.0);
+                            updates.push((*child_id, Some(widget_rect), popup_x, popup_y));
+                        } else {
+                            // This is an additional child (not a ParamList item)
+                            updates.push((*child_id, None, popup_x, popup_y));
+                        }
+                    }
+                    updates
+                }; // Borrow of popup_node ends here
+
+                // Now update child widgets
+                for (child_id, widget_rect_opt, popup_x, popup_y) in widget_updates {
+                    if let Some(child_node) = self.nodes.get_mut(&child_id) {
+                        if let Some(widget_rect) = widget_rect_opt {
+                            // This is a ParamList item - position it using the rect from ParamList
+                            if let Some(slider) = child_node
+                                .view
+                                .as_any_mut()
+                                .downcast_mut::<crate::ui::Slider>()
+                            {
+                                slider.set_rect(widget_rect);
+                            } else if let Some(btn_group) = child_node
+                                .view
+                                .as_any_mut()
+                                .downcast_mut::<crate::ui::ButtonGroup>(
+                            ) {
+                                // ButtonGroup as ParamList item - use the rect from ParamList
+                                btn_group.style.rect = widget_rect;
+                            } else if let Some(color_button) = child_node
+                                .view
+                                .as_any_mut()
+                                .downcast_mut::<crate::ui::ColorButton>(
+                            ) {
+                                // ColorButton as ParamList item - use the rect from ParamList
+                                color_button.style.rect = widget_rect;
+                            }
+                        } else {
+                            // This is an additional child (not a ParamList item)
+                            if let Some(btn_group) = child_node
+                                .view
+                                .as_any_mut()
+                                .downcast_mut::<crate::ui::ButtonGroup>()
+                            {
+                                // Store original relative position on first use
+                                if btn_group.original_rect.is_none() {
+                                    btn_group.original_rect = Some(btn_group.style.rect);
+                                }
+
+                                // Position ButtonGroup relative to popup using original coordinates
+                                let [rel_x, rel_y, w, h] = btn_group.original_rect.unwrap();
+                                btn_group.style.rect = [popup_x + rel_x, popup_y + rel_y, w, h];
+                            }
+                        }
+                    }
+                }
+
+                self.build_node(popup_id, out, 100, text_cache); // High layer for popups
+            }
+            // Check if it's a ColorWheel popup
+            else if let Some(color_wheel) = popup_node
+                .view
+                .as_any_mut()
+                .downcast_mut::<crate::ui::ColorWheel>()
+            {
+                // Handle ColorWheel popups - position it near the button
                 let [btn_x, btn_y, btn_w, btn_h] = button_rect;
                 let gap = 4.0;
+                let wheel_size = 150.0; // Fixed size for color wheel popup
 
                 let (x, y) = match alignment {
                     crate::ui::PopupAlignment::Right => (btn_x + btn_w + gap, btn_y),
-                    crate::ui::PopupAlignment::Left => (btn_x - popup_size[0] - gap, btn_y),
+                    crate::ui::PopupAlignment::Left => (btn_x - wheel_size - gap, btn_y),
                     crate::ui::PopupAlignment::Bottom => (btn_x, btn_y + btn_h + gap),
-                    crate::ui::PopupAlignment::Top => (btn_x, btn_y - popup_size[1] - gap),
+                    crate::ui::PopupAlignment::Top => (btn_x, btn_y - wheel_size - gap),
                     crate::ui::PopupAlignment::TopLeft => {
-                        (btn_x + btn_w - popup_size[0], btn_y - popup_size[1] - gap)
+                        (btn_x + btn_w - wheel_size, btn_y - wheel_size - gap)
                     }
                     crate::ui::PopupAlignment::TopRight => {
-                        (btn_x + btn_w + gap, btn_y - popup_size[1] - gap)
+                        (btn_x + btn_w + gap, btn_y - wheel_size - gap)
                     }
                     crate::ui::PopupAlignment::BottomLeft => {
-                        (btn_x + btn_w - popup_size[0], btn_y + btn_h + gap)
+                        (btn_x + btn_w - wheel_size, btn_y + btn_h + gap)
                     }
                     crate::ui::PopupAlignment::BottomRight => {
                         (btn_x + btn_w + gap, btn_y + btn_h + gap)
                     }
                 };
 
-                param_list.set_position(x, y);
-
-                // Collect child widget rects
-                let children = popup_node.children.clone();
-                let popup_x = param_list.style.rect[0];
-                let popup_y = param_list.style.rect[1];
-                let num_items = param_list.widget_count();
-
-                // First N widget children match the ParamList's widget rows - get their rects from ParamList
-                let mut updates = Vec::new();
-                for (index, child_id) in children.iter().enumerate() {
-                    if index < num_items {
-                        // This is a ParamList item - get its rect from ParamList
-                        let widget_rect = param_list.get_widget_rect(index, 180.0);
-                        updates.push((*child_id, Some(widget_rect), popup_x, popup_y));
-                    } else {
-                        // This is an additional child (not a ParamList item)
-                        updates.push((*child_id, None, popup_x, popup_y));
-                    }
-                }
-                updates
-            }; // Borrow of popup_node ends here
-
-            // Now update child widgets
-            for (child_id, widget_rect_opt, popup_x, popup_y) in widget_updates {
-                if let Some(child_node) = self.nodes.get_mut(&child_id) {
-                    if let Some(widget_rect) = widget_rect_opt {
-                        // This is a ParamList item - position it using the rect from ParamList
-                        if let Some(slider) = child_node
-                            .view
-                            .as_any_mut()
-                            .downcast_mut::<crate::ui::Slider>()
-                        {
-                            slider.set_rect(widget_rect);
-                        } else if let Some(btn_group) = child_node
-                            .view
-                            .as_any_mut()
-                            .downcast_mut::<crate::ui::ButtonGroup>()
-                        {
-                            // ButtonGroup as ParamList item - use the rect from ParamList
-                            btn_group.style.rect = widget_rect;
-                        }
-                    } else {
-                        // This is an additional child (not a ParamList item)
-                        if let Some(btn_group) = child_node
-                            .view
-                            .as_any_mut()
-                            .downcast_mut::<crate::ui::ButtonGroup>()
-                        {
-                            // Store original relative position on first use
-                            if btn_group.original_rect.is_none() {
-                                btn_group.original_rect = Some(btn_group.style.rect);
-                            }
-
-                            // Position ButtonGroup relative to popup using original coordinates
-                            let [rel_x, rel_y, w, h] = btn_group.original_rect.unwrap();
-                            btn_group.style.rect = [popup_x + rel_x, popup_y + rel_y, w, h];
-                        }
-                    }
-                }
+                color_wheel.set_rect([x, y, wheel_size, wheel_size]);
+                self.build_node(popup_id, out, 100, text_cache); // High layer for popups
             }
-
-            self.build_node(popup_id, out, 100, text_cache); // High layer for popups
         }
     }
 
     /// Close all open popups (call this when clicking outside)
     pub fn close_all_popups(&mut self) {
-        use crate::ui::Button;
+        use crate::ui::{Button, ColorButton};
 
         for node in self.nodes.values_mut() {
             if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
                 if button.is_popup_visible() {
                     button.hide_popup();
+                    self.dirty = true;
+                }
+            } else if let Some(color_button) = node.view.as_any_mut().downcast_mut::<ColorButton>()
+            {
+                if color_button.is_popup_visible() {
+                    color_button.hide_popup();
                     self.dirty = true;
                 }
             }
@@ -1009,9 +1158,10 @@ impl Workspace {
     /// Check if a click is inside any button with a popup or its popup content
     /// Returns true if inside, false if outside (should close popups)
     pub fn is_click_inside_popup_system(&self, pos: [f32; 2]) -> bool {
-        use crate::ui::{Button, ParamList};
+        use crate::ui::{Button, ColorButton, ColorWheel, ParamList};
 
         for node in self.nodes.values() {
+            // Check regular Button popups
             if let Some(button) = node.view.as_any().downcast_ref::<Button>() {
                 if button.is_popup_visible() {
                     // Check if click is on the button itself
@@ -1035,6 +1185,31 @@ impl Workspace {
                                 {
                                     return true;
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            // Check ColorButton popups
+            else if let Some(color_button) = node.view.as_any().downcast_ref::<ColorButton>() {
+                if color_button.is_popup_visible() {
+                    // Check if click is on the color button itself
+                    let [bx, by, bw, bh] = color_button.style.rect;
+                    if pos[0] >= bx && pos[0] <= bx + bw && pos[1] >= by && pos[1] <= by + bh {
+                        return true;
+                    }
+
+                    // Check if click is inside the ColorWheel popup
+                    if let Some(popup_id) = color_button.color_wheel {
+                        if let Some(popup_node) = self.nodes.get(&popup_id) {
+                            if let Some(_color_wheel) =
+                                popup_node.view.as_any().downcast_ref::<ColorWheel>()
+                            {
+                                // ColorWheel uses a rect, check if click is inside
+                                // We need to check the actual rendered position
+                                // For now, assume a 150x150 wheel positioned by build_popups
+                                // This is a simplified check - ideally ColorWheel would expose its rect
+                                return true; // Accept any click when ColorWheel is visible to prevent immediate closing
                             }
                         }
                     }

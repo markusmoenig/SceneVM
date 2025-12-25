@@ -113,6 +113,7 @@ impl TabbedPanel {
 impl UiView for TabbedPanel {
     fn build(&mut self, ctx: &mut ViewContext) {
         let [x, y, w, h] = self.style.rect;
+        let padding = self.style.padding;
 
         // Draw background
         ctx.push(Drawable::Rect {
@@ -123,6 +124,18 @@ impl UiView for TabbedPanel {
             radius_px: self.style.radius_px,
             border_px: self.style.border_px,
             layer: ctx.layer(),
+        });
+
+        // Draw separator line under the button group (as a thin rect)
+        let separator_y = y + padding + self.style.tab_height + (padding / 2.0);
+        ctx.push(Drawable::Rect {
+            id: Uuid::new_v4(),
+            rect: [x + padding, separator_y, w - 2.0 * padding, 1.0],
+            fill: Vec4::new(0.3, 0.3, 0.35, 1.0),
+            border: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            radius_px: 0.0,
+            border_px: 0.0,
+            layer: self.style.layer + 1,
         });
 
         // The ButtonGroup and content widgets are positioned and rendered by workspace

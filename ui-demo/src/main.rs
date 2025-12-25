@@ -911,11 +911,25 @@ impl SceneVMApp for UiDemo {
                 UiAction::DropdownChanged(name, index) => {
                     println!("Dropdown '{}' changed to index {}", name, index);
                 }
-                UiAction::ColorChanged(id, color) => {
+                UiAction::ColorChanged(id, current_color, original_color, is_final) => {
                     println!(
-                        "Color changed from '{}': RGBA({:.3}, {:.3}, {:.3}, {:.3})",
-                        id, color[0], color[1], color[2], color[3]
+                        "Color changed from '{}': RGBA({:.3}, {:.3}, {:.3}, {:.3}) [final: {}]",
+                        id,
+                        current_color[0],
+                        current_color[1],
+                        current_color[2],
+                        current_color[3],
+                        is_final
                     );
+                    if is_final {
+                        println!(
+                            "  Original color: RGBA({:.3}, {:.3}, {:.3}, {:.3})",
+                            original_color[0],
+                            original_color[1],
+                            original_color[2],
+                            original_color[3]
+                        );
+                    }
                 }
                 UiAction::Custom { source_id, action } => {
                     println!("Custom action from {}: {}", source_id, action);

@@ -37,7 +37,11 @@ pub enum UiAction {
     SliderChanged(String, f32, f32, bool),
     ButtonGroupChanged(String, usize), // (group_name, active_index)
     DropdownChanged(String, usize),    // (dropdown_name, selected_index)
-    ColorChanged(String, [f32; 4]),    // (widget_id, RGBA color)
+    /// Color changed: (id, current_color, original_color, is_final)
+    /// - `current_color`: The current RGBA color (use for preview/immediate updates)
+    /// - `original_color`: The color when drag started (use for undo)
+    /// - `is_final`: true when mouse released (ready for undo command)
+    ColorChanged(String, [f32; 4], [f32; 4], bool),
     Custom {
         source_id: String,
         action: String,
