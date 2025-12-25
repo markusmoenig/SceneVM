@@ -1202,14 +1202,18 @@ impl Workspace {
                     // Check if click is inside the ColorWheel popup
                     if let Some(popup_id) = color_button.color_wheel {
                         if let Some(popup_node) = self.nodes.get(&popup_id) {
-                            if let Some(_color_wheel) =
+                            if let Some(color_wheel) =
                                 popup_node.view.as_any().downcast_ref::<ColorWheel>()
                             {
-                                // ColorWheel uses a rect, check if click is inside
-                                // We need to check the actual rendered position
-                                // For now, assume a 150x150 wheel positioned by build_popups
-                                // This is a simplified check - ideally ColorWheel would expose its rect
-                                return true; // Accept any click when ColorWheel is visible to prevent immediate closing
+                                // Check if click is inside the ColorWheel's rect
+                                let [wx, wy, ww, wh] = color_wheel.rect;
+                                if pos[0] >= wx
+                                    && pos[0] <= wx + ww
+                                    && pos[1] >= wy
+                                    && pos[1] <= wy + wh
+                                {
+                                    return true;
+                                }
                             }
                         }
                     }

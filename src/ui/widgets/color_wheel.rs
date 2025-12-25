@@ -12,7 +12,7 @@ use crate::vm::{Atom, VM};
 pub struct ColorWheel {
     id: String,
     tile_id: Uuid,
-    rect: [f32; 4],            // [x, y, width, height]
+    pub rect: [f32; 4],        // [x, y, width, height]
     current_color: Vec4<f32>,  // RGBA
     current_hsv: Vec3<f32>,    // HSV (hue 0-360, sat 0-1, val 0-1)
     original_color: Vec4<f32>, // Color at start of drag (for undo)

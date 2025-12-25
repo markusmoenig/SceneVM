@@ -258,9 +258,9 @@ impl Theme {
         ColorButtonStyle {
             rect,
             fill: self.surface_variant,
-            border: self.border,
+            border: Vec4::new(self.border.x, self.border.y, self.border.z, 1.0), // Full opacity border
             radius_px: self.radius_px,
-            border_px: self.border_px,
+            border_px: 1.0, // Standard border width
             layer: 10,
             swatch_padding: 4.0,
         }

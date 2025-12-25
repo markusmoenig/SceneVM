@@ -26,6 +26,7 @@ pub struct ColorButtonStyle {
 pub struct ColorButton {
     pub id: String,
     render_id: Uuid,
+    swatch_id: Uuid,
     pub style: ColorButtonStyle,
     pub current_color: Vec4<f32>,    // Currently selected color
     pub color_wheel: Option<NodeId>, // ColorWheel popup content
@@ -40,6 +41,7 @@ impl ColorButton {
         Self {
             id: String::new(),
             render_id: Uuid::new_v4(),
+            swatch_id: Uuid::new_v4(),
             style,
             current_color: initial_color,
             color_wheel: None,
@@ -106,7 +108,7 @@ impl UiView for ColorButton {
         // Draw color swatch inside the button
         let padding = self.style.swatch_padding;
         ctx.push(Drawable::Rect {
-            id: Uuid::new_v4(),
+            id: self.swatch_id,
             rect: [
                 x + padding,
                 y + padding,
