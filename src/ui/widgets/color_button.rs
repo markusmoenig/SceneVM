@@ -94,14 +94,14 @@ impl UiView for ColorButton {
     fn build(&mut self, ctx: &mut ViewContext) {
         let [x, y, w, h] = self.style.rect;
 
-        // Draw button background
+        // Draw button background (no border to avoid flickering)
         ctx.push(Drawable::Rect {
             id: self.render_id,
             rect: [x, y, w, h],
             fill: self.style.fill,
-            border: self.style.border,
+            border: Vec4::new(0.0, 0.0, 0.0, 0.0), // No border on outer rect
             radius_px: self.style.radius_px,
-            border_px: self.style.border_px,
+            border_px: 0.0,
             layer: self.style.layer,
         });
 
@@ -116,7 +116,7 @@ impl UiView for ColorButton {
                 h - 2.0 * padding,
             ],
             fill: self.current_color,
-            border: Vec4::new(0.0, 0.0, 0.0, 0.3), // Subtle border around swatch
+            border: Vec4::new(0.0, 0.0, 0.0, 1.0), // Solid black border around color swatch
             radius_px: (self.style.radius_px - padding).max(0.0),
             border_px: 1.0,
             layer: self.style.layer + 1,

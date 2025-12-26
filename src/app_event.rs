@@ -4,15 +4,20 @@
 pub enum AppEvent {
     /// Request to save current project
     /// Host should: Show save dialog (if needed), call save_to_json(), write file
-    RequestSave,
+    /// filename: default filename without extension (e.g., "myproject")
+    /// extension: file extension (e.g., "json", "denrim")
+    RequestSave { filename: String, extension: String },
 
     /// Request to save with new name/location
     /// Host should: Show "Save As" dialog, call save_to_json(), write file
-    RequestSaveAs,
+    /// filename: default filename without extension (e.g., "myproject")
+    /// extension: file extension (e.g., "json", "denrim")
+    RequestSaveAs { filename: String, extension: String },
 
     /// Request to open a project
     /// Host should: Show open dialog, read file, call load_from_json()
-    RequestOpen,
+    /// extension: file extension to filter (e.g., "json", "denrim")
+    RequestOpen { extension: String },
 
     /// Request to create new project
     /// Host should: Prompt to save current (if dirty), call new_project()

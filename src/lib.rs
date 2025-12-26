@@ -2065,31 +2065,46 @@ pub fn run_scenevm_app<A: SceneVMApp + 'static>(
                                                 app.redo(vm_ref);
                                             }
                                             AppEvent::RequestExport { format, filename } => {
-                                                #[cfg(not(target_arch = "wasm32"))]
+                                                #[cfg(all(
+                                                    not(target_arch = "wasm32"),
+                                                    not(target_os = "ios")
+                                                ))]
                                                 {
                                                     crate::native_dialogs::handle_export(
                                                         &mut app, vm_ref, &format, &filename,
                                                     );
                                                 }
                                             }
-                                            AppEvent::RequestSave => {
-                                                #[cfg(not(target_arch = "wasm32"))]
+                                            AppEvent::RequestSave {
+                                                filename,
+                                                extension,
+                                            } => {
+                                                #[cfg(all(
+                                                    not(target_arch = "wasm32"),
+                                                    not(target_os = "ios")
+                                                ))]
                                                 {
                                                     crate::native_dialogs::handle_save(
-                                                        &mut app, vm_ref,
+                                                        &mut app, vm_ref, &filename, &extension,
                                                     );
                                                 }
                                             }
-                                            AppEvent::RequestOpen => {
-                                                #[cfg(not(target_arch = "wasm32"))]
+                                            AppEvent::RequestOpen { extension } => {
+                                                #[cfg(all(
+                                                    not(target_arch = "wasm32"),
+                                                    not(target_os = "ios")
+                                                ))]
                                                 {
                                                     crate::native_dialogs::handle_open(
-                                                        &mut app, vm_ref,
+                                                        &mut app, vm_ref, &extension,
                                                     );
                                                 }
                                             }
                                             AppEvent::RequestImport { file_types } => {
-                                                #[cfg(not(target_arch = "wasm32"))]
+                                                #[cfg(all(
+                                                    not(target_arch = "wasm32"),
+                                                    not(target_os = "ios")
+                                                ))]
                                                 {
                                                     crate::native_dialogs::handle_import(
                                                         &mut app,
