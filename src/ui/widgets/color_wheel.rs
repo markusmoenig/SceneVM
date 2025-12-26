@@ -12,6 +12,8 @@ use crate::vm::{Atom, VM};
 pub struct ColorWheel {
     id: String,
     tile_id: Uuid,
+    render_id: Uuid,
+    indicator_id: Uuid,
     pub rect: [f32; 4],        // [x, y, width, height]
     current_color: Vec4<f32>,  // RGBA
     current_hsv: Vec3<f32>,    // HSV (hue 0-360, sat 0-1, val 0-1)
@@ -31,6 +33,8 @@ impl ColorWheel {
         Self {
             id: String::new(),
             tile_id: Uuid::new_v4(),
+            render_id: Uuid::new_v4(),
+            indicator_id: Uuid::new_v4(),
             rect,
             current_color: initial_color,
             current_hsv: hsv,
@@ -146,7 +150,7 @@ impl UiView for ColorWheel {
         // The shader will read U.gp0.z for the HSV value
 
         ctx.push(Drawable::Quad {
-            id: Uuid::new_v4(),
+            id: self.render_id,
             tile_id: self.tile_id,
             rect: self.rect,
             uv: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
@@ -169,7 +173,7 @@ impl UiView for ColorWheel {
         let indicator_size = 12.0;
 
         ctx.push(Drawable::Rect {
-            id: Uuid::new_v4(),
+            id: self.indicator_id,
             rect: [
                 indicator_x - indicator_size / 2.0,
                 indicator_y - indicator_size / 2.0,

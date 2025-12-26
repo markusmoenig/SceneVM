@@ -195,7 +195,7 @@ impl Button {
             PopupAlignment::Bottom => (btn_x, btn_y + btn_h + gap),
             PopupAlignment::Top => (btn_x, btn_y - popup_h - gap),
             PopupAlignment::TopLeft => (btn_x + btn_w - popup_w, btn_y - popup_h - gap),
-            PopupAlignment::TopRight => (btn_x + btn_w + gap, btn_y - popup_h - gap),
+            PopupAlignment::TopRight => (btn_x, btn_y - popup_h - gap), // Align left edge with button left edge
             PopupAlignment::BottomLeft => (btn_x + btn_w - popup_w, btn_y + btn_h + gap),
             PopupAlignment::BottomRight => (btn_x + btn_w + gap, btn_y + btn_h + gap),
         };

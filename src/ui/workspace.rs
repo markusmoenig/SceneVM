@@ -1018,7 +1018,7 @@ impl Workspace {
                             (btn_x + btn_w - popup_size[0], btn_y - popup_size[1] - gap)
                         }
                         crate::ui::PopupAlignment::TopRight => {
-                            (btn_x + btn_w + gap, btn_y - popup_size[1] - gap)
+                            (btn_x, btn_y - popup_size[1] - gap) // Align left edge with button left edge
                         }
                         crate::ui::PopupAlignment::BottomLeft => {
                             (btn_x + btn_w - popup_size[0], btn_y + btn_h + gap)
