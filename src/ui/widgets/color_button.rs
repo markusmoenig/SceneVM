@@ -25,7 +25,6 @@ pub struct ColorButtonStyle {
 #[derive(Debug, Clone)]
 pub struct ColorButton {
     pub id: String,
-    render_id: Uuid,
     swatch_id: Uuid,
     pub style: ColorButtonStyle,
     pub current_color: Vec4<f32>,    // Currently selected color
@@ -40,7 +39,6 @@ impl ColorButton {
     pub fn new(style: ColorButtonStyle, initial_color: Vec4<f32>) -> Self {
         Self {
             id: String::new(),
-            render_id: Uuid::new_v4(),
             swatch_id: Uuid::new_v4(),
             style,
             current_color: initial_color,
@@ -94,18 +92,7 @@ impl UiView for ColorButton {
     fn build(&mut self, ctx: &mut ViewContext) {
         let [x, y, w, h] = self.style.rect;
 
-        // Draw button background (no border to avoid flickering)
-        ctx.push(Drawable::Rect {
-            id: self.render_id,
-            rect: [x, y, w, h],
-            fill: self.style.fill,
-            border: Vec4::new(0.0, 0.0, 0.0, 0.0), // No border on outer rect
-            radius_px: self.style.radius_px,
-            border_px: 0.0,
-            layer: self.style.layer,
-        });
-
-        // Draw color swatch inside the button
+        // Draw color swatch (no outer rect needed)
         let padding = self.style.swatch_padding;
         ctx.push(Drawable::Rect {
             id: self.swatch_id,

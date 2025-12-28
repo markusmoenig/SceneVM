@@ -163,6 +163,10 @@ impl Button {
         self
     }
 
+    pub fn set_tile_tint(&mut self, tint: Vec4<f32>) {
+        self.tile_tint = tint;
+    }
+
     pub fn set_toggled(&mut self, toggled: bool) {
         if self.kind == ButtonKind::Toggle {
             self.toggled = toggled;

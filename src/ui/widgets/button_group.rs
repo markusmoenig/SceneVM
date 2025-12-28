@@ -342,7 +342,7 @@ impl UiView for ButtonGroup {
                     text: label.clone(),
                     origin: [text_x, text_y],
                     px_size: text_size,
-                    color: Vec4::new(0.9, 0.9, 0.95, 1.0),
+                    color: self.style.text_color,
                     layer: self.style.layer + 2,
                 });
             }

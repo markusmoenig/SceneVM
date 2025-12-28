@@ -714,6 +714,18 @@ impl Workspace {
         }
     }
 
+    /// Set the tile tint of a Button by its string ID (useful for updating icon colors on theme change).
+    /// Returns true if the button was found and updated, false otherwise.
+    pub fn set_button_tile_tint(&mut self, id: &str, tint: Vec4<f32>) -> bool {
+        if let Some(button) = self.find_view_mut::<crate::ui::Button>(id) {
+            button.set_tile_tint(tint);
+            self.dirty = true; // Mark workspace as dirty to trigger rebuild
+            true
+        } else {
+            false
+        }
+    }
+
     /// Set the color of a ColorWheel by its string ID.
     /// Returns true if the color wheel was found and updated, false otherwise.
     pub fn set_color_wheel_color(&mut self, id: &str, color: Vec4<f32>) -> bool {
@@ -757,14 +769,16 @@ impl Workspace {
     /// This updates colors and styling of all widgets to match the new theme.
     pub fn apply_theme(&mut self, theme: &crate::ui::Theme) {
         use crate::ui::{
-            Button, ButtonGroup, DropdownList, ParamList, Slider, TextButton, Toolbar,
+            Button, ButtonGroup, DropdownList, ParamList, Slider, TabbedPanel, TextButton, Toolbar,
         };
 
         for (_id, node) in self.nodes.iter_mut() {
             // Update Button styles
             if let Some(button) = node.view.as_any_mut().downcast_mut::<Button>() {
                 let rect = button.style.rect;
-                button.style = theme.button(rect);
+                let new_style = theme.button(rect);
+                button.tile_tint = new_style.icon_tint; // Update tile tint for icons
+                button.style = new_style;
             }
             // Update ButtonGroup styles - preserve spacing!
             else if let Some(bg) = node.view.as_any_mut().downcast_mut::<ButtonGroup>() {
@@ -772,10 +786,11 @@ impl Workspace {
                 let bw = bg.style.button_width;
                 let bh = bg.style.button_height;
                 let spacing = bg.style.spacing; // Preserve custom spacing
-                bg.style = theme.button_group(rect, bw, bh);
+                let new_style = theme.button_group(rect, bw, bh);
+                bg.text_color = new_style.text_color; // Update text color from new style
+                bg.text_background_color = new_style.text_bg_color; // Update text background color
+                bg.style = new_style;
                 bg.style.spacing = spacing; // Restore custom spacing
-                // Update text label color for better contrast
-                bg.text_color = theme.text;
             }
             // Update Slider styles
             else if let Some(slider) = node.view.as_any_mut().downcast_mut::<Slider>() {
@@ -817,6 +832,12 @@ impl Workspace {
                 let rect = text_button.style.rect;
                 text_button.style = theme.button(rect);
                 text_button.text_color = theme.text;
+            }
+            // Update TabbedPanel styles
+            else if let Some(tabbed_panel) = node.view.as_any_mut().downcast_mut::<TabbedPanel>()
+            {
+                let rect = tabbed_panel.style.rect;
+                tabbed_panel.style = theme.tabbed_panel(rect);
             }
         }
         self.dirty = true;
