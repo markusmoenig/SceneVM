@@ -45,6 +45,7 @@ struct TileBins {
 @group(0) @binding(6) var<storage, read> tile_bins: TileBins;
 @group(0) @binding(7) var<storage, read> tile_tris: U32s;
 @group(0) @binding(8) var atlas_mat_tex: texture_2d<f32>;
+@group(0) @binding(12) var atlas_smp_linear: sampler;
 struct LightWGSL {
   header:   vec4<u32>,
   position: vec4<f32>,

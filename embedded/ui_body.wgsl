@@ -199,7 +199,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       out_col = col;
       covered = true;
     } else {
-      let col = textureSampleLevel(atlas_tex, atlas_smp, atlas_uv, 0.0);
+      // Use linear filtering for text glyph tiles (material texel ~0), otherwise nearest.
+      let use_linear = all(params < vec4<f32>(0.0001));
+      var col: vec4<f32>;
+      if (use_linear) {
+        col = textureSampleLevel(atlas_tex, atlas_smp_linear, atlas_uv, 0.0);
+      } else {
+        col = textureSampleLevel(atlas_tex, atlas_smp, atlas_uv, 0.0);
+      }
       if (col.a < 0.01) { continue; }
       // Alpha blend this texture layer over the accumulated color
       out_col = vec4<f32>(

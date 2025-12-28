@@ -322,6 +322,7 @@ pub struct VMGpu {
     pub ibuf: Option<wgpu::Buffer>,
     pub index_count: u32,
     pub sampler: wgpu::Sampler,
+    pub sampler_linear: wgpu::Sampler,
     // --- Compute pipelines and uniforms (lazily created)
     pub compute2d_pipeline: Option<wgpu::ComputePipeline>,
     pub compute3d_pipeline: Option<wgpu::ComputePipeline>,
@@ -1787,7 +1788,7 @@ impl VM {
             cache: None,
         });
 
-        // let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+        // Base sampler (nearest) plus optional linear variant for UI text smoothing.
         let sampler: wgpu::Sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vm-atlas-sampler-repeat-nearest"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -1795,6 +1796,16 @@ impl VM {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let sampler_linear: wgpu::Sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("vm-atlas-sampler-repeat-linear"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
@@ -1817,6 +1828,7 @@ impl VM {
             ibuf: None,
             index_count: 0,
             sampler,
+            sampler_linear,
             compute2d_pipeline: None,
             compute3d_pipeline: None,
             compute_sdf_pipeline: None,
@@ -2043,6 +2055,13 @@ impl VM {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // atlas sampler (linear) for text smoothing
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -2618,6 +2637,10 @@ impl VM {
                 wgpu::BindGroupEntry {
                     binding: 11,
                     resource: g.tile_frames_ssbo.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::Sampler(&g.sampler_linear),
                 },
             ],
         }));
