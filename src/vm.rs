@@ -499,15 +499,17 @@ pub struct ComputeSdfUniforms {
     pub cam_ortho_half_h: f32,
     pub cam_near: f32,
     pub cam_far: f32,
-    pub cam_kind: u32,            // 0=OrthoIso, 1=OrbitPersp, 2=FirstPersonPersp
-    pub _pad_cam_align: [u32; 3], // keep vec3<u32> slot aligned to 16 bytes (std140)
-    pub _pad_cam: [u32; 4],
-    pub data_len: u32, // number of vec4 entries
+    pub cam_kind: u32, // 0=OrthoIso, 1=OrbitPersp, 2=FirstPersonPersp
+    pub _pad1: u32,
+    pub _pad2: u32,
+    pub _pad3: u32,
+    pub data_len: u32,
     pub vm_flags: u32,
     pub anim_counter: u32,
-    pub _pad_tail: u32,
+    pub _pad4: u32,
     pub viewport_rect: [f32; 4], // [x, y, width, height] in screen pixels. width=0 disables scissor.
     pub palette: [[f32; 4]; 256],
+    pub _pad_end: [[u32; 4]; 4], // 64 bytes of padding to match WGSL std140 layout (4512 bytes total)
 }
 
 #[repr(C)]
@@ -3179,15 +3181,20 @@ impl VM {
                 CameraKind::OrbitPersp => 1,
                 CameraKind::FirstPersonPersp => 2,
             },
-            _pad_cam_align: [0, 0, 0],
-            _pad_cam: [0, 0, 0, 0],
+            _pad1: 0,
+            _pad2: 0,
+            _pad3: 0,
             data_len: (self.sdf_data.len().min(u32::MAX as usize)) as u32,
             vm_flags: self.vm_flags(),
             anim_counter: self.animation_counter as u32,
-            _pad_tail: 0,
-            viewport_rect: self.viewport_rect2d.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+            _pad4: 0,
+            viewport_rect: self
+                .viewport_rect2d
+                .unwrap_or([0.0, 0.0, fb_w as f32, fb_h as f32]),
             palette: self.palette,
+            _pad_end: [[0; 4]; 4],
         };
+
         if let Some(g) = self.gpu.as_ref() {
             queue.write_buffer(g.u_sdf_buf.as_ref().unwrap(), 0, bytemuck::bytes_of(&u));
         }
