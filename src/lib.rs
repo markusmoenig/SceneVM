@@ -126,9 +126,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{CanvasRenderingContext2d, Document, HtmlCanvasElement, Window as WebWindow};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "windowing")]
 use winit::window::Window;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "windowing")]
 use winit::{dpi::PhysicalPosition, event::ElementState, event::MouseButton, event::WindowEvent};
 
 /// Result of a call to `render_frame`.
@@ -1002,7 +1002,7 @@ impl SceneVM {
     }
 
     /// Create a SceneVM that is configured to present directly into a winit window surface.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "windowing")]
     pub fn new_with_window(window: &Window) -> Self {
         let initial_size = window.inner_size();
         let width = initial_size.width.max(1);
@@ -1913,7 +1913,7 @@ impl SceneVMRenderCtx for NativeRenderCtx {
 }
 
 /// Run a `SceneVMApp` on native (winit) with GPU presentation to a window.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "windowing"))]
 pub fn run_scenevm_app<A: SceneVMApp + 'static>(
     mut app: A,
 ) -> Result<(), Box<dyn std::error::Error>> {
