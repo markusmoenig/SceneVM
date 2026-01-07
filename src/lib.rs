@@ -55,7 +55,7 @@ pub mod prelude {
         poly2d::Poly2D,
         poly3d::Poly3D,
         texture::Texture,
-        vm::{Atom, GeoId, LineStrip2D, RenderMode, VM},
+        vm::{Atom, GeoId, LayerBlendMode, LineStrip2D, RenderMode, VM},
     };
 
     #[cfg(feature = "ui")]
@@ -99,7 +99,7 @@ pub use crate::{
     poly2d::Poly2D,
     poly3d::Poly3D,
     texture::Texture,
-    vm::{Atom, GeoId, LineStrip2D, RenderMode, VM},
+    vm::{Atom, GeoId, LayerBlendMode, LineStrip2D, RenderMode, VM},
 };
 use image;
 use std::borrow::Cow;
@@ -126,9 +126,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{CanvasRenderingContext2d, Document, HtmlCanvasElement, Window as WebWindow};
-#[cfg(feature = "windowing")]
+#[cfg(all(feature = "windowing", not(target_arch = "wasm32")))]
 use winit::window::Window;
-#[cfg(feature = "windowing")]
+#[cfg(all(feature = "windowing", not(target_arch = "wasm32")))]
 use winit::{dpi::PhysicalPosition, event::ElementState, event::MouseButton, event::WindowEvent};
 
 /// Result of a call to `render_frame`.
@@ -156,6 +156,7 @@ struct PresentPipeline {
 struct CompositingPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    mode_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     target_format: wgpu::TextureFormat,
 }
@@ -168,6 +169,7 @@ impl CompositingPipeline {
                 "
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
 @group(0) @binding(1) var layer_sampler: sampler;
+@group(0) @binding(2) var<uniform> blend_mode_buf: u32;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -192,9 +194,22 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     return out;
 }
 
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return pow(c, vec3<f32>(2.2));
+}
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return pow(c, vec3<f32>(1.0 / 2.2));
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(layer_tex, layer_sampler, in.uv);
+    let src = textureSample(layer_tex, layer_sampler, in.uv);
+    // blend_mode_buf: 0 = Alpha (default), 1 = AlphaLinear
+    if (blend_mode_buf == 1u) {
+        // Treat the layer as linear and encode once for display.
+        return vec4<f32>(linear_to_srgb(src.rgb), src.a);
+    }
+    return src;
 }
                 ",
             )),
@@ -219,6 +234,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -226,6 +251,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             label: Some("scenevm-composite-pipeline-layout"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
+        });
+        let mode_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scenevm-composite-mode"),
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -269,6 +300,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         Self {
             pipeline,
             bind_group_layout,
+            mode_buf,
             sampler,
             target_format,
         }
@@ -581,39 +613,6 @@ impl SceneVM {
     ) {
         // The surface texture is always created with Rgba8Unorm in `Texture::ensure_gpu_with`
         let target_format = wgpu::TextureFormat::Rgba8Unorm;
-        // Render each VM to its own layer texture
-        // Explicitly clear base layer texture before rendering
-        base_vm.ensure_layer_texture(device, w, h);
-        if let Some(layer_tex) = &base_vm.layer_texture {
-            if let Some(gpu) = &layer_tex.gpu {
-                let bg = base_vm.background;
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("clear-base-layer"),
-                });
-                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("clear-base-layer-pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &gpu.view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: bg.x as f64,
-                                g: bg.y as f64,
-                                b: bg.z as f64,
-                                a: bg.w as f64,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                queue.submit(Some(encoder.finish()));
-            }
-        }
-
         if let Err(e) = base_vm.draw_into(device, queue, surface, w, h) {
             if log_errors {
                 println!("[SceneVM] Error drawing base VM: {:?}", e);
@@ -621,39 +620,6 @@ impl SceneVM {
         }
 
         for vm in overlays.iter_mut() {
-            // Explicitly clear overlay layer texture before rendering
-            vm.ensure_layer_texture(device, w, h);
-            if let Some(layer_tex) = &vm.layer_texture {
-                if let Some(gpu) = &layer_tex.gpu {
-                    let bg = vm.background;
-                    let mut encoder =
-                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("clear-overlay-layer"),
-                        });
-                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("clear-overlay-layer-pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &gpu.view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: bg.x as f64,
-                                    g: bg.y as f64,
-                                    b: bg.z as f64,
-                                    a: bg.w as f64,
-                                }),
-                                store: wgpu::StoreOp::Store,
-                            },
-                            depth_slice: None,
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                    queue.submit(Some(encoder.finish()));
-                }
-            }
-
             if let Err(e) = vm.draw_into(device, queue, surface, w, h) {
                 if log_errors {
                     println!("[SceneVM] Error drawing overlay VM: {:?}", e);
@@ -696,9 +662,16 @@ impl SceneVM {
 
         // Composite each layer in order
         for (i, vm) in vms_to_composite.iter().enumerate() {
-            if let Some(layer_texture) = &vm.layer_texture {
+            if let Some(layer_texture) = vm.composite_texture() {
                 if let Some(layer_gpu) = &layer_texture.gpu {
                     // Create bind group for this layer
+                    let mode_u32: u32 = match vm.blend_mode() {
+                        vm::LayerBlendMode::Alpha => 0,
+                        vm::LayerBlendMode::AlphaLinear => 1,
+                    };
+                    // Upload mode
+                    queue.write_buffer(&pipeline.mode_buf, 0, bytemuck::bytes_of(&mode_u32));
+
                     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("scenevm-compositing-bind-group"),
                         layout: &pipeline.bind_group_layout,
@@ -710,6 +683,10 @@ impl SceneVM {
                             wgpu::BindGroupEntry {
                                 binding: 1,
                                 resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: pipeline.mode_buf.as_entire_binding(),
                             },
                         ],
                     });
@@ -1002,7 +979,7 @@ impl SceneVM {
     }
 
     /// Create a SceneVM that is configured to present directly into a winit window surface.
-    #[cfg(feature = "windowing")]
+    #[cfg(all(feature = "windowing", not(target_arch = "wasm32")))]
     pub fn new_with_window(window: &Window) -> Self {
         let initial_size = window.inner_size();
         let width = initial_size.width.max(1);

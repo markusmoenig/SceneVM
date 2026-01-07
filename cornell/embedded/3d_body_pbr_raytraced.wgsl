@@ -215,7 +215,7 @@ fn trace_billboards(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> BillboardHit {
         let cmd = sd_billboard_cmd(i);
 
         // Extract billboard parameters
-        let center = cmd.center_size.xyz;
+        let center = cmd.center.xyz;
         let axis_right = cmd.axis_right.xyz;
         let axis_up = cmd.axis_up.xyz;
         let tile_index = cmd.params.x;
@@ -449,108 +449,52 @@ fn pbr_lighting(P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, albedo: vec3<f32>, mat
     return Lo;
 }
 
-// ===== Main Compute Shader =====
+// ===== Light Sampling Helper =====
+// Sample a random point light and return (position, color * intensity, pdf)
+fn sample_point_light(rand: f32) -> vec3<f32> {
+    if (U.lights_count == 0u) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+
+    // Uniform light selection
+    let light_idx = min(u32(rand * f32(U.lights_count)), U.lights_count - 1u);
+    let light = sd_light(light_idx);
+
+    return light.position.xyz;
+}
+
+// ===== Main Compute Shader with Next Event Estimation =====
 @compute @workgroup_size(8,8,1)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = gid.x;
     let py = gid.y;
     if (px >= U.fb_size.x || py >= U.fb_size.y) { return; }
 
-    // Build camera ray
-    let cam_uv = vec2<f32>(
-        (f32(px) + 0.5) / f32(U.fb_size.x),
-        (f32(py) + 0.5) / f32(U.fb_size.y)
-    );
+    // Build camera ray with per-frame subpixel jitter for AA
+    let res = vec2<f32>(f32(U.fb_size.x), f32(U.fb_size.y));
+    // Jitter in range [-0.5, +0.5] pixels for proper anti-aliasing
+    let jitter = (hash33(vec3<f32>(f32(px), f32(py), f32(U.anim_counter))).xy - vec2<f32>(0.5));
+    let cam_uv = (vec2<f32>(f32(px), f32(py)) + vec2<f32>(0.5) + jitter) / res;
     let ray = cam_ray(cam_uv);
     var ro = ray.ro;
     let rd = normalize(ray.rd);
 
-    // Accumulated color (front to back compositing)
-    var accum_color = vec3<f32>(0.0);
-    var accum_alpha = 0.0;
-    var fog_distance = 0.0; // Track distance from camera for fog (set on first hit)
-    var first_hit = true;
-
-    // Sky color for background (already in linear space from CPU)
+    // Path tracer with Next Event Estimation (direct light sampling)
     let sky_rgb = select(U.background.rgb, U.gp0.xyz, length(U.gp0.xyz) > 0.01);
-    let ambient_strength = U.gp3.w; // User-defined, no default
+    let max_bounces: u32 = 4u;
+    var radiance = vec3<f32>(0.0);
+    var throughput = vec3<f32>(1.0);
+    var dir = rd;
 
-    // Trace through transparent layers
-    let max_bounces = u32(max(1.0, select(8.0, U.gp5.w, U.gp5.w >= 0.0)));
     for (var bounce: u32 = 0u; bounce < max_bounces; bounce = bounce + 1u) {
-        // First ray uses epsilon, continuation uses 0 to avoid self-intersection vs gaps
         let tmin = select(0.0, 0.001, bounce == 0u);
+        let hit = sv_trace_grid(ro, dir, tmin, 1e6);
 
-        // Trace geometry
-        let hit = sv_trace_grid(ro, rd, tmin, 1e6);
-
-        // Trace billboards (check up to geometry hit or max distance)
-        let billboard_max_t = select(1e6, hit.t, hit.hit);
-        let billboard_hit = trace_billboards(ro, rd, billboard_max_t);
-
-        // Determine which is closer: billboard or geometry
-        let use_billboard = billboard_hit.hit && (!hit.hit || billboard_hit.t < hit.t);
-
-        // Handle billboard hit
-        if (use_billboard) {
-            // Sample billboard color
-            var billboard_color = sample_billboard(billboard_hit);
-
-            // Convert from sRGB to linear (billboards stored in sRGB)
-            billboard_color = vec4<f32>(
-                pow(billboard_color.rgb, vec3<f32>(2.2)),
-                billboard_color.a
-            );
-
-            // Alpha test - skip fully transparent pixels
-            if (billboard_color.a < 0.01) {
-                // Continue ray just past this billboard
-                ro = ro + rd * (billboard_hit.t + 0.001);
-                continue;
-            }
-
-            // Track fog distance on first hit
-            if (first_hit) {
-                fog_distance = billboard_hit.t;
-                first_hit = false;
-            }
-
-            // Billboards are unlit (emissive) - just use the texture color
-            // TODO: Future expansion - add lighting for certain billboard types
-            let billboard_lit = billboard_color.rgb;
-
-            // Front-to-back compositing
-            let opacity = billboard_color.a;
-            accum_color += billboard_lit * opacity * (1.0 - accum_alpha);
-            accum_alpha += opacity * (1.0 - accum_alpha);
-
-            // Check if fully opaque
-            if (opacity >= 0.99 || accum_alpha >= 0.99) {
-                accum_alpha = 1.0;
-                break;
-            }
-
-            // Continue ray past billboard
-            ro = ro + rd * (billboard_hit.t + 0.001);
-            continue;
-        }
-
-        // Handle geometry hit
         if (!hit.hit) {
-            // Hit sky - blend with accumulated alpha
-            let sky_color = sky_rgb * (1.0 - accum_alpha);
-            accum_color += sky_color;
-            accum_alpha = 1.0;
+            radiance += throughput * sky_rgb;
             break;
         }
 
-        // Track distance from camera (only first hit counts for fog)
-        if (first_hit) {
-            fog_distance = hit.t; // Simple: just use the ray parameter distance
-            first_hit = false;
-        }
-
-        // Reconstruct hit information
         let tri = hit.tri;
         let i0 = indices3d.data[3u * tri + 0u];
         let i1 = indices3d.data[3u * tri + 1u];
@@ -560,115 +504,138 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let v1 = verts3d.data[i1];
         let v2 = verts3d.data[i2];
 
-        // Barycentric interpolation
         let w = 1.0 - hit.u - hit.v;
+        let n0 = vec3<f32>(v0.normal[0], v0.normal[1], v0.normal[2]);
+        let n1 = vec3<f32>(v1.normal[0], v1.normal[1], v1.normal[2]);
+        let n2 = vec3<f32>(v2.normal[0], v2.normal[1], v2.normal[2]);
+        var N = normalize(w * n0 + hit.u * n1 + hit.v * n2);
 
-        // Interpolate smooth normal
-        var N = normalize(v0.normal * w + v1.normal * hit.u + v2.normal * hit.v);
+        let p0 = vec3<f32>(v0.pos[0], v0.pos[1], v0.pos[2]);
+        let p1 = vec3<f32>(v1.pos[0], v1.pos[1], v1.pos[2]);
+        let p2 = vec3<f32>(v2.pos[0], v2.pos[1], v2.pos[2]);
 
-        // Hit position
-        let P = ro + rd * hit.t;
+        // Sample textures using header helpers
+        let albedo_rgba = sv_tri_sample_albedo(i0, i1, i2, hit.u, hit.v);
+        let mats_rgba = sv_tri_sample_rmoe(i0, i1, i2, hit.u, hit.v);
+        let mat = unpack_material(mats_rgba);
 
-        // Sample albedo and material
-        var albedo = sv_tri_sample_albedo(i0, i1, i2, hit.u, hit.v);
-        // Convert user-defined sRGB colors to linear space for PBR calculations
-        albedo = vec4<f32>(pow(albedo.rgb, vec3<f32>(2.2)), albedo.a);
+        let albedo = pow(albedo_rgba.rgb, vec3<f32>(2.2));
+        let opacity = albedo_rgba.a * mat.opacity;
 
-        let mat_data = sv_tri_sample_rmoe(i0, i1, i2, hit.u, hit.v);
-        let mat = unpack_material(mat_data);
-
-        // Apply bump mapping
-        let bump_strength = select(1.0, U.gp5.z, U.gp5.z >= 0.0);
-        if (bump_strength > 0.0 && length(mat.normal) > 0.1) {
-            let TBN = sv_tri_tbn(v0.pos, v1.pos, v2.pos, v0.uv, v1.uv, v2.uv);
-            let N_ts = mat.normal;
-            let N_ws = normalize(TBN * N_ts);
-            N = normalize(mix(N, N_ws, bump_strength));
+        // Normal map perturbation using header TBN
+        let nrm_map = vec3<f32>(mat.normal.xy, mat.normal.z);
+        if (length(nrm_map.xy) > 1e-5) {
+            let TBN = sv_tri_tbn(
+                vec3<f32>(v0.pos[0], v0.pos[1], v0.pos[2]),
+                vec3<f32>(v1.pos[0], v1.pos[1], v1.pos[2]),
+                vec3<f32>(v2.pos[0], v2.pos[1], v2.pos[2]),
+                vec2<f32>(v0.uv[0], v0.uv[1]),
+                vec2<f32>(v1.uv[0], v1.uv[1]),
+                vec2<f32>(v2.uv[0], v2.uv[1])
+            );
+            let mapped = normalize(TBN * nrm_map);
+            N = normalize(mix(N, mapped, clamp(U.gp5.z, 0.0, 1.0)));
         }
 
-        // Two-sided lighting
-        if (dot(N, rd) > 0.0) { N = -N; }
+        let hit_pos = ro + dir * hit.t;
+        let V = -dir; // View direction
 
-        let V = -rd;
-
-        // Compute ambient occlusion
-        let ao = compute_ao(P, N, P + vec3<f32>(f32(px), f32(py), f32(bounce)));
-
-        // PBR direct lighting
-        let direct = pbr_lighting(P, N, V, albedo.rgb, mat);
-
-        // Ambient contribution (already in linear space from CPU)
-        let ambient_color = U.gp3.xyz; // User-defined, no minimum clamp
-
-        // Sky contribution: combine orientation and occlusion
-        // How much the surface faces upward (0.0 = horizontal, 1.0 = straight up)
-        let sky_factor = max(dot(N, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
-        let max_sky_dist = select(50.0, U.gp6.y, U.gp6.y >= 0.0);
-
-        var sky_contribution = vec3<f32>(0.0);
-        // Only trace sky visibility if enabled and surface faces upward
-        if (max_sky_dist > 0.0 && sky_factor > 0.0) {
-            // Ray trace in reflection direction to check occlusion
-            let sky_dir = reflect(rd, N);
-            // Only trace if reflection actually points upward (sky is above)
-            let sky_dir_up = max(dot(sky_dir, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
-            let sky_visibility = select(0.0, trace_shadow(P, sky_dir, max_sky_dist), sky_dir_up > 0.0);
-            // Combine: orientation determines amount, ray trace determines visibility
-            sky_contribution = sky_rgb * sky_factor * sky_visibility;
+        // Emissive contribution (direct hit on light)
+        if (mat.emissive > 0.0) {
+            radiance += throughput * albedo * mat.emissive;
         }
 
-        // Combine ambient (uniform) and sky (directional based on upward facing)
-        let ambient = (ambient_color * ambient_strength + sky_contribution) * albedo.rgb * ao;
+        // Handle transparency: skip shading
+        if (opacity < 0.999) {
+            ro = hit_pos + dir * 0.001;
+            continue;
+        }
 
-        // Emissive contribution (self-illumination, multiplied by 2.0 for visibility)
-        let emissive = albedo.rgb * mat.emissive * 2.0;
+        // ===== Next Event Estimation: Direct light sampling =====
+        // Sample ALL lights (simple but correct for small light counts)
+        for (var li: u32 = 0u; li < U.lights_count; li = li + 1u) {
+            let light = sd_light(li);
+            let light_pos = light.position.xyz;
+            let light_color = light.color.xyz;
+            let light_intensity = light.params0.x * light.params1.x;
 
-        // Combine lighting for this layer
-        var layer_color = direct + ambient + emissive;
+            let to_light = light_pos - hit_pos;
+            let light_dist = length(to_light);
+            let L = normalize(to_light);
+            // Two-sided lighting: take absolute value for Cornell box with inverted normals
+            let NdotL = abs(dot(N, L));
 
-        // Calculate layer opacity (from material and texture alpha)
-        let layer_opacity = albedo.a * mat.opacity;
+            if (NdotL > 0.0) {
+                // Check visibility to light
+                let shadow = trace_shadow(hit_pos, L, light_dist);
 
-        // Handle opaque vs transparent surfaces differently
-        if (layer_opacity >= 0.99) {
-            // Fully opaque - blend any previous transparent layers and use this color
-            accum_color += layer_color * (1.0 - accum_alpha);
-            accum_alpha = 1.0;
-            break;
-        } else {
-            // Transparent - front-to-back alpha compositing
-            accum_color += layer_color * layer_opacity * (1.0 - accum_alpha);
-            accum_alpha += layer_opacity * (1.0 - accum_alpha);
+                if (shadow > 0.01) {
+                    // Distance attenuation
+                    let dist2 = max(light_dist * light_dist, 1e-6);
+                    let attenuation = light_intensity / dist2;
 
-            // Check if we've accumulated enough opacity to stop
-            if (accum_alpha >= 0.99) {
-                accum_alpha = 1.0;
-                break;
+                    // Cook-Torrance BRDF evaluation
+                    let F0 = mix(vec3<f32>(0.04), albedo, mat.metallic);
+                    let H = normalize(V + L);
+
+                    let NdotV = max(dot(N, V), 0.0);
+                    let NDF = distribution_ggx(N, H, mat.roughness);
+                    let G = geometry_smith(N, V, L, mat.roughness);
+                    let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
+
+                    let numerator = NDF * G * F;
+                    let denominator = 4.0 * NdotV * NdotL + 1e-7;
+                    let specular = numerator / denominator;
+
+                    // Energy conservation
+                    let kS = F;
+                    let kD = (vec3<f32>(1.0) - kS) * (1.0 - mat.metallic);
+
+                    let brdf = kD * albedo / PI + specular;
+                    let incoming_light = light_color * attenuation * shadow;
+
+                    // Add direct lighting contribution
+                    radiance += throughput * brdf * incoming_light * NdotL;
+                }
             }
+        }
 
-            // Continue ray from just past this surface
-            ro = P + rd * 0.001;
+        // ===== Indirect lighting: Diffuse bounce =====
+        // Use cosine-weighted hemisphere sampling for diffuse surfaces
+        let xi = hash33(vec3<f32>(f32(px + bounce * 3u), f32(py), f32(U.anim_counter)));
+        let onb = build_onb(N);
+        let hemi = cosine_sample_hemisphere(xi.x, xi.y);
+        let new_dir = normalize(onb * hemi);
+
+        // Update throughput with diffuse BRDF (cosine term cancels with PDF)
+        let F0 = mix(vec3<f32>(0.04), albedo, mat.metallic);
+        let kD = (vec3<f32>(1.0) - F0) * (1.0 - mat.metallic);
+        throughput *= kD * albedo;
+
+        ro = hit_pos + new_dir * 0.001;
+        dir = new_dir;
+
+        // Russian roulette after a few bounces
+        if (bounce >= 2u) {
+            let p = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.05, 0.95);
+            let rr = hash13(vec3<f32>(f32(px * 7u), f32(py * 11u), f32(bounce)));
+            if (rr > p) { break; }
+            throughput /= p;
         }
     }
 
-    // Apply fog based on distance traveled
-    var final_color = accum_color;
+    let final_color = radiance;
 
-    let fog_density = U.gp4.w;
-    if (fog_density > 0.0) {
-        // Exponential squared fog: fog_amount = density * distance²
-        let fog_amount = fog_density * fog_distance * fog_distance;
-        let fog_factor = clamp(exp(-fog_amount), 0.0, 1.0);
-        let fog_color = U.gp4.xyz; // Already in linear space from CPU
-
-        // Mix between scene color and fog color based on fog factor
-        // fog_factor = 1.0 means no fog (close), 0.0 means full fog (far)
-        final_color = mix(fog_color, final_color, fog_factor);
+    // Accumulate over frames using ping-pong targets; fall back to direct write on first frame.
+    // Read previous frame as linear (compute target stores raw linear values).
+    let prev = textureSampleLevel(prev_layer, atlas_smp, cam_uv, 0.0).rgb;
+    // Treat anim_counter as sample count (starting at 0 on first frame).
+    let sample_idx = max(f32(U.anim_counter) + 1.0, 1.0);
+    var accum_lin = final_color;
+    if (sample_idx > 1.0) {
+        accum_lin = prev + (final_color - prev) / sample_idx;
     }
 
-    // Apply tone mapping and gamma to accumulated color
-    final_color = final_color / (final_color + vec3<f32>(1.0));
-    final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
-
-    sv_write(px, py, vec4<f32>(final_color, accum_alpha));
+    // Store linear; compositing with AlphaLinear will handle sRGB encoding for display.
+    sv_write(px, py, vec4<f32>(accum_lin, 1.0));
 }

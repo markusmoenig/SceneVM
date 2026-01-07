@@ -56,6 +56,8 @@ fn pack_material(
 
 pub struct CornellBox {
     vm: SceneVM,
+    frame_index: u32,
+    last_size: (u32, u32),
 }
 
 impl TheTrait for CornellBox {
@@ -65,16 +67,27 @@ impl TheTrait for CornellBox {
     {
         Self {
             vm: SceneVM::new(100, 100),
+            frame_index: 0,
+            last_size: (0, 0),
         }
     }
 
     fn init(&mut self, _ctx: &mut TheContext) {
-        // if let Some(bytes) = Embedded::get("3d_body_pbr_raytraced.wgsl") {
-        //     let source = std::str::from_utf8(bytes.data.as_ref())
-        //         .unwrap_or("")
-        //         .to_string();
-        //     self.vm.execute(Atom::SetSource3D(source));
-        // }
+        if let Some(bytes) = Embedded::get("3d_body_pbr_raytraced.wgsl") {
+            let source = std::str::from_utf8(bytes.data.as_ref())
+                .unwrap_or("")
+                .to_string();
+            self.vm.execute(Atom::SetSource3D(source));
+        }
+        // Enable per-frame accumulation on the base VM layer.
+        self.vm.vm.set_ping_pong_enabled(true);
+        // Display layer: composite with linear-aware alpha so we don't double-gamma the path trace.
+        self.vm
+            .vm
+            .set_blend_mode(scenevm::LayerBlendMode::AlphaLinear);
+
+        // Disable debug logging
+        self.vm.set_layer_activity_logging(false);
 
         // Create unique IDs for our materials
         let red_wall_id = Uuid::new_v4();
@@ -376,6 +389,17 @@ impl TheTrait for CornellBox {
     }
 
     fn draw(&mut self, pixels: &mut [u8], ctx: &mut TheContext) {
+        let size = (ctx.width as u32, ctx.height as u32);
+        if size != self.last_size {
+            self.frame_index = 0; // restart accumulation on resize
+            self.last_size = size;
+        }
+
+        // Advance accumulation frame counter and pass to shader
+        self.frame_index = self.frame_index.wrapping_add(1);
+        self.vm
+            .execute(Atom::SetAnimationCounter(self.frame_index as usize));
+
         // No rotation - keep the Cornell box stationary
         self.vm
             .render_frame(pixels, ctx.width as u32, ctx.height as u32);

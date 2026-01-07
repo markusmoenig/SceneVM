@@ -560,6 +560,15 @@ pub enum RenderMode {
     Sdf,
 }
 
+/// How a VM layer should be composited over the previous result.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LayerBlendMode {
+    /// Default alpha blending in sRGB.
+    Alpha,
+    /// Decode destination to linear, blend in linear, encode back to sRGB. Useful for accum/displays.
+    AlphaLinear,
+}
+
 pub struct VM {
     shared_atlas: SharedAtlas,
     pub chunks_map: FxHashMap<Uuid, Chunk>,
@@ -567,10 +576,16 @@ pub struct VM {
 
     pub animation_counter: usize,
     pub render_mode: RenderMode,
+    pub blend_mode: LayerBlendMode,
 
     pub gpu: Option<VMGpu>,
     // Intermediate texture for this VM layer (for compositing)
     pub layer_texture: Option<crate::Texture>,
+    // Optional ping-pong textures when enabled (front index selects current composited view)
+    ping_pong_textures: Option<[crate::Texture; 2]>,
+    ping_pong_front: usize,
+    ping_pong_enabled: bool,
+    prev_dummy: Option<crate::Texture>,
     // --- Compute pipeline params (shared by 2D/3D)
     pub background: Vec4<f32>,
     pub gp0: Vec4<f32>,
@@ -642,17 +657,218 @@ impl VM {
         self.enabled
     }
 
-    /// Ensure the layer texture exists and matches the given size
-    pub(crate) fn ensure_layer_texture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let needs_recreate = match &self.layer_texture {
-            None => true,
-            Some(tex) => tex.width != width || tex.height != height,
-        };
+    /// Enable/disable ping-pong rendering for this VM. Disabling drops the extra textures.
+    pub fn set_ping_pong_enabled(&mut self, enabled: bool) {
+        if self.ping_pong_enabled != enabled {
+            self.ping_pong_enabled = enabled;
+            self.ping_pong_front = 0;
+            if !enabled {
+                self.ping_pong_textures = None;
+            }
+        }
+    }
 
-        if needs_recreate {
-            let mut tex = crate::Texture::new(width, height);
+    pub fn ping_pong_enabled(&self) -> bool {
+        self.ping_pong_enabled
+    }
+
+    fn ensure_prev_dummy(&mut self, device: &wgpu::Device) -> wgpu::TextureView {
+        if self.prev_dummy.is_none() {
+            let mut tex = crate::Texture::new(1, 1);
+            tex.data = vec![0, 0, 0, 0];
             tex.ensure_gpu_with(device);
-            self.layer_texture = Some(tex);
+            self.prev_dummy = Some(tex);
+        }
+        self.prev_dummy
+            .as_ref()
+            .unwrap()
+            .gpu
+            .as_ref()
+            .unwrap()
+            .view
+            .clone()
+    }
+
+    /// Ensure the layer texture(s) exist and match the given size
+    pub(crate) fn ensure_layer_texture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if self.ping_pong_enabled {
+            let needs_recreate = self
+                .ping_pong_textures
+                .as_ref()
+                .map(|pair| {
+                    pair[0].width != width
+                        || pair[0].height != height
+                        || pair[1].width != width
+                        || pair[1].height != height
+                })
+                .unwrap_or(true);
+
+            if needs_recreate {
+                let mut a = crate::Texture::new(width, height);
+                let mut b = crate::Texture::new(width, height);
+                a.ensure_gpu_with(device);
+                b.ensure_gpu_with(device);
+                self.ping_pong_textures = Some([a, b]);
+                self.ping_pong_front = 0;
+            }
+        } else {
+            let needs_recreate = match &self.layer_texture {
+                None => true,
+                Some(tex) => tex.width != width || tex.height != height,
+            };
+
+            if needs_recreate {
+                let mut tex = crate::Texture::new(width, height);
+                tex.ensure_gpu_with(device);
+                self.layer_texture = Some(tex);
+            }
+        }
+    }
+
+    /// View for compositing (current front buffer)
+    pub(crate) fn composite_texture(&self) -> Option<&crate::Texture> {
+        if self.ping_pong_enabled {
+            if self.activity_logging {
+                println!(
+                    "[VM Layer {}] composite_texture: returning buffer[{}]",
+                    self.layer_index, self.ping_pong_front
+                );
+            }
+            self.ping_pong_textures
+                .as_ref()
+                .map(|pair| &pair[self.ping_pong_front])
+        } else {
+            self.layer_texture.as_ref()
+        }
+    }
+
+    /// Returns write/view pair plus the index that will become the new front after this frame.
+    fn prepare_layer_views(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::TextureView, wgpu::TextureView, usize) {
+        self.ensure_layer_texture(device, width, height);
+        let bg = self.background;
+
+        if self.ping_pong_enabled {
+            let pair = self
+                .ping_pong_textures
+                .as_ref()
+                .expect("ping-pong textures should exist when enabled");
+            let read_idx = self.ping_pong_front;
+            let write_idx = 1 - read_idx;
+
+            if self.activity_logging {
+                println!(
+                    "[VM Layer {}] prepare_layer_views: front={}, read_idx={}, write_idx={}, anim_counter={}",
+                    self.layer_index,
+                    self.ping_pong_front,
+                    read_idx,
+                    write_idx,
+                    self.animation_counter
+                );
+            }
+
+            let read_view = pair[read_idx].gpu.as_ref().unwrap().view.clone();
+            let write_view = pair[write_idx].gpu.as_ref().unwrap().view.clone();
+
+            // For ping-pong accumulation: Clear BOTH buffers on first frame (anim_counter <= 1)
+            // This ensures the read buffer doesn't contain garbage on frame 1
+            // We check <= 1 because user code typically increments before setting
+            if self.animation_counter <= 1 {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("clear-pingpong-layers"),
+                });
+
+                // Clear the write buffer
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("clear-pingpong-write"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &write_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: bg.x as f64,
+                                g: bg.y as f64,
+                                b: bg.z as f64,
+                                a: bg.w as f64,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                // Clear the read buffer (prev frame) to avoid garbage on first frame
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("clear-pingpong-read"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &read_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: bg.x as f64,
+                                g: bg.y as f64,
+                                b: bg.z as f64,
+                                a: bg.w as f64,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                queue.submit(Some(encoder.finish()));
+            }
+
+            (write_view, read_view, write_idx)
+        } else {
+            let view = self
+                .layer_texture
+                .as_ref()
+                .expect("layer texture should exist")
+                .gpu
+                .as_ref()
+                .unwrap()
+                .view
+                .clone();
+            let prev_view = self.ensure_prev_dummy(device);
+
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("clear-layer"),
+            });
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear-layer-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: bg.x as f64,
+                            g: bg.y as f64,
+                            b: bg.z as f64,
+                            a: bg.w as f64,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            queue.submit(Some(encoder.finish()));
+
+            (view.clone(), prev_view, self.ping_pong_front)
         }
     }
 
@@ -673,6 +889,14 @@ impl VM {
         if self.activity_logging {
             println!("[SceneVM][Layer {}] {}", self.layer_index, msg.as_ref());
         }
+    }
+
+    pub fn set_blend_mode(&mut self, mode: LayerBlendMode) {
+        self.blend_mode = mode;
+    }
+
+    pub fn blend_mode(&self) -> LayerBlendMode {
+        self.blend_mode
     }
 
     fn sanitize_billboard_axes(
@@ -1268,8 +1492,13 @@ impl VM {
             current_chunk: None,
             animation_counter: 0,
             render_mode: RenderMode::Compute2D,
+            blend_mode: LayerBlendMode::Alpha,
             gpu: None,
             layer_texture: None,
+            ping_pong_textures: None,
+            ping_pong_front: 0,
+            ping_pong_enabled: false,
+            prev_dummy: None,
             background: Vec4::new(1.0, 0.8, 0.2, 1.0),
             palette: [[0.0; 4]; 256],
             palette_dirty: true,
@@ -2066,6 +2295,17 @@ impl VM {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    // previous layer texture (sampled) for ping-pong accumulation
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -2198,6 +2438,17 @@ impl VM {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    // previous layer texture (sampled) for ping-pong accumulation
+                    binding: 14,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -2253,6 +2504,17 @@ impl VM {
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    // previous layer texture (sampled) for ping-pong accumulation
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -2408,7 +2670,8 @@ impl VM {
         self.init_compute(device)?;
         self.upload_tile_metadata_to_gpu(device);
         // Ensure layer texture exists and matches size
-        self.ensure_layer_texture(device, fb_w, fb_h);
+        let (write_view, prev_view, next_front) =
+            self.prepare_layer_views(device, queue, fb_w, fb_h);
         // Update uniforms
         let m = self.transform2d;
         let m_inv = mat3_inverse_f32(&m).unwrap_or(Mat3::<f32>::identity());
@@ -2580,14 +2843,6 @@ impl VM {
 
         // Build bind group with layer texture view and atlas, plus 2D geometry SSBOs
         let g = self.gpu.as_mut().unwrap();
-        let view = &self
-            .layer_texture
-            .as_ref()
-            .unwrap()
-            .gpu
-            .as_ref()
-            .unwrap()
-            .view;
         g.u2d_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vm-u2d-bg"),
             layout: g.u2d_bgl.as_ref().unwrap(),
@@ -2598,7 +2853,7 @@ impl VM {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(view),
+                    resource: wgpu::BindingResource::TextureView(&write_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -2644,6 +2899,10 @@ impl VM {
                     binding: 12,
                     resource: wgpu::BindingResource::Sampler(&g.sampler_linear),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(&prev_view),
+                },
             ],
         }));
         // Dispatch
@@ -2674,6 +2933,9 @@ impl VM {
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         queue.submit(Some(encoder.finish()));
+        if self.ping_pong_enabled {
+            self.ping_pong_front = next_front;
+        }
         Ok(())
     }
 
@@ -2691,7 +2953,8 @@ impl VM {
         }
         self.init_compute(device)?;
         self.upload_tile_metadata_to_gpu(device);
-        self.ensure_layer_texture(device, fb_w, fb_h);
+        let (write_view, prev_view, next_front) =
+            self.prepare_layer_views(device, queue, fb_w, fb_h);
 
         // --- Uniforms ---
         let m = self.transform3d;
@@ -3042,16 +3305,6 @@ impl VM {
             ));
         }
 
-        // Avoid borrowing self immutably while we need &mut for bind group creation.
-        let layer_view = self
-            .layer_texture
-            .as_ref()
-            .unwrap()
-            .gpu
-            .as_ref()
-            .unwrap()
-            .view
-            .clone();
         let (atlas_view, atlas_mat_view) = self
             .shared_atlas
             .texture_views()
@@ -3070,7 +3323,7 @@ impl VM {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&layer_view),
+                        resource: wgpu::BindingResource::TextureView(&write_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -3112,6 +3365,10 @@ impl VM {
                         binding: 13,
                         resource: g.tile_frames_ssbo.as_ref().unwrap().as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 14,
+                        resource: wgpu::BindingResource::TextureView(&prev_view),
+                    },
                 ],
             }));
         }
@@ -3133,6 +3390,15 @@ impl VM {
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         queue.submit(Some(encoder.finish()));
+        if self.ping_pong_enabled {
+            if self.activity_logging {
+                println!(
+                    "[VM Layer {}] Ping-pong swap: {} -> {}, anim_counter: {}",
+                    self.layer_index, self.ping_pong_front, next_front, self.animation_counter
+                );
+            }
+            self.ping_pong_front = next_front;
+        }
 
         Ok(())
     }
@@ -3150,7 +3416,8 @@ impl VM {
             self.init_gpu(device)?;
         }
         self.init_compute(device)?;
-        self.ensure_layer_texture(device, fb_w, fb_h);
+        let (write_view, prev_view, next_front) =
+            self.prepare_layer_views(device, queue, fb_w, fb_h);
         self.upload_atlas_to_gpu_with(device, queue);
         let c = self.camera3d;
 
@@ -3202,14 +3469,6 @@ impl VM {
         self.upload_sdf_data_to_gpu(device);
 
         let g = self.gpu.as_mut().unwrap();
-        let view = &self
-            .layer_texture
-            .as_ref()
-            .unwrap()
-            .gpu
-            .as_ref()
-            .unwrap()
-            .view;
         let (atlas_tex_view, _atlas_mat_tex_view) = self
             .shared_atlas
             .texture_views()
@@ -3224,7 +3483,7 @@ impl VM {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(view),
+                    resource: wgpu::BindingResource::TextureView(&write_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -3237,6 +3496,10 @@ impl VM {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&g.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&prev_view),
                 },
             ],
         }));
@@ -3266,6 +3529,9 @@ impl VM {
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         queue.submit(Some(encoder.finish()));
+        if self.ping_pong_enabled {
+            self.ping_pong_front = next_front;
+        }
 
         Ok(())
     }

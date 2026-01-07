@@ -24,6 +24,7 @@ struct U2D {
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(3) var atlas_smp: sampler;
+@group(0) @binding(13) var prev_layer: texture_2d<f32>;
 struct Vert {
   pos: vec2<f32>,
   uv: vec2<f32>,

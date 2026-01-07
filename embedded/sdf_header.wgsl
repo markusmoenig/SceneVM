@@ -34,6 +34,7 @@ struct USdf {
 
 @group(0) @binding(0) var<uniform> U: USdf;
 @group(0) @binding(1) var color_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(5) var prev_layer: texture_2d<f32>;
 struct SdfDataBuffer {
   data: array<vec4<f32>>,
 };
