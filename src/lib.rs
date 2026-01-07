@@ -116,7 +116,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "windowing"))]
 use vek::Mat3;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -1599,17 +1599,23 @@ impl SceneVM {
                 .and_then(|g| g.map_ready.as_ref())
                 .is_some();
 
+            // If a readback is in flight, try to finish it and present whatever CPU pixels we have.
+            // When the download completes, continue on to kick off the next frame immediately
+            // instead of skipping a render for a whole call (which caused visible stutter on WASM).
+            let mut presented_frame = false;
             if inflight {
                 let ready = gpu.surface.try_finish_download_from_gpu();
                 gpu.surface.copy_to_slice(out_pixels, out_w, out_h);
-                return if ready {
-                    RenderResult::Presented
-                } else {
-                    RenderResult::ReadbackPending
-                };
+                if !ready {
+                    return RenderResult::ReadbackPending;
+                }
+                presented_frame = true;
+            } else {
+                // No download in flight yet; present whatever pixels are already on the CPU.
+                gpu.surface.copy_to_slice(out_pixels, out_w, out_h);
             }
 
-            // No readback in flight: render a new frame and start a download.
+            // Render a new frame and start a download for the next call.
             let (w, h) = self.size;
             SceneVM::draw_all_vms(
                 base_vm,
@@ -1627,9 +1633,11 @@ impl SceneVM {
             let queue = gpu.queue.clone();
             gpu.surface.download_from_gpu_with(&device, &queue);
 
-            // Present the last completed CPU pixels (may be the previous frame) while we wait.
-            gpu.surface.copy_to_slice(out_pixels, out_w, out_h);
-            RenderResult::ReadbackPending
+            if presented_frame {
+                RenderResult::Presented
+            } else {
+                RenderResult::ReadbackPending
+            }
         }
     }
 
@@ -1867,14 +1875,14 @@ impl SceneVM {
 // Minimal cross-platform app runner
 // -------------------------
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "windowing"))]
 struct NativeRenderCtx {
     size: (u32, u32),
     last_result: RenderResult,
     present_called: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "windowing"))]
 impl NativeRenderCtx {
     fn new(size: (u32, u32)) -> Self {
         Self {
@@ -1896,7 +1904,7 @@ impl NativeRenderCtx {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "windowing"))]
 impl SceneVMRenderCtx for NativeRenderCtx {
     fn size(&self) -> (u32, u32) {
         self.size
