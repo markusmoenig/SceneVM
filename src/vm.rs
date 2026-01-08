@@ -778,7 +778,9 @@ impl VM {
             // For ping-pong accumulation: Clear BOTH buffers on first frame (anim_counter <= 1)
             // This ensures the read buffer doesn't contain garbage on frame 1
             // We check <= 1 because user code typically increments before setting
-            if self.animation_counter <= 1 {
+            // Clear only on the very first frame so we don't wipe the previous result
+            // on frame 1 (the first ping-pong read).
+            if self.animation_counter == 0 {
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("clear-pingpong-layers"),
                 });
@@ -2482,7 +2484,7 @@ impl VM {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },

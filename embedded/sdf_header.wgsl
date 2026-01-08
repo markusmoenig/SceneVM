@@ -39,7 +39,7 @@ struct SdfDataBuffer {
   data: array<vec4<f32>>,
 };
 
-@group(0) @binding(2) var<storage, read> SDF_DATA: SdfDataBuffer;
+@group(0) @binding(2) var<storage, read_write> SDF_DATA: SdfDataBuffer;
 @group(0) @binding(3) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(4) var atlas_smp: sampler;
 
@@ -51,6 +51,11 @@ fn sdf_data_len() -> u32 {
 fn sdf_data_at(i: u32) -> vec4<f32> {
   let len = max(sdf_data_len(), 1u);
   return SDF_DATA.data[i % len];
+}
+
+fn set_sdf_data_at(i: u32, v: vec4<f32>) {
+  let len = max(sdf_data_len(), 1u);
+  SDF_DATA.data[i % len] = v;
 }
 
 fn clear_if_needed(px: vec2<u32>) {
