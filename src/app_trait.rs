@@ -14,7 +14,7 @@ pub trait SceneVMApp {
     fn target_fps(&self) -> Option<f32> {
         None
     }
-    
+
     /// Called by the runner before init() to inform the app of its runtime mode
     /// `is_native`: true = native wgpu runner (needs file buttons)
     ///              false = platform wrapper (Xcode, uses document system)
@@ -40,7 +40,7 @@ pub trait SceneVMApp {
         Vec::new()
     }
     /// Return `true` if the app wants an update/render this tick. Default is always true.
-    fn needs_update(&mut self) -> bool {
+    fn needs_update(&mut self, _vm: &SceneVM) -> bool {
         true
     }
     /// Resize callback with new logical size.

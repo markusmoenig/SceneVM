@@ -793,7 +793,7 @@ impl SceneVMApp for UiDemo {
         vm.set_active_vm(0);
     }
 
-    fn needs_update(&mut self) -> bool {
+    fn needs_update(&mut self, _vm: &SceneVM) -> bool {
         self.context.workspace.is_dirty()
     }
 

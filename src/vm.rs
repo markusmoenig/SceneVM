@@ -8,6 +8,10 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use rustc_hash::FxHashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use uuid::Uuid;
 use vek::{Mat3, Mat4, Vec3, Vec4};
 
@@ -585,6 +589,7 @@ pub struct VM {
     ping_pong_textures: Option<[crate::Texture; 2]>,
     ping_pong_front: usize,
     ping_pong_enabled: bool,
+    pub sdf_in_flight: Arc<AtomicBool>,
     prev_dummy: Option<crate::Texture>,
     // --- Compute pipeline params (shared by 2D/3D)
     pub background: Vec4<f32>,
@@ -607,6 +612,7 @@ pub struct VM {
     pub sdf_data_dirty: bool,
     pub palette: [[f32; 4]; 256],
     pub palette_dirty: bool,
+    pub sdf_last_submission: Option<wgpu::SubmissionIndex>,
 
     pub transform2d: Mat3<f32>,
     pub transform3d: Mat4<f32>,
@@ -668,8 +674,18 @@ impl VM {
         }
     }
 
+    /// Force the SDF in-flight flag to idle (used when the global queue is empty).
+    pub fn clear_sdf_in_flight(&self) {
+        self.sdf_in_flight.store(false, Ordering::Release);
+    }
+
     pub fn ping_pong_enabled(&self) -> bool {
         self.ping_pong_enabled
+    }
+
+    /// Returns true while the last SDF dispatch is still in flight on the GPU.
+    pub fn sdf_busy(&self) -> bool {
+        self.sdf_in_flight.load(Ordering::Acquire)
     }
 
     fn ensure_prev_dummy(&mut self, device: &wgpu::Device) -> wgpu::TextureView {
@@ -1500,6 +1516,7 @@ impl VM {
             ping_pong_textures: None,
             ping_pong_front: 0,
             ping_pong_enabled: false,
+            sdf_in_flight: Arc::new(AtomicBool::new(false)),
             prev_dummy: None,
             background: Vec4::new(1.0, 0.8, 0.2, 1.0),
             palette: [[0.0; 4]; 256],
@@ -1520,6 +1537,7 @@ impl VM {
             source_sdf,
             sdf_data: Vec::new(),
             sdf_data_dirty: true,
+            sdf_last_submission: None,
             transform2d: Mat3::identity(),
             transform3d: Mat4::identity(),
             lights: FxHashMap::default(),
@@ -3414,6 +3432,9 @@ impl VM {
         fb_w: u32,
         fb_h: u32,
     ) -> crate::SceneVMResult<()> {
+        if self.sdf_in_flight.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if self.gpu.is_none() {
             self.init_gpu(device)?;
         }
@@ -3530,7 +3551,11 @@ impl VM {
             let gy = (dispatch_h + 7) / 8;
             cpass.dispatch_workgroups(gx, gy, 1);
         }
-        queue.submit(Some(encoder.finish()));
+        let submit = queue.submit(Some(encoder.finish()));
+        self.sdf_in_flight.store(true, Ordering::Release);
+        self.sdf_last_submission = Some(submit);
+        // Drive wgpu callbacks so on_submitted_work_done can clear the in-flight flag.
+        let _ = device.poll(wgpu::PollType::Poll);
         if self.ping_pong_enabled {
             self.ping_pong_front = next_front;
         }

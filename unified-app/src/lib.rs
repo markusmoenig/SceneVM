@@ -101,7 +101,7 @@ impl SceneVMApp for TemplateApp {
         Some(30.0)
     }
 
-    fn needs_update(&mut self) -> bool {
+    fn needs_update(&mut self, _vm: &SceneVM) -> bool {
         true
     }
 
@@ -287,7 +287,7 @@ pub unsafe extern "C" fn unified_app_runner_resize(
 pub unsafe extern "C" fn unified_app_runner_render(ptr: *mut SceneVMAppRunner) -> i32 {
     if let Some(r) = unsafe { ptr.as_mut() } {
         // Always render if we haven't presented since last resize/loop iteration.
-        let should_render = r.app.needs_update() || !r.ctx.presented;
+        let should_render = r.app.needs_update(&r.vm) || !r.ctx.presented;
         if !should_render {
             // Re-use last result without doing any GPU work.
             return match r.ctx.last_result {
