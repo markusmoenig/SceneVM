@@ -7,13 +7,13 @@ use crate::{
     dynamic::{DynamicKind, DynamicObject},
 };
 use bytemuck::{Pod, Zeroable};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use uuid::Uuid;
-use vek::{Mat3, Mat4, Vec3, Vec4};
+use vek::{Mat3, Mat4, Vec2, Vec3, Vec4};
 
 // --- Scene-wide acceleration structure (BVH over all 3D geometry) ---
 #[derive(Debug, Clone, Default)]
@@ -49,6 +49,7 @@ pub enum GeoId {
     Triangle(u32),
     Terrain(i32, i32),
     Hole(u32, u32),
+    Gizmo(u32),
 }
 
 #[repr(C)]
@@ -3625,6 +3626,62 @@ impl VM {
         }
 
         best_geo.map(|id| (id, best_pos, best_t))
+    }
+
+    /// Collect all visible GeoIds of the requested variant whose screen-space projection
+    /// intersects the provided rectangle.
+    /// `rect_min` and `rect_max` are in screen pixels (top-left and bottom-right corners).
+    pub fn pick_geo_ids_in_rect(
+        &self,
+        fb_w: u32,
+        fb_h: u32,
+        rect_min: Vec2<f32>,
+        rect_max: Vec2<f32>,
+        target_kind: GeoId,
+        include_hidden: bool,
+    ) -> Vec<GeoId> {
+        if fb_w == 0 || fb_h == 0 {
+            return Vec::new();
+        }
+
+        let fb_w_f = fb_w as f32;
+        let fb_h_f = fb_h as f32;
+
+        let min_x = rect_min.x.min(rect_max.x);
+        let min_y = rect_min.y.min(rect_max.y);
+        let max_x = rect_min.x.max(rect_max.x);
+        let max_y = rect_min.y.max(rect_max.y);
+
+        let rect_min = Vec2::new(min_x.clamp(0.0, fb_w_f), min_y.clamp(0.0, fb_h_f));
+        let rect_max = Vec2::new(max_x.clamp(0.0, fb_w_f), max_y.clamp(0.0, fb_h_f));
+
+        if rect_min.x >= rect_max.x || rect_min.y >= rect_max.y {
+            return Vec::new();
+        }
+
+        let mut seen: FxHashSet<GeoId> = FxHashSet::default();
+
+        // Sample every pixel in the rectangle
+        let min_x_i = rect_min.x.floor() as u32;
+        let min_y_i = rect_min.y.floor() as u32;
+        let max_x_i = rect_max.x.ceil() as u32;
+        let max_y_i = rect_max.y.ceil() as u32;
+
+        for y in min_y_i..max_y_i {
+            for x in min_x_i..max_x_i {
+                let screen_uv = [x as f32 / fb_w_f, y as f32 / fb_h_f];
+
+                if let Some((geo_id, _, _)) =
+                    self.pick_geo_id_at_uv(fb_w, fb_h, screen_uv, include_hidden)
+                {
+                    if std::mem::discriminant(&geo_id) == std::mem::discriminant(&target_kind) {
+                        seen.insert(geo_id);
+                    }
+                }
+            }
+        }
+
+        seen.into_iter().collect()
     }
 
     /// Build a world-space ray from screen uv (0..1) using the current camera.
