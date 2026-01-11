@@ -1,5 +1,4 @@
 // pub mod app;
-use std::time::Duration;
 #[cfg(feature = "ui")]
 pub mod app_event;
 pub mod app_trait;
@@ -807,52 +806,6 @@ impl SceneVM {
     pub fn active_vm_mut(&mut self) -> &mut VM {
         self.vm_mut_by_index(self.active_vm_index)
             .expect("active VM index out of range")
-    }
-
-    /// True if any enabled VM in SDF mode has a dispatch still in flight.
-    pub fn sdf_busy(&self) -> bool {
-        let device = self.gpu.as_ref().map(|g| &g.device);
-        let poll_status = device.and_then(|d| d.poll(wgpu::PollType::Poll).ok());
-
-        let vm_is_busy = |vm: &VM| -> bool {
-            if !(vm.enabled && vm.render_mode == RenderMode::Sdf) {
-                return false;
-            }
-            // If we have a submission index, check/wait (non-blocking) for it.
-            if vm.sdf_in_flight.load(std::sync::atomic::Ordering::Acquire) {
-                if let (Some(d), Some(idx)) = (device, vm.sdf_last_submission.clone()) {
-                    if let Ok(status) = d.poll(wgpu::PollType::Wait {
-                        submission_index: Some(idx),
-                        timeout: Some(Duration::from_millis(0)),
-                    }) {
-                        if status.wait_finished() {
-                            vm.clear_sdf_in_flight();
-                        }
-                    }
-                }
-            }
-            // If the queue is empty, make sure we reset lingering flags.
-            if poll_status
-                .as_ref()
-                .map(|s| s.is_queue_empty())
-                .unwrap_or(false)
-            {
-                vm.clear_sdf_in_flight();
-            }
-            vm.sdf_in_flight.load(std::sync::atomic::Ordering::Acquire)
-        };
-
-        if let Some(base) = self.vm_ref_by_index(0) {
-            if vm_is_busy(base) {
-                return true;
-            }
-        }
-        for vm in &self.overlay_vms {
-            if vm_is_busy(vm) {
-                return true;
-            }
-        }
-        false
     }
 
     /// Ray-pick against the active VM layer using normalized screen UVs.
