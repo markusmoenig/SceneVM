@@ -3637,24 +3637,44 @@ impl VM {
         let max_x_i = rect_max.x.ceil() as u32;
         let max_y_i = rect_max.y.ceil() as u32;
 
-        use std::sync::Mutex;
-        let seen = Mutex::new(FxHashSet::default());
-
-        (min_y_i..max_y_i).into_par_iter().for_each(|y| {
-            for x in min_x_i..max_x_i {
-                let screen_uv = [x as f32 / fb_w_f, y as f32 / fb_h_f];
-
-                if let Some((geo_id, _, _)) =
-                    self.pick_geo_id_at_uv(fb_w, fb_h, screen_uv, include_hidden)
-                {
-                    if std::mem::discriminant(&geo_id) == std::mem::discriminant(&target_kind) {
-                        seen.lock().unwrap().insert(geo_id);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut seen = FxHashSet::default();
+            for y in min_y_i..max_y_i {
+                for x in min_x_i..max_x_i {
+                    let screen_uv = [x as f32 / fb_w_f, y as f32 / fb_h_f];
+                    if let Some((geo_id, _, _)) =
+                        self.pick_geo_id_at_uv(fb_w, fb_h, screen_uv, include_hidden)
+                    {
+                        if std::mem::discriminant(&geo_id) == std::mem::discriminant(&target_kind) {
+                            seen.insert(geo_id);
+                        }
                     }
                 }
             }
-        });
+            return seen.into_iter().collect();
+        }
 
-        seen.into_inner().unwrap().into_iter().collect()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::sync::Mutex;
+            let seen = Mutex::new(FxHashSet::default());
+            (min_y_i..max_y_i).into_par_iter().for_each(|y| {
+                for x in min_x_i..max_x_i {
+                    let screen_uv = [x as f32 / fb_w_f, y as f32 / fb_h_f];
+
+                    if let Some((geo_id, _, _)) =
+                        self.pick_geo_id_at_uv(fb_w, fb_h, screen_uv, include_hidden)
+                    {
+                        if std::mem::discriminant(&geo_id) == std::mem::discriminant(&target_kind) {
+                            seen.lock().unwrap().insert(geo_id);
+                        }
+                    }
+                }
+            });
+
+            return seen.into_inner().unwrap().into_iter().collect();
+        }
     }
 
     /// Build a world-space ray from screen uv (0..1) using the current camera.
