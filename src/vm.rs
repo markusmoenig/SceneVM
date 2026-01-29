@@ -3545,6 +3545,7 @@ impl VM {
         fb_h: u32,
         screen_uv: [f32; 2],
         include_hidden: bool,
+        include_billboards: bool,
     ) -> Option<(GeoId, Vec3<f32>, f32)> {
         if fb_w == 0 || fb_h == 0 {
             return None;
@@ -3597,6 +3598,84 @@ impl VM {
             }
         }
 
+        if include_billboards {
+            // Include dynamic billboards in hit testing (camera-facing quads).
+            for obj in &self.dynamic_objects {
+                if obj.kind != DynamicKind::BillboardTile {
+                    continue;
+                }
+
+                let half_w = (obj.width * 0.5).max(0.0);
+                let half_h = (obj.height * 0.5).max(0.0);
+                if !half_w.is_finite() || !half_h.is_finite() || half_w <= 0.0 || half_h <= 0.0 {
+                    continue;
+                }
+
+                // Transform center (with translation) and axes (direction only).
+                let center_v4 = m * Vec4::new(obj.center.x, obj.center.y, obj.center.z, 1.0);
+                let center_w = if center_v4.w != 0.0 { center_v4.w } else { 1.0 };
+                let center = Vec3::new(
+                    center_v4.x / center_w,
+                    center_v4.y / center_w,
+                    center_v4.z / center_w,
+                );
+
+                let axis_r_v4 = m * Vec4::new(
+                    obj.view_right.x * half_w,
+                    obj.view_right.y * half_w,
+                    obj.view_right.z * half_w,
+                    0.0,
+                );
+                let axis_u_v4 = m * Vec4::new(
+                    obj.view_up.x * half_h,
+                    obj.view_up.y * half_h,
+                    obj.view_up.z * half_h,
+                    0.0,
+                );
+
+                let axis_r = Vec3::new(axis_r_v4.x, axis_r_v4.y, axis_r_v4.z);
+                let axis_u = Vec3::new(axis_u_v4.x, axis_u_v4.y, axis_u_v4.z);
+
+                let normal = axis_r.cross(axis_u);
+                let normal_len = normal.magnitude();
+                if normal_len < 1e-6 || !normal_len.is_finite() {
+                    continue;
+                }
+
+                let denom = normal.dot(ray_dir);
+                if denom.abs() < 1e-6 {
+                    continue; // Ray parallel to billboard plane
+                }
+
+                let t = normal.dot(center - ray_origin) / denom;
+                if t <= 1e-5 || t >= best_t {
+                    continue;
+                }
+
+                let hit = ray_origin + ray_dir * t;
+                let rel = hit - center;
+
+                // Solve rel = u*axis_r + v*axis_u (works even if axes are not orthonormal).
+                let aa = axis_r.dot(axis_r);
+                let bb = axis_u.dot(axis_u);
+                let ab = axis_r.dot(axis_u);
+                let denom_uv = aa * bb - ab * ab;
+                if denom_uv.abs() < 1e-8 {
+                    continue;
+                }
+                let ar = rel.dot(axis_r);
+                let au = rel.dot(axis_u);
+                let u = (ar * bb - au * ab) / denom_uv;
+                let v = (au * aa - ar * ab) / denom_uv;
+
+                if u.abs() <= 1.0 + 1e-4 && v.abs() <= 1.0 + 1e-4 {
+                    best_t = t;
+                    best_geo = Some(obj.id);
+                    best_pos = hit;
+                }
+            }
+        }
+
         best_geo.map(|id| (id, best_pos, best_t))
     }
 
@@ -3611,6 +3690,7 @@ impl VM {
         rect_max: Vec2<f32>,
         target_kind: GeoId,
         include_hidden: bool,
+        include_billboards: bool,
     ) -> Vec<GeoId> {
         if fb_w == 0 || fb_h == 0 {
             return Vec::new();
@@ -3643,9 +3723,13 @@ impl VM {
             for y in min_y_i..max_y_i {
                 for x in min_x_i..max_x_i {
                     let screen_uv = [x as f32 / fb_w_f, y as f32 / fb_h_f];
-                    if let Some((geo_id, _, _)) =
-                        self.pick_geo_id_at_uv(fb_w, fb_h, screen_uv, include_hidden)
-                    {
+                    if let Some((geo_id, _, _)) = self.pick_geo_id_at_uv(
+                        fb_w,
+                        fb_h,
+                        screen_uv,
+                        include_hidden,
+                        include_billboards,
+                    ) {
                         if std::mem::discriminant(&geo_id) == std::mem::discriminant(&target_kind) {
                             seen.insert(geo_id);
                         }
@@ -3663,9 +3747,13 @@ impl VM {
                 for x in min_x_i..max_x_i {
                     let screen_uv = [x as f32 / fb_w_f, y as f32 / fb_h_f];
 
-                    if let Some((geo_id, _, _)) =
-                        self.pick_geo_id_at_uv(fb_w, fb_h, screen_uv, include_hidden)
-                    {
+                    if let Some((geo_id, _, _)) = self.pick_geo_id_at_uv(
+                        fb_w,
+                        fb_h,
+                        screen_uv,
+                        include_hidden,
+                        include_billboards,
+                    ) {
                         if std::mem::discriminant(&geo_id) == std::mem::discriminant(&target_kind) {
                             seen.lock().unwrap().insert(geo_id);
                         }

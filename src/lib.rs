@@ -815,9 +815,15 @@ impl SceneVM {
         fb_h: u32,
         screen_uv: [f32; 2],
         include_hidden: bool,
+        include_billboards: bool,
     ) -> Option<(GeoId, vek::Vec3<f32>, f32)> {
-        self.active_vm()
-            .pick_geo_id_at_uv(fb_w, fb_h, screen_uv, include_hidden)
+        self.active_vm().pick_geo_id_at_uv(
+            fb_w,
+            fb_h,
+            screen_uv,
+            include_hidden,
+            include_billboards,
+        )
     }
 
     /// Build a world-space ray from screen uv (0..1) using the active VM's camera and a provided framebuffer size.
