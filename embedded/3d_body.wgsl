@@ -246,9 +246,13 @@ fn sample_billboard(hit: BillboardHit) -> vec4<f32> {
     // Map UV to atlas coordinates based on repeat mode
     var atlas_uv: vec2<f32>;
 
+    let cmd = sd_billboard_cmd(hit.billboard_index);
+    let opacity = bitcast<f32>(cmd.params.z);
+    let uv = hit.uv;
+
     if (hit.repeat_mode == 1u) {
         // Repeat mode: wrap UVs and map into atlas sub-rect
-        let uv_wrapped = fract(hit.uv);
+        let uv_wrapped = fract(uv);
         atlas_uv = frame.ofs + uv_wrapped * frame.scale;
 
         // Clamp to avoid bleeding from neighboring tiles
@@ -259,11 +263,12 @@ fn sample_billboard(hit: BillboardHit) -> vec4<f32> {
         atlas_uv = clamp(atlas_uv, uv_min, uv_max);
     } else {
         // Scale mode (default): scale the tile to fit billboard size
-        atlas_uv = frame.ofs + hit.uv * frame.scale;
+        atlas_uv = frame.ofs + uv * frame.scale;
     }
 
     // Sample albedo from atlas
-    let color = textureSampleLevel(atlas_tex, atlas_smp, atlas_uv, 0.0);
+    var color = textureSampleLevel(atlas_tex, atlas_smp, atlas_uv, 0.0);
+    color.a = color.a * opacity;
 
     return color;
 }
@@ -276,9 +281,13 @@ fn sample_billboard_material(hit: BillboardHit) -> vec4<f32> {
     // Map UV to atlas coordinates based on repeat mode
     var atlas_uv: vec2<f32>;
 
+    let cmd = sd_billboard_cmd(hit.billboard_index);
+    let opacity = bitcast<f32>(cmd.params.z);
+    let uv = hit.uv;
+
     if (hit.repeat_mode == 1u) {
         // Repeat mode: wrap UVs and map into atlas sub-rect
-        let uv_wrapped = fract(hit.uv);
+        let uv_wrapped = fract(uv);
         atlas_uv = frame.ofs + uv_wrapped * frame.scale;
 
         // Clamp to avoid bleeding from neighboring tiles
@@ -289,7 +298,7 @@ fn sample_billboard_material(hit: BillboardHit) -> vec4<f32> {
         atlas_uv = clamp(atlas_uv, uv_min, uv_max);
     } else {
         // Scale mode (default): scale the tile to fit billboard size
-        atlas_uv = frame.ofs + hit.uv * frame.scale;
+        atlas_uv = frame.ofs + uv * frame.scale;
     }
 
     // Sample material from material atlas

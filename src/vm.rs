@@ -136,11 +136,11 @@ const SCENE_LIGHT_WORDS: u32 =
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct DynamicBillboardPod {
+ struct DynamicBillboardPod {
     pub center: [f32; 4],     // xyz + width
     pub axis_right: [f32; 4], // xyz + height
     pub axis_up: [f32; 4],    // xyz + repeat_mode (as f32)
-    pub params: [u32; 4],     // tile_index, kind, unused, unused
+    pub params: [u32; 4],     // tile_index, kind, opacity_bits, unused
 }
 
 #[allow(dead_code)]
@@ -1274,7 +1274,12 @@ impl VM {
                             axis_up.z,
                             obj.repeat_mode as u32 as f32,
                         ],
-                        params: [tile_index, DynamicKind::BillboardTile as u32, 0, 0],
+                        params: [
+                            tile_index,
+                            DynamicKind::BillboardTile as u32,
+                            obj.opacity.to_bits(),
+                            0,
+                        ],
                     });
                 }
             }

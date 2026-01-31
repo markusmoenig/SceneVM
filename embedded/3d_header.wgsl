@@ -93,7 +93,7 @@ struct DynBillboardCmd {
   center: vec4<f32>,       // xyz + width
   axis_right: vec4<f32>,   // xyz + height
   axis_up: vec4<f32>,      // xyz + repeat_mode
-  params: vec4<u32>,       // tile_index, kind, unused, unused
+  params: vec4<u32>,       // tile_index, kind, opacity_bits, unused
 };
 
 struct DynBillboardHit {

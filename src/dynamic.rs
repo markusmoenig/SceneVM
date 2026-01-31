@@ -42,6 +42,8 @@ pub struct DynamicObject {
     pub width: f32,
     pub height: f32,
     pub repeat_mode: RepeatMode,
+    /// Per-billboard opacity (1.0 = fully opaque).
+    pub opacity: f32,
 }
 
 impl Default for DynamicObject {
@@ -56,6 +58,7 @@ impl Default for DynamicObject {
             width: 1.0,
             height: 1.0,
             repeat_mode: RepeatMode::Scale,
+            opacity: 1.0,
         }
     }
 }
@@ -81,6 +84,7 @@ impl DynamicObject {
             width,
             height,
             repeat_mode: RepeatMode::Scale,
+            opacity: 1.0,
         }
     }
 
@@ -106,6 +110,12 @@ impl DynamicObject {
     /// Set the repeat mode for this billboard.
     pub fn with_repeat_mode(mut self, mode: RepeatMode) -> Self {
         self.repeat_mode = mode;
+        self
+    }
+
+    /// Set per-billboard opacity (1.0 = opaque).
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
         self
     }
 }
